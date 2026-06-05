@@ -1,0 +1,24 @@
+# === Backend ===
+server/__pycache__/
+server/**/__pycache__/
+server/.env
+server/*.pyc
+server/.venv/
+server/venv/
+
+# === Frontend ===
+app/node_modules/
+app/.expo/
+app/dist/
+app/.env
+app/*.tgz
+
+# === System ===
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
+
+# === Docker ===
+docker-compose.override.yml

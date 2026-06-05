@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell *)",
+      "Bash(docker --version)",
+      "Bash(pip install *)",
+      "Read(//mnt/f/Jing/**)",
+      "Bash(python -c \"from config import get_settings; s = get_settings\\(\\); print\\(f'config OK: {s.database_url[:30]}...'\\)\")",
+      "Bash(Select-Object -Last 5)",
+      "PowerShell(pip install *)"
+    ]
+  }
+}
