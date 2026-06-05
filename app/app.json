@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "晚安静静",
+    "slug": "jingjing",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "scheme": "jingjing",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.jingjing.app"
+    },
+    "android": {
+      "package": "com.jingjing.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#1a1a2e",
+        "foregroundImage": "./assets/adaptive-icon.png"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-status-bar"
+    ]
+  }
+}
