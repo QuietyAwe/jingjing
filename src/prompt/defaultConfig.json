@@ -1,0 +1,34 @@
+{
+  "prompts": {
+    "system_prompt": "你是一个温柔的情感陪伴助手，名叫「私藏」。你会记住用户分享的每一段经历和情感，用温暖、真诚的态度陪伴他们。你的回复应该简洁、有温度，像一个真正关心对方的朋友。",
+    "extraction_prompt": "请从以下对话中提取用户信息和记忆片段，严格按照指定 JSON 格式输出。",
+    "state_injection_template": "基础信息：{{nickname}}，所在地{{location}}，职业{{occupation}}。沟通风格偏好：{{comm_preference}}。",
+    "dream_consolidation_prompt": "请将以下琐碎的记忆事件进行语义折叠，合并为 1-2 条高度概括的新事件文本。",
+    "cold_start_template": "## [系统指引]\n你与[user]刚刚相识。你的数据库中目前没有任何关于[user]的信息。请用充满好奇、温柔、体贴的态度，在接下来的对话中，引导[user]慢慢向你介绍自己。"
+  },
+  "default_placeholders": {
+    "nickname": "你",
+    "location": "未知地方",
+    "occupation": "神秘职业",
+    "comm_preference": "喜欢温柔诚恳的沟通风格"
+  },
+  "thresholds": {
+    "consolidation_window_turns": 10,
+    "context_active_events_limit": 10
+  },
+  "weight_decay": {
+    "ebbinghaus_decay_rate": 0.06,
+    "epiphany_trigger_probability": 0.05
+  },
+  "model_routing": {
+    "background_extraction_config": {
+      "model": "gpt-4o-mini",
+      "temperature": 0.0,
+      "response_format": { "type": "json_object" }
+    },
+    "foreground_chat_config": {
+      "model": "gpt-4o",
+      "temperature": 0.7
+    }
+  }
+}
