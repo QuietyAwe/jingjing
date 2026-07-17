@@ -1,0 +1,145 @@
+// ============================================================
+// P5-3 / P5-4: 巩固流主模块
+// 双重关联写入事务 + 30s 超时 + 计数归零
+// ============================================================
+
+import { getDB } from "@/db/connection";
+import {
+  getUserInfo,
+  mergeUserInfo,
+  insertEvent,
+  insertFragment,
+  getTopActive,
+  getMeta,
+  setMeta,
+} from "@/db/queries";
+import { extractConsolidation } from "@/llm/background";
+import { getThresholds } from "@/prompt/config";
+import { logDebug } from "@/store/chatStore";
+import { useSettingsStore } from "@/store/settingsStore";
+import type { UserInfo } from "@/types/schema";
+import dayjs from "dayjs";
+
+const LOCK_TIMEOUT_MS = 30_000; // 30s 超时
+
+/**
+ * 检查是否应触发巩固流
+ * 条件：turn_counter >= 阈值 且 is_locked == false 且 user_info 存在
+ */
+export function shouldConsolidate(): boolean {
+  const locked = getMeta("is_locked");
+  if (locked === "true") return false;
+
+  const counter = parseInt(getMeta("turn_counter") ?? "0", 10);
+  const { consolidation_window_turns } = getThresholds();
+  return counter >= consolidation_window_turns;
+}
+
+/**
+ * 执行巩固流
+ * @param recentMessages 最近的对话消息（不含 system）
+ * @returns 是否成功写入
+ */
+export async function runConsolidation(
+  recentMessages: Array<{ role: string; content: string }>,
+): Promise<boolean> {
+  // 1. 获取锁
+  setMeta("is_locked", "true");
+
+  // 30s 超时兜底
+  const timeoutTimer = setTimeout(() => {
+    logDebug("巩固超时", "30s 强制解锁");
+    setMeta("is_locked", "false");
+    setMeta("turn_counter", "0");
+  }, LOCK_TIMEOUT_MS);
+
+  try {
+    // 2. 读取当前 user_info
+    let userInfo = getUserInfo();
+    if (!userInfo) {
+      // 空库首次：用空模板
+      userInfo = {
+        basic_identity: { nickname: "", gender: "", birthday: "", occupation: "", location: "" },
+        preferences: { likes: [], dislikes: [] },
+        social_graph: [],
+        psycho_state: { personality_traits: [], current_stressors: [], comm_preference: "" },
+        life_quests: { long_term_goals: [], ongoing_tasks: [] },
+      };
+    }
+
+    // 3. 取最近 10 轮快照（20 条）
+    const snapshot = recentMessages.slice(-20);
+
+    // 4. 取已有索引事件（供 LLM 判断挂靠）
+    const existingEvents = getTopActive(50);
+
+    // 5. 调用后台 LLM 提取
+    const result = await extractConsolidation(userInfo, snapshot, existingEvents, LOCK_TIMEOUT_MS - 2000);
+    if (!result) {
+      logDebug("巩固结果", "LLM 提取失败或返回空");
+      clearTimeout(timeoutTimer);
+      setMeta("is_locked", "false");
+      setMeta("turn_counter", "0");
+      return false;
+    }
+
+    // 6. 双重关联写入（SQLite 事务）
+    const db = getDB();
+    await db.withExclusiveTransactionAsync(async () => {
+      // 6a. Merge user_info
+      mergeUserInfo(result.updated_user_info);
+
+      // 同步昵称到设置 store
+      const newNickname = result.updated_user_info.basic_identity?.nickname;
+      if (newNickname) {
+        useSettingsStore.getState().saveUserNickname(newNickname);
+      }
+
+      // 6b. 确定挂靠事件
+      let targetEventId: number;
+      const frag = result.new_fragment;
+
+      if (frag.target_event_index > 0) {
+        // LLM 指定了已有事件 ID
+        targetEventId = frag.target_event_index;
+      } else if (frag.new_event_text?.trim()) {
+        // LLM 认为需要新建事件
+        targetEventId = insertEvent(frag.new_event_text.trim(), 100, 0);
+      } else {
+        // 兜底：挂靠最近活跃事件
+        const recent = getTopActive(1);
+        if (recent.length > 0) {
+          targetEventId = recent[0].id;
+        } else {
+          targetEventId = insertEvent("（自动生成的占位事件）", 50, 0);
+        }
+      }
+
+      // 6c. 写入记忆片段
+      insertFragment(
+        targetEventId,
+        frag.summary,
+        frag.emotion,
+      );
+    });
+
+    clearTimeout(timeoutTimer);
+
+    // 6. 保存最新 emotion 到元数据（供状态区注入）
+    setMeta("last_emotion", result.new_fragment.emotion);
+
+    // 7. 释放锁 + 清零计数
+    setMeta("is_locked", "false");
+    setMeta("turn_counter", "0");
+
+    logDebug("巩固完成", `摘要: ${result.new_fragment.summary}\n情绪: ${result.new_fragment.emotion}`);
+    return true;
+  } catch (err) {
+    clearTimeout(timeoutTimer);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logDebug("巩固异常", errMsg);
+    setMeta("is_locked", "false");
+    setMeta("turn_counter", "0");
+    return false;
+  }
+}

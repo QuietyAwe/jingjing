@@ -1,7 +1,10 @@
 // ============================================================
 // P3-4: Prompt 拼装与 Token 截断
-// 拼接顺序: 系统人设 + 状态区 + 记忆区 + 15 轮历史
-// 超限时从低权重记忆事件开始剔除
+//
+// 架构：先构建各段（系统人设、状态区、记忆区），再通过 context_template 拼装
+// context_template 使用 {{{variable}}} 引用各段，用户可自由控制顺序和润词
+//
+// 超限时按权重从低到高剔除记忆区事件
 // ============================================================
 
 import type {
@@ -11,23 +14,27 @@ import type {
   DefaultPlaceholders,
 } from "@/types/schema";
 import { getPrompts, getPlaceholders } from "./config";
+import { useSettingsStore } from "@/store/settingsStore";
+import dayjs from "dayjs";
 
 const DEFAULT_TOKEN_BUDGET = 8000; // 字符数作为 token 近似
 
 export interface AssembledPrompt {
+  /** 稳定部分：系统人设（不常变化，高缓存命中） */
   system: string;
+  /** 易变部分：状态区（每次巩固可能变化） */
+  state: string;
+  /** 易变部分：记忆区（每次检索可能变化） */
+  memory: string;
   messages: { role: "user" | "assistant"; content: string }[];
 }
 
 /**
  * 拼装完整 Prompt — 对齐 PRD 2.1 节第 6 步
  *
- * @param userInfo 当前用户信息（null = 冷启动）
- * @param topEvents Top 10 高权重记忆事件
- * @param epiphany 1 条随机冷记忆（可为 null）
- * @param chatHistory 最近对话历史（已截断为 15 轮）
- * @param emotion 当前情绪状态（可选）
- * @param tokenBudget 总字符预算
+ * 1. 构建各段内容（系统人设、状态区、记忆区）
+ * 2. 通过 context_template 拼装最终 system prompt
+ * 3. 截断超预算的记忆事件
  */
 export function assemblePrompt(
   userInfo: UserInfo | null,
@@ -38,143 +45,304 @@ export function assemblePrompt(
   tokenBudget: number = DEFAULT_TOKEN_BUDGET
 ): AssembledPrompt {
   const prompts = getPrompts();
-  const placeholders = getPlaceholders();
+  const nickname = useSettingsStore.getState().user_nickname || "用户";
 
-  // 1. 系统人设
-  const systemPrompt = prompts.system_prompt;
+  // 1. 稳定部分：系统人设（替换 [user]）
+  const systemPromptText = prompts.system_prompt.replace(/\[user\]/gi, nickname);
 
-  // 2. 状态区
-  const stateSection = buildStateSection(userInfo, emotion, placeholders);
+  // 2. 易变部分：状态区 + 记忆区（分开返回，便于缓存优化排列）
+  const stateText = buildStateSection(userInfo, emotion);
+  const memoryText = buildMemorySection(userInfo, topEvents, epiphany);
 
-  // 3. 记忆区（带截断）
-  const memorySection = buildMemorySection(topEvents, epiphany);
+  // 3. 截断：若超预算，按权重从低到高剔除记忆事件
+  const truncatedMemory = truncateToFit(memoryText, topEvents, epiphany, chatHistory, tokenBudget);
 
-  // 4. 组装系统部分
-  const fullSystem = [systemPrompt, stateSection, memorySection]
-    .filter(Boolean)
-    .join("\n\n");
+  // 4. 转换历史为 API 格式
+  const messages = chatHistory.map((m) => ({
+    role: m.role as "user" | "assistant",
+    content: m.content,
+  }));
 
-  // 5. 截断：若超预算，从低权重记忆事件开始剔除
-  const truncated = truncateToFit(fullSystem, chatHistory, tokenBudget);
-
-  // 6. 转换历史为 API 格式
-  const messages = [
-    { role: "user" as const, content: truncated.system },
-    ...chatHistory.map((m) => ({
-      role: m.role as "user" | "assistant",
-      content: m.content,
-    })),
-  ];
-
-  return { system: truncated.system, messages };
+  return { system: systemPromptText, state: stateText, memory: truncatedMemory, messages };
 }
 
 /**
- * 构建状态区
- * 冷启动时应用 cold_start_template
+ * 构建状态区 — 使用 state_injection_template 模板
+ * 对齐原始文档：基础信息 + 偏好 + 社交图谱 + 心理状态 + 生活主线 + 情绪
  */
 function buildStateSection(
   userInfo: UserInfo | null,
-  emotion: string | undefined,
-  placeholders: DefaultPlaceholders
+  emotion: string | undefined
 ): string {
-  if (!userInfo) {
-    // 冷启动：使用模板（已在 assemblePrompt 的 system prompt 中包含）
-    return "";
+  if (!userInfo) return "";
+
+  const prompts = getPrompts();
+  const template = prompts.state_injection_template;
+
+  // 如果模板存在且包含 {{}} 占位符，使用模板渲染
+  if (template && template.includes("{{")) {
+    return renderStateTemplate(template, userInfo, emotion);
   }
 
+  // 降级：手动拼接（兼容）
+  const placeholders = getPlaceholders();
   const bi = userInfo.basic_identity;
   const p = placeholders;
 
   const parts: string[] = [];
-  if (bi.nickname) parts.push(`${bi.nickname || p.nickname}`);
-  if (bi.location) parts.push(`所在地${bi.location || p.location}`);
-  if (bi.occupation) parts.push(`职业${bi.occupation || p.occupation}`);
-  if (userInfo.psycho_state.comm_preference) {
-    parts.push(`沟通风格：${userInfo.psycho_state.comm_preference || p.comm_preference}`);
-  }
+  parts.push(`基础信息：${bi.nickname || p.nickname}，${bi.gender ? bi.gender + "，" : ""}${bi.birthday ? "出生于" + bi.birthday + "，" : ""}${bi.occupation || p.occupation}，所在地${bi.location || p.location}`);
+
   if (userInfo.preferences.likes.length > 0) {
     parts.push(`喜欢：${userInfo.preferences.likes.join("、")}`);
   }
   if (userInfo.preferences.dislikes.length > 0) {
-    parts.push(`不喜欢：${userInfo.preferences.dislikes.join("、")}`);
+    parts.push(`讨厌：${userInfo.preferences.dislikes.join("、")}`);
   }
-  if (emotion) parts.push(`当前情绪：${emotion}`);
+  if (userInfo.social_graph.length > 0) {
+    const graph = userInfo.social_graph
+      .map((s) => `${s.name}(${s.role})：${s.attitude}`)
+      .join("；");
+    parts.push(`社交图谱：${graph}`);
+  }
+  if (userInfo.psycho_state.current_stressors.length > 0) {
+    parts.push(`近期压力：${userInfo.psycho_state.current_stressors.join("、")}`);
+  }
+  if (userInfo.psycho_state.comm_preference) {
+    parts.push(`沟通偏好：${userInfo.psycho_state.comm_preference || p.comm_preference}`);
+  }
+  if (userInfo.life_quests.long_term_goals.length > 0) {
+    parts.push(`愿望：${userInfo.life_quests.long_term_goals.join("、")}`);
+  }
+  if (userInfo.life_quests.ongoing_tasks.length > 0) {
+    const tasks = userInfo.life_quests.ongoing_tasks
+      .map((t) => `${t.task_name}(${t.status})`)
+      .join("；");
+    parts.push(`待办：${tasks}`);
+  }
+  if (emotion) {
+    parts.push(`当前情绪：${emotion}`);
+  }
 
-  return parts.length > 0 ? `## 用户状态\n${parts.join("；")}` : "";
+  return `## [用户信息]\n\n${parts.join("\n")}`;
 }
 
 /**
- * 构建记忆区
- * 包含 Top N 高权重事件 + 1 条灵光一闪
+ * 使用 state_injection_template 模板渲染状态区
+ * 替换 {{variable}} 占位符
+ */
+function renderStateTemplate(
+  template: string,
+  userInfo: UserInfo,
+  emotion: string | undefined
+): string {
+  const bi = userInfo.basic_identity;
+  const p = getPlaceholders();
+  const ps = userInfo.psycho_state;
+  const pref = userInfo.preferences;
+  const sg = userInfo.social_graph;
+  const lq = userInfo.life_quests;
+
+  let result = template
+    .replace(/\{\{nickname\}\}/g, bi.nickname || p.nickname)
+    .replace(/\{\{gender\}\}/g, bi.gender || "")
+    .replace(/\{\{birthday\}\}/g, bi.birthday || "")
+    .replace(/\{\{occupation\}\}/g, bi.occupation || p.occupation)
+    .replace(/\{\{location\}\}/g, bi.location || p.location)
+    .replace(/\{\{likes\}\}/g, pref.likes.join("、") || "无")
+    .replace(/\{\{dislikes\}\}/g, pref.dislikes.join("、") || "无")
+    .replace(/\{\{comm_preference\}\}/g, ps.comm_preference || p.comm_preference)
+    .replace(/\{\{personality_traits\}\}/g, ps.personality_traits.join("、") || "无")
+    .replace(/\{\{current_stressors\}\}/g, ps.current_stressors.join("、") || "无")
+    .replace(/\{\{long_term_goals\}\}/g, lq.long_term_goals.join("、") || "无")
+    .replace(/\{\{emotion\}\}/g, emotion || "未知");
+
+  // 社交图谱
+  const graphText =
+    sg.length > 0
+      ? sg.map((s) => `${s.name}(${s.role})：${s.attitude}`).join("\n* ")
+      : "无";
+  result = result.replace(/\{\{social_graph\}\}/g, graphText);
+
+  // 待办任务
+  const tasksText =
+    lq.ongoing_tasks.length > 0
+      ? lq.ongoing_tasks.map((t) => `${t.task_name}(${t.status})`).join("；")
+      : "无";
+  result = result.replace(/\{\{ongoing_tasks\}\}/g, tasksText);
+
+  return result;
+}
+
+/**
+ * 构建记忆区 — 使用 memory_injection_template + memory_event_template 模板
+ * 替换 [user] [time] 占位符
  */
 function buildMemorySection(
+  userInfo: UserInfo | null,
   topEvents: (MemoryEvent & { live_weight: number })[],
   epiphany: MemoryEvent | null
 ): string {
-  const lines: string[] = [];
+  const prompts = getPrompts();
+  const eventTpl = prompts.memory_event_template;
 
-  if (topEvents.length > 0) {
-    lines.push("## 记忆区");
-    for (const event of topEvents) {
-      lines.push(`- [权重${event.live_weight}] ${event.event_text}`);
-    }
+  // 渲染每条事件
+  const eventLines: string[] = [];
+  for (const event of topEvents) {
+    const text = replacePlaceholders(event.event_text, event.timestamp, userInfo);
+    const line = eventTpl
+      .replace(/\{\{weight\}\}/g, String(event.live_weight))
+      .replace(/\{\{event_text\}\}/g, text);
+    eventLines.push(line);
   }
 
+  // 渲染灵光一闪
+  let epiphanyText = "";
   if (epiphany) {
-    lines.push(`- [灵光一闪·冷记忆] ${epiphany.event_text}`);
+    const text = replacePlaceholders(epiphany.event_text, epiphany.timestamp, userInfo);
+    epiphanyText = `- [灵光一闪·冷记忆] ${text}`;
   }
 
+  // 使用 memory_injection_template 拼装
+  const template = prompts.memory_injection_template;
+  if (template && template.includes("{{")) {
+    return template
+      .replace(/\{\{event_list\}\}/g, eventLines.join("\n") || "（暂无记忆事件）")
+      .replace(/\{\{epiphany\}\}/g, epiphanyText);
+  }
+
+  // 降级：无模板时硬编码
+  const lines: string[] = [];
+  if (eventLines.length > 0) {
+    lines.push("## 记忆区");
+    lines.push(...eventLines);
+  }
+  if (epiphanyText) lines.push(epiphanyText);
   return lines.join("\n");
 }
 
 /**
- * 截断策略：超限时从低权重记忆事件开始剔除
- * 优先保护：系统人设 > 状态区 > 最近 15 轮对话 > 记忆区
+ * 替换 [user] 和 [time] 占位符
+ * [user] → 用户昵称
+ * [time] → 相对时间描述（如"前两个月"、"上周"）
+ */
+function replacePlaceholders(
+  text: string,
+  eventTimestamp: string,
+  userInfo: UserInfo | null
+): string {
+  let result = text;
+
+  // [user] → 昵称
+  const nickname = userInfo?.basic_identity?.nickname || "用户";
+  result = result.replace(/\[user\]/g, nickname);
+
+  // [time] → 相对时间
+  if (result.includes("[time]") && eventTimestamp) {
+    const eventTime = dayjs(eventTimestamp);
+    const now = dayjs();
+    const diffDays = now.diff(eventTime, "day");
+    let relativeTime: string;
+
+    if (diffDays < 1) {
+      relativeTime = "今天";
+    } else if (diffDays < 2) {
+      relativeTime = "昨天";
+    } else if (diffDays < 7) {
+      relativeTime = `${diffDays}天前`;
+    } else if (diffDays < 30) {
+      const weeks = Math.floor(diffDays / 7);
+      relativeTime = weeks <= 1 ? "上周" : `${weeks}周前`;
+    } else if (diffDays < 365) {
+      const months = Math.floor(diffDays / 30);
+      relativeTime = months <= 1 ? "上个月" : `前${months}个月`;
+    } else {
+      const years = Math.floor(diffDays / 365);
+      relativeTime = years <= 1 ? "去年" : `${years}年前`;
+    }
+
+    result = result.replace(/\[time\]/g, relativeTime);
+  }
+
+  return result;
+}
+
+/**
+ * 截断策略：按权重从低到高依次剔除记忆区事件
+ * 优先保护：系统人设 > 状态区 > 最近 15 轮对话 > 灵光一闪 > Top N 事件
  */
 function truncateToFit(
   systemText: string,
+  topEvents: (MemoryEvent & { live_weight: number })[],
+  epiphany: MemoryEvent | null,
   chatHistory: ChatMessage[],
   budget: number
-): { system: string } {
+): string {
   const historyChars = chatHistory.reduce((sum, m) => sum + m.content.length, 0);
   const totalChars = systemText.length + historyChars;
 
-  if (totalChars <= budget) {
-    return { system: systemText };
-  }
+  if (totalChars <= budget) return systemText;
 
-  // 需要裁剪 systemText 的量
   const excess = totalChars - budget;
 
-  // 从 systemText 的记忆区尾部开始逐行剔除
-  const lines = systemText.split("\n");
-  let removed = 0;
-  const result: string[] = [];
+  // 按权重从低到高排序记忆事件
+  const sortedEvents = [...topEvents].sort((a, b) => a.live_weight - b.live_weight);
 
-  // 从尾部向前扫描记忆区的事件行
-  let skipFromEnd = 0;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i].startsWith("- [权重") && removed < excess) {
-      removed += lines[i].length;
-      skipFromEnd++;
-    } else {
-      break;
+  // 构建事件行映射（行文本 → 长度）
+  const lines = systemText.split("\n");
+  const eventLineMap = new Map<string, number>();
+  for (const line of lines) {
+    if (line.startsWith("- ") && !line.startsWith("- [灵光一闪")) {
+      eventLineMap.set(line, line.length);
     }
   }
 
-  // 保留去除尾部记忆事件后的部分
-  if (skipFromEnd > 0) {
-    return { system: lines.slice(0, lines.length - skipFromEnd).join("\n") };
+  // 先尝试删除灵光一闪（如果存在且不是唯一记忆）
+  let removed = 0;
+  const removedLines = new Set<string>();
+  if (epiphany && eventLineMap.size > 1) {
+    for (const [line, len] of eventLineMap) {
+      if (line.startsWith("- [灵光一闪")) {
+        removedLines.add(line);
+        removed += len;
+        break;
+      }
+    }
   }
 
-  return { system: systemText };
+  // 按权重从低到高逐个删除事件行（通过事件文本匹配）
+  const nickname = useSettingsStore.getState().user_nickname || "用户";
+  for (const event of sortedEvents) {
+    if (removed >= excess) break;
+    const eventText = replacePlaceholders(event.event_text, event.timestamp, null);
+    for (const [line, len] of eventLineMap) {
+      if (line.includes(eventText) && !removedLines.has(line)) {
+        removedLines.add(line);
+        removed += len;
+        break;
+      }
+    }
+  }
+
+  // 过滤掉被删除的行
+  const result = lines.filter((line) => !removedLines.has(line)).join("\n");
+  return result;
 }
 
 /**
  * 构建冷启动 Prompt — 对齐 PRD 2.1 节第 1 步
+ * 冷启动 = 系统人设 + 冷启动模板（无状态区、无记忆区）
  */
-export function buildColdStartPrompt(): string {
+export function buildColdStartPrompt(): { system: string; context: string } {
   const prompts = getPrompts();
-  return prompts.cold_start_template;
+  const nickname = useSettingsStore.getState().user_nickname || "用户";
+  const systemPromptText = [
+    prompts.system_prompt,
+    prompts.cold_start_template,
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+    .replace(/\[user\]/gi, nickname);
+
+  // 冷启动时状态区和记忆区为空
+  return { system: systemPromptText, context: "" };
 }

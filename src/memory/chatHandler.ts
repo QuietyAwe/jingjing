@@ -7,11 +7,16 @@ import { getUserInfo } from "@/db/queries";
 import { retrieve } from "./retrieval";
 import { assemblePrompt, buildColdStartPrompt } from "@/prompt/assembler";
 import { getThresholds } from "@/prompt/config";
+import { logDebug } from "@/store/chatStore";
 import type { ChatMessage, UserInfo } from "@/types/schema";
 
 export interface ChatContext {
-  /** 组装后的系统 prompt */
+  /** 稳定部分：系统人设（高缓存命中） */
   systemPrompt: string;
+  /** 易变部分：状态区 */
+  statePrompt: string;
+  /** 易变部分：记忆区 */
+  memoryPrompt: string;
   /** 发送给 LLM 的消息数组 */
   messages: { role: "user" | "assistant" | "system"; content: string }[];
   /** 是否为冷启动 */
@@ -27,10 +32,12 @@ export interface ChatContext {
  *
  * @param userInput 用户输入文本
  * @param chatHistory 最近对话历史（已截断为 15 轮）
+ * @param currentEmotion 当前情绪状态（来自最新记忆片段）
  */
 export function buildChatContext(
   userInput: string,
-  chatHistory: ChatMessage[]
+  chatHistory: ChatMessage[],
+  currentEmotion?: string
 ): ChatContext {
   // 1. 冷启动检测
   const userInfo = getUserInfo();
@@ -41,17 +48,22 @@ export function buildChatContext(
 
   // 3. Prompt 拼装
   if (isColdStart) {
-    // 冷启动：使用 cold_start_template 作为 system prompt
-    const coldStartPrompt = buildColdStartPrompt();
+    // 冷启动：使用 cold_start_template
+    const { system, context } = buildColdStartPrompt();
+    // 冷启动无历史，结构：[system, context]
     const messages = [
-      { role: "system" as const, content: coldStartPrompt },
+      { role: "system" as const, content: system },
+      ...(context ? [{ role: "system" as const, content: context }] : []),
       ...chatHistory.map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
       })),
     ];
+    logDebug("上下文", `冷启动模式\n消息数: ${messages.length}\nsystem 长度: ${system.length}`);
     return {
-      systemPrompt: coldStartPrompt,
+      systemPrompt: system,
+      statePrompt: "",
+      memoryPrompt: "",
       messages,
       isColdStart: true,
       keywords,
@@ -64,14 +76,29 @@ export function buildChatContext(
     userInfo,
     topEvents,
     epiphany,
-    chatHistory
+    chatHistory,
+    currentEmotion
   );
 
+  const memoryCount = topEvents.length + (epiphany ? 1 : 0);
+
+  // 缓存优化结构：[system, state, ...history, memory]
+  // system + state 在巩固窗口内稳定，可命中前缀缓存
+  // memory 每次检索可能变化，放历史之后
+  const messages = [
+    { role: "system" as const, content: assembled.system },
+    ...(assembled.state ? [{ role: "system" as const, content: assembled.state }] : []),
+    ...assembled.messages,
+    ...(assembled.memory ? [{ role: "system" as const, content: assembled.memory }] : []),
+  ];
+  logDebug("上下文", `正常模式, 记忆: ${memoryCount} 条\n消息数: ${messages.length}\nsystem 长度: ${assembled.system.length}\nstate 长度: ${assembled.state.length}\nmemory 长度: ${assembled.memory.length}`);
   return {
     systemPrompt: assembled.system,
-    messages: assembled.messages,
+    statePrompt: assembled.state,
+    memoryPrompt: assembled.memory,
+    messages,
     isColdStart: false,
     keywords,
-    memoryCount: topEvents.length + (epiphany ? 1 : 0),
+    memoryCount,
   };
 }

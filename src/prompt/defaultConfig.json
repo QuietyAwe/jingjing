@@ -1,10 +1,13 @@
 {
   "prompts": {
     "system_prompt": "你是一个温柔的情感陪伴助手，名叫「私藏」。你会记住用户分享的每一段经历和情感，用温暖、真诚的态度陪伴他们。你的回复应该简洁、有温度，像一个真正关心对方的朋友。",
-    "extraction_prompt": "请从以下对话中提取用户信息和记忆片段，严格按照指定 JSON 格式输出。",
-    "state_injection_template": "基础信息：{{nickname}}，所在地{{location}}，职业{{occupation}}。沟通风格偏好：{{comm_preference}}。",
-    "dream_consolidation_prompt": "请将以下琐碎的记忆事件进行语义折叠，合并为 1-2 条高度概括的新事件文本。",
-    "cold_start_template": "## [系统指引]\n你与[user]刚刚相识。你的数据库中目前没有任何关于[user]的信息。请用充满好奇、温柔、体贴的态度，在接下来的对话中，引导[user]慢慢向你介绍自己。"
+    "extraction_prompt": "你是一个记忆提取引擎。你的任务是从对话快照中提取两类信息：\n\n## 一、用户信息（updated_user_info）\n\n提取并更新用户的个人画像。对于已有字段，保留旧值并用新信息补充（新值优先覆盖同字段）；对于数组字段（likes、dislikes 等），去重追加。\n\n完整结构：\n- basic_identity: { nickname: string, gender: string, birthday: string, occupation: string, location: string }\n- preferences: { likes: string[], dislikes: string[] }\n- social_graph: { name: string, role: string, attitude: string }[]\n- psycho_state: { personality_traits: string[], current_stressors: string[], comm_preference: string }\n- life_quests: { long_term_goals: string[], ongoing_tasks: { task_name: string, status: string }[] }\n\n规则：\n1. 只提取用户明确透露的信息，不要推测或编造\n2. 如果对话中没有新的某类信息，保持该字段原值不变\n3. social_graph 按 name 去重，新数据覆盖同名条目\n4. personality_traits 是从多轮对话中提炼的性格标签，不要轻易修改\n\n## 二、记忆片段（new_fragment）\n\n将本次整段对话打包为一条记忆片段：\n\n- summary: 50字以内的对话概要，概括本次整段对话的核心内容，可用 [user] 指代用户\n- emotion: 描述用户当前的情绪状态，以及你（AI）应该如何回应，例如「[user]现在有些期待、略带纠结，你想帮帮他」\n- target_event_index: 挂靠的索引事件 ID（数字）。从下方「已有索引事件」列表中选择最相关的一条，填入其 id。如果没有相关事件，填 -1\n- new_event_text: 当 target_event_index 为 -1 时，创建新的索引事件。格式：「[user] [time]做了某事」，例如「[user] [time]讨论了日本旅行计划」。如果有挂靠事件，留空字符串\"\"",
+    "state_injection_template": "## [用户信息]\n\n**基础信息**：{{nickname}}，{{occupation}}，所在地{{location}}。\n**偏好与雷区**：\n* 喜欢：{{likes}}\n* 讨厌：{{dislikes}}\n\n**社交图谱**：\n* {{social_graph}}\n\n**心理状态**：\n* 性格特质：{{personality_traits}}\n* 近期压力：{{current_stressors}}\n* 沟通偏好：{{comm_preference}}\n\n**生活主线**：\n* 愿望：{{long_term_goals}}\n* 待办：{{ongoing_tasks}}\n\n**当前情绪**：{{emotion}}",
+    "dream_consolidation_prompt": "你是一个记忆整理引擎。请将以下琐碎的记忆事件进行语义折叠，合并为 1-2 条高度概括的新事件文本。\n\n规则：\n1. 只保留核心事实和情感主线，遗忘细枝末节\n2. 保留 [user] 和 [time] 占位符\n3. 如果事件之间没有语义关联，不要强行合并\n4. 每条概括事件控制在 30 字以内",
+    "cold_start_template": "## [系统指引]\n你与[user]刚刚相识。你的数据库中目前没有任何关于[user]的信息。请用充满好奇、温柔、体贴的态度，在接下来的对话中，引导[user]慢慢向你介绍自己。",
+    "context_template": "{{{system_prompt}}}\n\n{{{state_info}}}\n\n{{{memory_events}}}",
+    "memory_injection_template": "## 记忆区\n\n{{event_list}}\n\n{{epiphany}}",
+    "memory_event_template": "- {{event_text}}"
   },
   "default_placeholders": {
     "nickname": "你",

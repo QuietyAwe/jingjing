@@ -81,6 +81,29 @@ export function getUserInfo(): UserInfo | null {
   };
 }
 
+/** 更新 basic_identity.nickname（同步设置页称呼） */
+export function updateBasicIdentityNickname(nickname: string): void {
+  const db = getDB();
+  const existing = getUserInfo();
+  if (existing) {
+    existing.basic_identity.nickname = nickname;
+    db.runSync(
+      'INSERT INTO user_info (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      "basic_identity",
+      JSON.stringify(existing.basic_identity)
+    );
+  } else {
+    // 首次：创建完整 user_info 骨架
+    setUserInfo({
+      basic_identity: { nickname, gender: "", birthday: "", occupation: "", location: "" },
+      preferences: { likes: [], dislikes: [] },
+      social_graph: [],
+      psycho_state: { personality_traits: [], current_stressors: [], comm_preference: "" },
+      life_quests: { long_term_goals: [], ongoing_tasks: [] },
+    });
+  }
+}
+
 /** 将完整 UserInfo 写入 user_info 表（全量覆盖各字段） */
 export function setUserInfo(info: UserInfo): void {
   const db = getDB();
@@ -222,11 +245,21 @@ export function getAllActive(): MemoryEvent[] {
   );
 }
 
-/** 随机抽取 1 条低权重冷记忆（灵光一闪） — 对齐 PRD 2.1 节第 5 步 */
-export function getEpiphanyRandom(): MemoryEvent | null {
+/**
+ * 随机抽取 1 条低权重冷记忆（灵光一闪） — 对齐 PRD 2.1 节第 5 步
+ * @param excludeIds 排除的事件 ID（避免与 Top 10 重复）
+ */
+export function getEpiphanyRandom(excludeIds: number[] = []): MemoryEvent | null {
   const db = getDB();
+  if (excludeIds.length === 0) {
+    return db.getFirstSync<MemoryEvent>(
+      "SELECT * FROM memory_events WHERE is_archived = 0 AND active_weight < 40 ORDER BY RANDOM() LIMIT 1"
+    );
+  }
+  const placeholders = excludeIds.map(() => "?").join(",");
   return db.getFirstSync<MemoryEvent>(
-    "SELECT * FROM memory_events WHERE is_archived = 0 AND active_weight < 40 ORDER BY RANDOM() LIMIT 1"
+    `SELECT * FROM memory_events WHERE is_archived = 0 AND active_weight < 40 AND id NOT IN (${placeholders}) ORDER BY RANDOM() LIMIT 1`,
+    ...excludeIds
   );
 }
 
@@ -280,6 +313,23 @@ export function softArchiveBatch(eventIds: number[]): void {
   }
 }
 
+/** 更新事件文本 */
+export function updateEventText(eventId: number, newText: string): void {
+  const db = getDB();
+  db.runSync(
+    "UPDATE memory_events SET event_text = ? WHERE id = ?",
+    newText,
+    eventId
+  );
+}
+
+/** 硬删除事件及其关联片段 */
+export function deleteEvent(eventId: number): void {
+  const db = getDB();
+  db.runSync('DELETE FROM memory_fragments WHERE "index" = ?', eventId);
+  db.runSync("DELETE FROM memory_events WHERE id = ?", eventId);
+}
+
 // ============================================================
 // P2-4: memory_fragments CRUD
 // ============================================================
@@ -309,4 +359,22 @@ export function getFragmentsByEventId(eventId: number): MemoryFragment[] {
     'SELECT * FROM memory_fragments WHERE "index" = ? ORDER BY timestamp ASC',
     eventId
   );
+}
+
+/** 获取最新一条记忆片段的 emotion（用于状态区注入） */
+export function getLatestEmotion(): string | null {
+  const db = getDB();
+  const row = db.getFirstSync<MemoryFragment>(
+    "SELECT emotion FROM memory_fragments ORDER BY timestamp DESC LIMIT 1"
+  );
+  return row?.emotion ?? null;
+}
+
+/** 清除所有数据（四张表），用于设置页重置 */
+export function clearAllData(): void {
+  const db = getDB();
+  db.runSync("DELETE FROM memory_fragments");
+  db.runSync("DELETE FROM memory_events");
+  db.runSync("DELETE FROM user_info");
+  db.runSync("DELETE FROM system_metadata");
 }

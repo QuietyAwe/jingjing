@@ -2,6 +2,7 @@
   "expo": {
     "name": "Jingjing",
     "slug": "jingjing",
+    "owner": "qee521",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -11,13 +12,15 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.qee521.jingjing",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "softwareKeyboardLayoutMode": "resize"
     },
     "web": {
       "favicon": "./assets/favicon.png",
@@ -26,6 +29,12 @@
     "plugins": [
       "expo-sqlite",
       "expo-router"
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "3e6ff5eb-b793-4460-9145-0735cd7aa2a7"
+      }
+    }
   }
 }

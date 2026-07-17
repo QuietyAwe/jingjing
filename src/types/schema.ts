@@ -87,8 +87,10 @@ export interface UserInfo {
 export interface NewFragment {
   summary: string;
   emotion: string;
-  /** 非空时代表属于全新事件主题 */
-  target_event_text: string;
+  /** 挂靠的已有索引事件 ID，-1 表示需要新建 */
+  target_event_index: number;
+  /** target_event_index 为 -1 时，新建事件的索引文本 */
+  new_event_text: string;
 }
 
 /** 后台模型提取完整响应 (PRD 4.4) */
@@ -105,6 +107,9 @@ export interface PromptsConfig {
   state_injection_template: string;
   dream_consolidation_prompt: string;
   cold_start_template: string;
+  context_template: string;
+  memory_injection_template: string;
+  memory_event_template: string;
 }
 
 export interface DefaultPlaceholders {

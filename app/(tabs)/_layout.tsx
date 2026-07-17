@@ -1,16 +1,19 @@
 import { Tabs } from "expo-router";
+import { useTheme } from "@/theme/useTheme";
 
 export default function TabLayout() {
+  const colors = useTheme();
+
   return (
     <Tabs
       screenOptions={{
-        headerStyle: { backgroundColor: "#FFFFFF" },
-        headerTitleStyle: { color: "#37352F", fontWeight: "600" },
-        tabBarActiveTintColor: "#2F81F7",
-        tabBarInactiveTintColor: "#9B9A97",
+        headerStyle: { backgroundColor: colors.sectionBg },
+        headerTitleStyle: { color: colors.text, fontWeight: "600" },
+        tabBarActiveTintColor: colors.accent,
+        tabBarInactiveTintColor: colors.textMuted,
         tabBarStyle: {
-          borderTopColor: "#E8E7E4",
-          backgroundColor: "#FFFFFF",
+          borderTopColor: colors.border,
+          backgroundColor: colors.sectionBg,
         },
       }}
     >
@@ -18,7 +21,7 @@ export default function TabLayout() {
         name="index"
         options={{
           title: "私藏",
-          headerTitle: "私藏",
+          headerShown: false,
         }}
       />
       <Tabs.Screen

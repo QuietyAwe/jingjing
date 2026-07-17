@@ -7,6 +7,7 @@ import {
   StyleSheet,
   Keyboard,
 } from "react-native";
+import { useTheme } from "@/theme/useTheme";
 
 interface Props {
   onSend: (text: string) => void;
@@ -15,6 +16,7 @@ interface Props {
 
 export function InputBar({ onSend, disabled }: Props) {
   const [text, setText] = useState("");
+  const colors = useTheme();
 
   const handleSend = () => {
     const trimmed = text.trim();
@@ -25,13 +27,13 @@ export function InputBar({ onSend, disabled }: Props) {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { borderTopColor: colors.border, backgroundColor: colors.sectionBg }]}>
       <TextInput
-        style={styles.input}
+        style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text }]}
         value={text}
         onChangeText={setText}
         placeholder="说点什么..."
-        placeholderTextColor="#B0AFAF"
+        placeholderTextColor={colors.placeholder}
         multiline
         maxLength={2000}
         editable={!disabled}
@@ -39,11 +41,15 @@ export function InputBar({ onSend, disabled }: Props) {
         returnKeyType="send"
       />
       <TouchableOpacity
-        style={[styles.button, (!text.trim() || disabled) && styles.buttonDisabled]}
+        style={[
+          styles.button,
+          { backgroundColor: colors.accent },
+          (!text.trim() || disabled) && { backgroundColor: colors.btnDisabled },
+        ]}
         onPress={handleSend}
         disabled={!text.trim() || disabled}
       >
-        <Text style={styles.buttonText}>发送</Text>
+        <Text style={[styles.buttonText, { color: colors.textOnAccent }]}>发送</Text>
       </TouchableOpacity>
     </View>
   );
@@ -56,33 +62,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "#E8E7E4",
-    backgroundColor: "#FFFFFF",
   },
   input: {
     flex: 1,
     minHeight: 40,
     maxHeight: 120,
-    backgroundColor: "#F7F7F5",
     borderRadius: 10,
     paddingHorizontal: 14,
     paddingVertical: 10,
     fontSize: 15,
-    color: "#37352F",
     lineHeight: 22,
   },
   button: {
     marginLeft: 10,
-    backgroundColor: "#2F81F7",
     borderRadius: 10,
     paddingHorizontal: 18,
     paddingVertical: 10,
   },
-  buttonDisabled: {
-    backgroundColor: "#D3D1CB",
-  },
   buttonText: {
-    color: "#FFFFFF",
     fontSize: 15,
     fontWeight: "600",
   },
