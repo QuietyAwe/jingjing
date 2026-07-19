@@ -1,6 +1,6 @@
 // ============================================================
 // P3-3: 本地检索 + 灵光一闪
-// 流程: 分词 → 检索片段 → 关联事件 → 衰减排序 → TopN + 灵光一闪
+// 流程: 分词 → 检索事件 → 未命中则检索片段 → 衰减排序 → TopN + 灵光一闪
 // ============================================================
 
 import { tokenize } from "./tokenize";
@@ -27,19 +27,35 @@ export interface RetrievalResult {
 /**
  * 完整本地检索流程
  *
- * 检索策略：只检索片段内容，通过片段关联事件
- * 片段长度 >= 10 字才参与检索
+ * 检索策略：优先检索事件(event_text)，未命中再检索片段(summary)
+ * 命中事件时直接返回关联片段，无需额外检索
  */
 export function retrieve(userInput: string): RetrievalResult {
   // 1. 分词
   const keywords = tokenize(userInput, 3);
 
-  // 2. 通过片段内容匹配事件（片段长度 >= 10 字）
+  // 2. 优先检索事件(event_text)
   let hitEvents: MemoryEvent[] = [];
   const hitEventIds = new Set<number>();
+  const db = getDB();
+
   if (keywords.length > 0) {
-    const db = getDB();
-    const conditions = keywords.map(() => "f.summary LIKE ?").join(" OR ");
+    const eventConditions = keywords.map(() => "event_text LIKE ?").join(" OR ");
+    const params = keywords.map((k) => `%${k}%`);
+
+    hitEvents = db.getAllSync<MemoryEvent>(
+      `SELECT * FROM memory_events
+       WHERE is_archived = 0 AND (${eventConditions})
+       ORDER BY active_weight DESC
+       LIMIT 3`,
+      ...params
+    );
+    hitEvents.forEach((e) => hitEventIds.add(e.id));
+  }
+
+  // 3. 如果事件未命中，再检索片段(summary)
+  if (hitEvents.length === 0 && keywords.length > 0) {
+    const fragConditions = keywords.map(() => "f.summary LIKE ?").join(" OR ");
     const params = keywords.map((k) => `%${k}%`);
 
     hitEvents = db.getAllSync<MemoryEvent>(
@@ -47,7 +63,7 @@ export function retrieve(userInput: string): RetrievalResult {
        INNER JOIN memory_fragments f ON e.id = f.event_index
        WHERE e.is_archived = 0
          AND LENGTH(f.summary) >= 10
-         AND (${conditions})
+         AND (${fragConditions})
        ORDER BY e.active_weight DESC
        LIMIT 3`,
       ...params
@@ -55,7 +71,7 @@ export function retrieve(userInput: string): RetrievalResult {
     hitEvents.forEach((e) => hitEventIds.add(e.id));
   }
 
-  // 3. 刷新命中事件权重为 100 + 更新 last_accessed + 获取关联片段
+  // 4. 刷新命中事件权重为 100 + 更新 last_accessed + 获取关联片段
   const hitFragments = new Map<number, MemoryFragment[]>();
   for (const event of hitEvents) {
     updateWeight(event.id, 100);
@@ -65,7 +81,7 @@ export function retrieve(userInput: string): RetrievalResult {
     }
   }
 
-  // 4. 获取所有活跃事件，按存储权重初筛后计算实时权重（减少计算量）
+  // 5. 获取所有活跃事件，按存储权重初筛后计算实时权重（减少计算量）
   const allActive = getAllActive();
   const { context_active_events_limit } = getThresholds();
   // 先按存储权重排序，取 2*N 候选，再计算实时权重精排
@@ -74,11 +90,11 @@ export function retrieve(userInput: string): RetrievalResult {
     .slice(0, context_active_events_limit * 2);
   const withLiveWeight = calculateWeights(candidates);
 
-  // 5. 按实时权重排序取 Top N（数量由 config 控制）
+  // 6. 按实时权重排序取 Top N（数量由 config 控制）
   withLiveWeight.sort((a, b) => b.live_weight - a.live_weight);
   const topEvents = withLiveWeight.slice(0, context_active_events_limit);
 
-  // 6. 灵光一闪：概率触发，随机抽 1 条低权重冷记忆（排除 Top N 已选事件）
+  // 7. 灵光一闪：概率触发，随机抽 1 条低权重冷记忆（排除 Top N 已选事件）
   const { epiphany_trigger_probability } = getWeightDecay();
   let epiphany: MemoryEvent | null = null;
   if (Math.random() < epiphany_trigger_probability) {
