@@ -20,8 +20,12 @@ interface ChatState {
   messages: ChatMessage[];
   /** 是否正在等待 AI 回复 */
   isLoading: boolean;
-  /** 当前流式回复文本 */
+  /** 当前流式回复文本（完整内容，用于上下文） */
   streamingText: string;
+  /** 流式输出分段（UI 展示用） */
+  streamingChunks: string[];
+  /** 流式思考内容 */
+  streamingThinking: string;
   /** 最后一次拼接的 systemPrompt（调试用） */
   lastSystemPrompt: string;
   /** 最后一次检索的关键词 */
@@ -37,6 +41,8 @@ interface ChatState {
   setLoading: (loading: boolean) => void;
   setStreamingText: (text: string) => void;
   appendStreamingText: (delta: string) => void;
+  setStreamingThinking: (thinking: string) => void;
+  appendStreamingThinking: (delta: string) => void;
   clearMessages: () => void;
   /** 存储调试信息 */
   setDebugInfo: (systemPrompt: string, keywords: string[], memoryCount: number) => void;
@@ -54,6 +60,8 @@ export const useChatStore = create<ChatState>()(
       messages: [],
       isLoading: false,
       streamingText: "",
+      streamingChunks: [],
+      streamingThinking: "",
       lastSystemPrompt: "",
       lastKeywords: [],
       lastMemoryCount: 0,
@@ -71,12 +79,21 @@ export const useChatStore = create<ChatState>()(
         })),
 
       setLoading: (loading) => set({ isLoading: loading }),
-      setStreamingText: (text) => set({ streamingText: text }),
+      setStreamingText: (text) => set({ streamingText: text, streamingChunks: text ? [text] : [] }),
       appendStreamingText: (delta) =>
-        set((state) => ({ streamingText: state.streamingText + delta })),
+        set((state) => {
+          const newText = state.streamingText + delta;
+          // 按段落分割
+          const parts = newText.split("\n\n");
+          const chunks = parts.filter((p) => p.trim());
+          return { streamingText: newText, streamingChunks: chunks };
+        }),
+      setStreamingThinking: (thinking) => set({ streamingThinking: thinking }),
+      appendStreamingThinking: (delta) =>
+        set((state) => ({ streamingThinking: state.streamingThinking + delta })),
 
       clearMessages: () =>
-        set({ messages: [], streamingText: "", isLoading: false, lastSystemPrompt: "", lastKeywords: [], lastMemoryCount: 0, debugLogs: [] }),
+        set({ messages: [], streamingText: "", streamingChunks: [], streamingThinking: "", isLoading: false, lastSystemPrompt: "", lastKeywords: [], lastMemoryCount: 0, debugLogs: [] }),
 
       setDebugInfo: (systemPrompt, keywords, memoryCount) =>
         set({ lastSystemPrompt: systemPrompt, lastKeywords: keywords, lastMemoryCount: memoryCount }),

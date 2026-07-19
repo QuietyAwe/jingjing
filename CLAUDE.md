@@ -11,6 +11,7 @@
     2. `更新业务`：修改【二、Architecture Contracts】或【三、Changelog】。
     3. `更新排期`：修改【四、Task Board】，标记状态。
     4. `阻塞挂起`：向用户确认："文档已更新，是否开始开发？"
+* **变更完成检查**: 每次代码修改完成后，立即更新 CLAUDE.md，不得跳过。
 
 ---
 
@@ -31,6 +32,20 @@
     - 做梦被强杀：SQLite 事务自动 ROLLBACK
     - 空库冷启动：应用 `cold_start_template` + `default_placeholders`
 
+### 2.2.1 消息发送结构（缓存优化）
+```
+messages = [
+  { role: "system", content: systemPrompt },  // 稳定，高缓存命中
+  { role: "system", content: statePrompt },   // 巩固窗口内稳定
+  ...chatHistory,                              // 前缀相对稳定
+  { role: "system", content: memoryPrompt },  // 每次检索可能变化
+  { role: "user", content: latestMessage },   // 每次新的
+]
+```
+* 系统人设独立发送，前缀缓存100%命中
+* 状态区在10轮巩固窗口内不变，缓存命中
+* 记忆区每次检索可能变化，放历史之后
+
 ### 2.3 Data Schema
 ```json
 // memory_events: 记忆事件表
@@ -49,7 +64,7 @@
 
 ### 2.4 Tech Stack
 ```
-Expo SDK 54 / TypeScript 5.9 / expo-sqlite v16 / Zustand v5 / openai v4 / dayjs / AsyncStorage
+Expo SDK 54 / TypeScript 5.9 / expo-sqlite v16 / Zustand v5 / openai v4 / dayjs / AsyncStorage / react-native-sse / DeepSeek API
 ```
 
 ### 2.5 Project Structure
@@ -60,13 +75,21 @@ src/memory/         # 记忆引擎：分词、检索、衰减、巩固、做梦
 src/llm/            # LLM 调用：前台（非流式）、后台（JSON mode）
 src/prompt/         # Prompt 拼装、配置管理、模板渲染
 src/store/          # Zustand 状态：聊天、设置、元数据
+src/theme/          # 主题系统：色板（浅色/深色）、useTheme hook
 src/types/          # TypeScript 类型定义
 ```
+
+### 2.6 Prompt 模板体系
+* **通用变量**：`[user]`（用户名）、`[now]`（当前时间），所有模板可用
+* **记忆事件专用**：`[time]`（相对时间，如"前两个月"）
+* **状态区变量**：`{{nickname}}`、`{{likes}}` 等14个，空字段自动隐藏
+* **记忆区变量**：`{{event_list}}`、`{{epiphany}}`
+* **上下文模板**：`{{{system_prompt}}}`、`{{{state_info}}}`、`{{{memory_events}}}`（已弃用，改为分条发送）
 
 ---
 
 ## 三、 Changelog
-> 超过 15 行时归档最早的记录至 `ARCHIVE.md`
+> 每更新2个版本后归档最早的版本至 `ARCHIVE.md`
 
 | 版本 | 日期 | 模块 | 业务变更说明 | 关联任务 |
 | --- | --- | --- | --- | --- |
@@ -86,6 +109,19 @@ src/types/          # TypeScript 类型定义
 | v1.1 | 07-15 | UI | 设置页拆分：系统人设 / 上下文模板 / 状态区注入 / 记忆区注入 / 记忆事件格式 五个独立编辑区 | 设置页 |
 | v1.1 | 07-15 | 持久化 | 聊天记录全量持久化（AsyncStorage + Zustand persist），不再丢失历史 | 数据持久化 |
 | v1.1 | 07-15 | 调试 | 开发者调试面板：所有 API 请求完整日志输出，含巩固流和做梦流 | 调试工具 |
+| v1.2 | 07-17 | 架构 | 缓存优化：system/state/memory 拆分发送，提高前缀缓存命中率 | 缓存优化 |
+| v1.2 | 07-17 | UI | 提示词变量选择器：点击插入变量，支持通用变量和模板专用变量 | 变量系统 |
+| v1.2 | 07-17 | UI | 状态区空字段自动隐藏：无数据的字段整行移除，段落标题同步清理 | 状态区优化 |
+| v1.2 | 07-17 | 构建 | EAS 云构建：配置 Android APK 构建流程 | 构建部署 |
+| v1.2 | 07-17 | 修复 | 状态区空字段隐藏逻辑修复：两遍处理确保空段落标题也被正确移除 | Bug Fix |
+| v1.2 | 07-17 | 功能 | 流式输出：设置页开关 + foreground.ts 支持 SSE 流式/非流式切换 | 流式输出 |
+| v1.2 | 07-17 | UI | 消息气泡分段：AI 回复按段落分割成多条气泡，上下文仍为一条完整消息 | 气泡分段 |
+| v1.2 | 07-17 | 功能 | DeepSeek API 支持：thinking 参数配置（默认关闭） | DeepSeek |
+| v1.3 | 07-17 | 修复 | 轮次计数优化：延迟一轮计数，最后一条消息不参与计数 | 计数逻辑 |
+| v1.3 | 07-17 | UI | 事件详情弹窗：点击事件查看详情和关联的记忆片段 | 事件管理 |
+| v1.3 | 07-17 | UI | 调试面板优化：移除系统提示词模块，打开时自动滚动到底部 | 调试工具 |
+| v1.3 | 07-17 | 功能 | 思考模式：设置页开关 + 思考内容提取 + 可展开思考气泡 | 思考模式 |
+| v1.3 | 07-17 | UI | 记忆区时间戳：模板底部显示当前日期时间（中文周几） | 时间显示 |
 
 ---
 
@@ -100,13 +136,14 @@ src/types/          # TypeScript 类型定义
 | **P8-1** | 集成 | AC1 验证：巩固流端到端（预置 social_graph → 对话 10 轮 → 验证 Merge 完整性） | 待启动 |
 | **P8-2** | 集成 | AC2 验证：灵光一闪 + Token 截断（预置事件 → 验证抽取/剔除逻辑） | 待启动 |
 | **P8-3** | 集成 | AC3 验证：空库冷启动（清库 → 发送"你好" → 验证无 undefined + 引导人设） | 待启动 |
+| **P9-1** | UI | 提示词编辑器重构：三级分组、废弃字段移除、说明文案、输入框布局优化 | 进行中 |
 
 ---
 
 ## 五、 Active Issues
 
-> 当前 bug / 技术债 / 待决策项。解决后删除。可避免踩坑的经验归档至 `ARCHIVE.md`
+> 当前 bug / 技术债 / 待决策项。解决后删除。
+> 可避免踩坑的经验归档至 `ARCHIVE.md`
 
 | # | 描述 | 状态 |
 | --- | --- | --- |
-| 1 | React Native fetch 不支持 ReadableStream，前台 LLM 已改非流式，逐字输出效果丢失 | 已降级 |

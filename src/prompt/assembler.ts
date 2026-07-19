@@ -1,15 +1,16 @@
 // ============================================================
 // P3-4: Prompt 拼装与 Token 截断
 //
-// 架构：先构建各段（系统人设、状态区、记忆区），再通过 context_template 拼装
-// context_template 使用 {{{variable}}} 引用各段，用户可自由控制顺序和润词
+// 架构：构建各段（系统人设、状态区、记忆区），分开返回便于缓存优化排列
 //
 // 超限时按权重从低到高剔除记忆区事件
 // ============================================================
 
+import { getFragmentsByEventId } from "@/db/queries";
 import type {
   UserInfo,
   MemoryEvent,
+  MemoryFragment,
   ChatMessage,
   DefaultPlaceholders,
 } from "@/types/schema";
@@ -30,10 +31,10 @@ export interface AssembledPrompt {
 }
 
 /**
- * 拼装完整 Prompt — 对齐 PRD 2.1 节第 6 步
+ * 拼装完整 Prompt
  *
  * 1. 构建各段内容（系统人设、状态区、记忆区）
- * 2. 通过 context_template 拼装最终 system prompt
+ * 2. 分开返回，便于调用方按缓存策略排列
  * 3. 截断超预算的记忆事件
  */
 export function assemblePrompt(
@@ -42,6 +43,7 @@ export function assemblePrompt(
   epiphany: MemoryEvent | null,
   chatHistory: ChatMessage[],
   emotion?: string,
+  hitFragments?: Map<number, MemoryFragment[]>,
   tokenBudget: number = DEFAULT_TOKEN_BUDGET
 ): AssembledPrompt {
   const prompts = getPrompts();
@@ -52,7 +54,7 @@ export function assemblePrompt(
 
   // 2. 易变部分：状态区 + 记忆区（分开返回，便于缓存优化排列）
   const stateText = buildStateSection(userInfo, emotion);
-  const memoryText = buildMemorySection(userInfo, topEvents, epiphany);
+  const memoryText = buildMemorySection(userInfo, topEvents, epiphany, hitFragments);
 
   // 3. 截断：若超预算，按权重从低到高剔除记忆事件
   const truncatedMemory = truncateToFit(memoryText, topEvents, epiphany, chatHistory, tokenBudget);
@@ -81,7 +83,14 @@ function buildStateSection(
 
   // 如果模板存在且包含 {{}} 占位符，使用模板渲染
   if (template && template.includes("{{")) {
-    return renderStateTemplate(template, userInfo, emotion);
+    let result = renderStateTemplate(template, userInfo, emotion);
+    // 替换通用变量 [now]
+    if (result.includes("[now]")) {
+      const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+      const now = dayjs();
+      result = result.replace(/\[now\]/g, `${now.format("M/D")}(${WEEKDAYS[now.day()]}) ${now.format("HH:mm")}`);
+    }
+    return result;
   }
 
   // 降级：手动拼接（兼容）
@@ -126,9 +135,12 @@ function buildStateSection(
   return `## [用户信息]\n\n${parts.join("\n")}`;
 }
 
+/** 空值占位符，用于标记空字段以便后续整行移除 */
+const EMPTY = "__EMPTY__";
+
 /**
  * 使用 state_injection_template 模板渲染状态区
- * 替换 {{variable}} 占位符
+ * 替换 {{variable}} 占位符，空字段整行移除
  */
 function renderStateTemplate(
   template: string,
@@ -148,39 +160,82 @@ function renderStateTemplate(
     .replace(/\{\{birthday\}\}/g, bi.birthday || "")
     .replace(/\{\{occupation\}\}/g, bi.occupation || p.occupation)
     .replace(/\{\{location\}\}/g, bi.location || p.location)
-    .replace(/\{\{likes\}\}/g, pref.likes.join("、") || "无")
-    .replace(/\{\{dislikes\}\}/g, pref.dislikes.join("、") || "无")
-    .replace(/\{\{comm_preference\}\}/g, ps.comm_preference || p.comm_preference)
-    .replace(/\{\{personality_traits\}\}/g, ps.personality_traits.join("、") || "无")
-    .replace(/\{\{current_stressors\}\}/g, ps.current_stressors.join("、") || "无")
-    .replace(/\{\{long_term_goals\}\}/g, lq.long_term_goals.join("、") || "无")
-    .replace(/\{\{emotion\}\}/g, emotion || "未知");
+    .replace(/\{\{likes\}\}/g, pref.likes.length > 0 ? pref.likes.join("、") : EMPTY)
+    .replace(/\{\{dislikes\}\}/g, pref.dislikes.length > 0 ? pref.dislikes.join("、") : EMPTY)
+    .replace(/\{\{comm_preference\}\}/g, ps.comm_preference || EMPTY)
+    .replace(/\{\{personality_traits\}\}/g, ps.personality_traits.length > 0 ? ps.personality_traits.join("、") : EMPTY)
+    .replace(/\{\{current_stressors\}\}/g, ps.current_stressors.length > 0 ? ps.current_stressors.join("、") : EMPTY)
+    .replace(/\{\{long_term_goals\}\}/g, lq.long_term_goals.length > 0 ? lq.long_term_goals.join("、") : EMPTY)
+    .replace(/\{\{emotion\}\}/g, emotion || EMPTY);
 
   // 社交图谱
   const graphText =
     sg.length > 0
       ? sg.map((s) => `${s.name}(${s.role})：${s.attitude}`).join("\n* ")
-      : "无";
+      : EMPTY;
   result = result.replace(/\{\{social_graph\}\}/g, graphText);
 
   // 待办任务
   const tasksText =
     lq.ongoing_tasks.length > 0
       ? lq.ongoing_tasks.map((t) => `${t.task_name}(${t.status})`).join("；")
-      : "无";
+      : EMPTY;
   result = result.replace(/\{\{ongoing_tasks\}\}/g, tasksText);
 
-  return result;
+  // 移除包含空值占位符的行，以及空的段落标题
+  return cleanEmptyLines(result);
+}
+
+/**
+ * 渲染后清理：移除空值行和空段落标题
+ * 两遍处理：第一遍标记要移除的行，第二遍检查空标题
+ */
+function cleanEmptyLines(text: string): string {
+  const lines = text.split("\n");
+  const removed = new Set<number>();
+
+  // 第一遍：标记包含空值占位符的行
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes(EMPTY)) {
+      removed.add(i);
+    }
+  }
+
+  // 辅助函数：找下一个未被移除的行
+  function nextValidLine(from: number): string | null {
+    for (let j = from + 1; j < lines.length; j++) {
+      if (!removed.has(j)) return lines[j].trim();
+    }
+    return null;
+  }
+
+  // 第二遍：检查空段落标题
+  for (let i = 0; i < lines.length; i++) {
+    if (removed.has(i)) continue;
+    const trimmed = lines[i].trim();
+    if (trimmed.endsWith("：") || trimmed.endsWith(":")) {
+      const nextLine = nextValidLine(i);
+      if (!nextLine || nextLine.startsWith("**") || nextLine.startsWith("##") || nextLine.includes(EMPTY)) {
+        removed.add(i);
+      }
+    }
+  }
+
+  // 收集未被移除的行
+  const cleaned = lines.filter((_, i) => !removed.has(i));
+  return cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /**
  * 构建记忆区 — 使用 memory_injection_template + memory_event_template 模板
  * 替换 [user] [time] 占位符
+ * 命中事件显示所有关联片段，活跃事件显示最新一条片段摘要
  */
 function buildMemorySection(
   userInfo: UserInfo | null,
   topEvents: (MemoryEvent & { live_weight: number })[],
-  epiphany: MemoryEvent | null
+  epiphany: MemoryEvent | null,
+  hitFragments?: Map<number, MemoryFragment[]>
 ): string {
   const prompts = getPrompts();
   const eventTpl = prompts.memory_event_template;
@@ -193,6 +248,23 @@ function buildMemorySection(
       .replace(/\{\{weight\}\}/g, String(event.live_weight))
       .replace(/\{\{event_text\}\}/g, text);
     eventLines.push(line);
+
+    // 如果是命中事件，显示所有关联片段
+    const fragments = hitFragments?.get(event.id);
+    if (fragments && fragments.length > 0) {
+      for (const frag of fragments) {
+        const fragText = replacePlaceholders(frag.summary, frag.timestamp, userInfo);
+        eventLines.push(`  · ${fragText}`);
+      }
+    } else {
+      // 活跃事件：获取最新一条片段摘要
+      const eventFragments = getFragmentsByEventId(event.id);
+      if (eventFragments.length > 0) {
+        const latest = eventFragments[eventFragments.length - 1];
+        const fragText = replacePlaceholders(latest.summary, latest.timestamp, userInfo);
+        eventLines.push(`  · ${fragText}`);
+      }
+    }
   }
 
   // 渲染灵光一闪
@@ -205,9 +277,16 @@ function buildMemorySection(
   // 使用 memory_injection_template 拼装
   const template = prompts.memory_injection_template;
   if (template && template.includes("{{")) {
-    return template
+    let result = template
       .replace(/\{\{event_list\}\}/g, eventLines.join("\n") || "（暂无记忆事件）")
       .replace(/\{\{epiphany\}\}/g, epiphanyText);
+    // 替换通用变量 [now]
+    if (result.includes("[now]")) {
+      const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+      const now = dayjs();
+      result = result.replace(/\[now\]/g, `${now.format("M/D")}(${WEEKDAYS[now.day()]}) ${now.format("HH:mm")}`);
+    }
+    return result;
   }
 
   // 降级：无模板时硬编码
@@ -221,9 +300,10 @@ function buildMemorySection(
 }
 
 /**
- * 替换 [user] 和 [time] 占位符
+ * 替换 [user]、[time]、[now] 占位符
  * [user] → 用户昵称
  * [time] → 相对时间描述（如"前两个月"、"上周"）
+ * [now] → 当前时间（如"2026年7月17日 15:30"）
  */
 function replacePlaceholders(
   text: string,
@@ -261,6 +341,13 @@ function replacePlaceholders(
     }
 
     result = result.replace(/\[time\]/g, relativeTime);
+  }
+
+  // [now] → 当前时间
+  if (result.includes("[now]")) {
+    const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+    const now = dayjs();
+    result = result.replace(/\[now\]/g, `${now.format("M/D")}(${WEEKDAYS[now.day()]}) ${now.format("HH:mm")}`);
   }
 
   return result;

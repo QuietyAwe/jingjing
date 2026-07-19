@@ -45,7 +45,7 @@ function buildExtractionPrompt(
 
   lines.push("");
   lines.push(
-    '请严格输出 JSON，格式：{"updated_user_info": {...}, "new_fragment": {"summary": "...", "emotion": "...", "target_event_index": 数字或-1, "new_event_text": ""}}',
+    '请严格输出 JSON，格式：{"updated_user_info": {...}, "new_fragment": {"summary": "...", "emotion": "...", "priority": 数字1-9, "target_event_index": 数字或-1, "new_event_text": ""}}',
   );
 
   return lines.join("\n");
@@ -106,8 +106,11 @@ export async function extractConsolidation(
     if (parsed.new_fragment.target_event_index === undefined) {
       parsed.new_fragment.target_event_index = -1;
     }
+    if (parsed.new_fragment.priority === undefined || parsed.new_fragment.priority < 1 || parsed.new_fragment.priority > 9) {
+      parsed.new_fragment.priority = 5;
+    }
 
-    logDebug("巩固返回", `摘要: ${parsed.new_fragment.summary}\n情绪: ${parsed.new_fragment.emotion}`);
+    logDebug("巩固返回", `摘要: ${parsed.new_fragment.summary}\n情绪: ${parsed.new_fragment.emotion}\n优先级: ${parsed.new_fragment.priority}`);
     return parsed;
   } catch (err: unknown) {
     clearTimeout(timer);

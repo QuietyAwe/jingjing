@@ -44,7 +44,7 @@ export function buildChatContext(
   const isColdStart = !userInfo;
 
   // 2. 本地检索（PRD 2.1 节第 2-5 步）
-  const { topEvents, epiphany, keywords } = retrieve(userInput);
+  const { topEvents, epiphany, keywords, hitFragments } = retrieve(userInput);
 
   // 3. Prompt 拼装
   if (isColdStart) {
@@ -77,19 +77,18 @@ export function buildChatContext(
     topEvents,
     epiphany,
     chatHistory,
-    currentEmotion
+    currentEmotion,
+    hitFragments
   );
 
   const memoryCount = topEvents.length + (epiphany ? 1 : 0);
 
-  // 缓存优化结构：[system, state, ...history, memory]
-  // system + state 在巩固窗口内稳定，可命中前缀缓存
-  // memory 每次检索可能变化，放历史之后
+  // Prompt 顺序：[system, state, memory, ...history]
   const messages = [
     { role: "system" as const, content: assembled.system },
     ...(assembled.state ? [{ role: "system" as const, content: assembled.state }] : []),
-    ...assembled.messages,
     ...(assembled.memory ? [{ role: "system" as const, content: assembled.memory }] : []),
+    ...assembled.messages,
   ];
   logDebug("上下文", `正常模式, 记忆: ${memoryCount} 条\n消息数: ${messages.length}\nsystem 长度: ${assembled.system.length}\nstate 长度: ${assembled.state.length}\nmemory 长度: ${assembled.memory.length}`);
   return {

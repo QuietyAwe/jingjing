@@ -40,7 +40,7 @@ export interface ColorPalette {
 }
 
 export const lightColors: ColorPalette = {
-  bg: "#F7F7F5",
+  bg: "#FAFAFA",
   sectionBg: "#FFFFFF",
   editorBg: "#FFFFFF",
   overlayBg: "rgba(0,0,0,0.4)",
@@ -48,53 +48,53 @@ export const lightColors: ColorPalette = {
   text: "#37352F",
   textSecondary: "#555450",
   textMuted: "#9B9A97",
-  textOnAccent: "#FFFFFF",
+  textOnAccent: "#5D524A",
 
   accent: "#2F81F7",
   accentMuted: "rgba(47,129,247,0.1)",
   danger: "#E03E3E",
   dangerMuted: "rgba(224,62,62,0.1)",
 
-  border: "#E8E7E4",
+  border: "#EEEEEE",
 
-  inputBg: "#F7F7F5",
-  btnBg: "#F0F0EE",
+  inputBg: "#F5F5F5",
+  btnBg: "#F0F0F0",
   btnDisabled: "#D3D1CB",
   placeholder: "#B0AFAF",
 
-  bubbleUser: "#2F81F7",
-  bubbleAi: "#F7F7F5",
+  bubbleUser: "#FFE4E1",
+  bubbleAi: "#FAF5F0",
 
   debugBg: "#1E1E1E",
   debugText: "#D4D4D4",
 };
 
 export const darkColors: ColorPalette = {
-  bg: "#1A1A1A",
-  sectionBg: "#2C2C2C",
-  editorBg: "#242424",
-  overlayBg: "rgba(0,0,0,0.6)",
+  bg: "#000000",
+  sectionBg: "#0A0A0A",
+  editorBg: "#0A0A0A",
+  overlayBg: "rgba(0,0,0,0.8)",
 
   text: "#E8E7E4",
   textSecondary: "#B0AFAF",
-  textMuted: "#7A7A76",
-  textOnAccent: "#FFFFFF",
+  textMuted: "#6E6E6E",
+  textOnAccent: "#E0D8D0",
 
   accent: "#4D9FFF",
   accentMuted: "rgba(77,159,255,0.15)",
   danger: "#FF6B6B",
   dangerMuted: "rgba(255,107,107,0.15)",
 
-  border: "#3A3A3A",
+  border: "#1C1C1E",
 
-  inputBg: "#2C2C2C",
-  btnBg: "#3A3A3A",
-  btnDisabled: "#555555",
-  placeholder: "#666666",
+  inputBg: "#0A0A0A",
+  btnBg: "#1C1C1E",
+  btnDisabled: "#38383A",
+  placeholder: "#48484A",
 
-  bubbleUser: "#3A7BD5",
-  bubbleAi: "#2C2C2C",
+  bubbleUser: "#8B4A4A",
+  bubbleAi: "#1A1A2E",
 
-  debugBg: "#0D0D0D",
+  debugBg: "#000000",
   debugText: "#D4D4D4",
 };

@@ -69,7 +69,6 @@ export function getConfigDefault(key: string): string {
     background_temperature: String(bg.temperature),
     foreground_model: fg.model,
     foreground_temperature: String(fg.temperature),
-    context_template: config.prompts.context_template,
     extraction_prompt: config.prompts.extraction_prompt,
     state_injection_template: config.prompts.state_injection_template,
     dream_consolidation_prompt: config.prompts.dream_consolidation_prompt,
@@ -110,7 +109,6 @@ export function getPrompts() {
     state_injection_template: getOverride("state_injection_template", config.prompts.state_injection_template),
     dream_consolidation_prompt: getOverride("dream_consolidation_prompt", config.prompts.dream_consolidation_prompt),
     cold_start_template: getOverride("cold_start_template", config.prompts.cold_start_template),
-    context_template: getOverride("context_template", config.prompts.context_template),
     memory_injection_template: getOverride("memory_injection_template", config.prompts.memory_injection_template),
     memory_event_template: getOverride("memory_event_template", config.prompts.memory_event_template),
   };

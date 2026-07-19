@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import {
   View,
   Text,
@@ -15,21 +15,21 @@ import {
 import { useFocusEffect } from "@react-navigation/native";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useTheme, useThemeStore } from "@/theme/useTheme";
+import { lightColors, darkColors } from "@/theme/colors";
 import { useChatStore } from "@/store/chatStore";
 import {
   getSystemPrompt,
   getConfigDefault,
   setCustomSystemPrompt,
   getThresholds,
-  getWeightDecay,
   getModelRouting,
   getPrompts,
   setConfigOverride,
   resetConfigOverride,
 } from "@/prompt/config";
-import { getUserInfo, getTopActive, getActiveCount, getMeta, clearAllData, updateBasicIdentityNickname, updateEventText, deleteEvent } from "@/db/queries";
+import { getUserInfo, getTopActive, getActiveCount, getMeta, clearAllData, updateBasicIdentityNickname, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment } from "@/db/queries";
 import { fetchModels } from "@/llm/client";
-import type { UserInfo, MemoryEvent } from "@/types/schema";
+import type { UserInfo, MemoryEvent, MemoryFragment } from "@/types/schema";
 
 // 配置项元数据
 interface ConfigField {
@@ -44,34 +44,58 @@ const THRESHOLD_FIELDS: ConfigField[] = [
   { key: "context_active_events_limit", label: "记忆区事件上限", type: "number", description: "上下文中加载的高权重事件数量" },
 ];
 
-const DECAY_FIELDS: ConfigField[] = [
-  { key: "ebbinghaus_decay_rate", label: "衰减系数", type: "number", description: "艾宾浩斯遗忘速率（越大遗忘越快）" },
-  { key: "epiphany_trigger_probability", label: "灵光一闪概率", type: "number", description: "0-1 之间，如 0.05 = 5%" },
-];
+// 提示词分组配置
+interface PromptGroup {
+  icon: string;
+  title: string;
+  description?: string;
+  fields: ConfigField[];
+}
 
-const PROMPT_FIELDS: ConfigField[] = [
-  { key: "system_prompt", label: "系统人设", type: "multiline", description: "AI 的角色定义与人格设定，用 [user] 指代用户" },
-  { key: "context_template", label: "上下文提示词模板", type: "multiline", description: "已弃用：系统人设现独立为稳定 message，状态区+记忆区作为易变 message，分别缓存" },
-  { key: "state_injection_template", label: "状态区注入模板", type: "multiline", description: "用户信息区的格式模板，用 {{variable}} 引用字段" },
-  { key: "memory_injection_template", label: "记忆区注入模板", type: "multiline", description: "记忆区的整体格式，用 {{event_list}} 引用事件列表，{{epiphany}} 引用灵光一闪" },
-  { key: "memory_event_template", label: "记忆事件格式", type: "multiline", description: "单条记忆事件的格式，用 {{event_text}} 引用事件内容（权重通过排序隐式表达）" },
-  { key: "extraction_prompt", label: "提取指令", type: "multiline", description: "后台记忆与用户信息提取的系统指令" },
-  { key: "dream_consolidation_prompt", label: "做梦折叠指令", type: "multiline", description: "冷数据语义折叠的 LLM 指令" },
-  { key: "cold_start_template", label: "冷启动模板", type: "multiline", description: "空库首次对话的引导性人设" },
+const PROMPT_GROUPS: PromptGroup[] = [
+  {
+    icon: "💬",
+    title: "聊天提示词",
+    description: "按消息发送顺序排列，越靠前缓存命中率越高",
+    fields: [
+      { key: "system_prompt", label: "① 系统人设", type: "multiline", description: "定义 AI 的角色与人格。此部分作为独立消息发送，缓存命中率最高。" },
+      { key: "state_injection_template", label: "② 状态区注入模板", type: "multiline", description: "定义用户信息的注入格式。此部分在10轮对话内保持稳定，空字段自动隐藏。" },
+      { key: "memory_injection_template", label: "③ 记忆区注入模板", type: "multiline", description: "定义记忆区的整体结构。每次检索可能注入不同事件。" },
+      { key: "memory_event_template", label: "└ 记忆事件格式", type: "multiline", description: "定义单条记忆事件的格式。[time] 为相对于事件发生时间的描述。" },
+    ],
+  },
+  {
+    icon: "🔧",
+    title: "后台任务",
+    fields: [
+      { key: "extraction_prompt", label: "记忆提取指令", type: "multiline", description: "每10轮对话触发一次，从对话中提取用户信息和记忆片段。" },
+      { key: "dream_consolidation_prompt", label: "做梦折叠指令", type: "multiline", description: "闲置时自动触发，将琐碎记忆事件折叠为概括性事件。" },
+    ],
+  },
+  {
+    icon: "🚀",
+    title: "特殊场景",
+    fields: [
+      { key: "cold_start_template", label: "冷启动模板", type: "multiline", description: "当数据库为空时，与系统人设组合使用，引导用户自我介绍。" },
+    ],
+  },
 ];
 
 export default function SettingsScreen() {
-  const { apiKey, baseUrl, user_nickname, saveApiKey, saveBaseUrl, saveUserNickname } = useSettingsStore();
+  const { apiKey, baseUrl, user_nickname, ai_name, stream_output, thinking_mode, customColorsLight, customColorsDark, saveApiKey, saveBaseUrl, saveUserNickname, saveAiName, saveStreamOutput, saveThinkingMode, saveCustomColors } = useSettingsStore();
   const clearMessages = useChatStore((s) => s.clearMessages);
   const colors = useTheme();
   const { themeMode, toggleTheme } = useThemeStore();
+  const currentCustomColors = themeMode === "light" ? customColorsLight : customColorsDark;
 
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [showUrlModal, setShowUrlModal] = useState(false);
   const [showNicknameModal, setShowNicknameModal] = useState(false);
+  const [showAiNameModal, setShowAiNameModal] = useState(false);
   const [inputKey, setInputKey] = useState("");
   const [inputUrl, setInputUrl] = useState("");
   const [inputNickname, setInputNickname] = useState("");
+  const [inputAiName, setInputAiName] = useState("");
 
   // 配置编辑器状态
   const [editorVisible, setEditorVisible] = useState(false);
@@ -79,6 +103,65 @@ export default function SettingsScreen() {
   const [editorField, setEditorField] = useState<ConfigField | null>(null);
   const [editorValue, setEditorValue] = useState("");
   const [previewMode, setPreviewMode] = useState(false);
+  const [cursorPos, setCursorPos] = useState(0);
+  const editorInputRef = useRef<TextInput>(null);
+
+  // 各模板可用变量库
+  const COMMON_VARIABLES = [
+    { label: "用户名", value: "[user]" },
+    { label: "当前时间", value: "[now]" },
+  ];
+  const TEMPLATE_VARIABLES: Record<string, { label: string; value: string }[]> = {
+    system_prompt: COMMON_VARIABLES,
+    cold_start_template: COMMON_VARIABLES,
+    extraction_prompt: COMMON_VARIABLES,
+    dream_consolidation_prompt: COMMON_VARIABLES,
+    state_injection_template: [
+      ...COMMON_VARIABLES,
+      { label: "昵称", value: "{{nickname}}" },
+      { label: "性别", value: "{{gender}}" },
+      { label: "生日", value: "{{birthday}}" },
+      { label: "职业", value: "{{occupation}}" },
+      { label: "所在地", value: "{{location}}" },
+      { label: "喜欢", value: "{{likes}}" },
+      { label: "讨厌", value: "{{dislikes}}" },
+      { label: "社交图谱", value: "{{social_graph}}" },
+      { label: "性格特质", value: "{{personality_traits}}" },
+      { label: "近期压力", value: "{{current_stressors}}" },
+      { label: "沟通偏好", value: "{{comm_preference}}" },
+      { label: "长期目标", value: "{{long_term_goals}}" },
+      { label: "待办任务", value: "{{ongoing_tasks}}" },
+      { label: "当前情绪", value: "{{emotion}}" },
+    ],
+    memory_injection_template: [
+      { label: "事件列表", value: "{{event_list}}" },
+      { label: "灵光一闪", value: "{{epiphany}}" },
+    ],
+    memory_event_template: [
+      ...COMMON_VARIABLES,
+      { label: "相对时间", value: "[time]" },
+      { label: "事件内容", value: "{{event_text}}" },
+    ],
+    context_template: [
+      { label: "系统人设", value: "{{{system_prompt}}}" },
+      { label: "状态区", value: "{{{state_info}}}" },
+      { label: "记忆区", value: "{{{memory_events}}}" },
+    ],
+  };
+
+  // 在光标位置插入变量
+  const insertVariable = (variable: string) => {
+    const before = editorValue.slice(0, cursorPos);
+    const after = editorValue.slice(cursorPos);
+    const newValue = before + variable + after;
+    setEditorValue(newValue);
+    const newPos = cursorPos + variable.length;
+    setCursorPos(newPos);
+    // 延迟设置光标位置，确保 TextInput 更新后生效
+    setTimeout(() => {
+      editorInputRef.current?.setNativeProps({ selection: { start: newPos, end: newPos } });
+    }, 50);
+  };
 
   // 模型选择器
   const [modelPickerVisible, setModelPickerVisible] = useState(false);
@@ -95,11 +178,23 @@ export default function SettingsScreen() {
   const [editingEvent, setEditingEvent] = useState<MemoryEvent | null>(null);
   const [editEventText, setEditEventText] = useState("");
   const [showEventEditor, setShowEventEditor] = useState(false);
+  const [editorFragments, setEditorFragments] = useState<MemoryFragment[]>([]);
+  const [newFragmentSummary, setNewFragmentSummary] = useState("");
+  const [newFragmentEmotion, setNewFragmentEmotion] = useState("");
+  const [newFragmentPriority, setNewFragmentPriority] = useState("5");
   const [deletingEvent, setDeletingEvent] = useState<MemoryEvent | null>(null);
+  const [showNewEventModal, setShowNewEventModal] = useState(false);
+  const [newEventText, setNewEventText] = useState("");
+  const [newEventWeight, setNewEventWeight] = useState("50");
+  const [newEventPriority, setNewEventPriority] = useState("5");
+
+  // 事件详情弹窗
+  const [selectedEvent, setSelectedEvent] = useState<MemoryEvent | null>(null);
+  const [showEventDetail, setShowEventDetail] = useState(false);
+  const [eventFragments, setEventFragments] = useState<MemoryFragment[]>([]);
 
   // 配置值刷新
   const [thresholds, setThresholds] = useState(getThresholds());
-  const [decay, setDecay] = useState(getWeightDecay());
   const [modelRouting, setModelRouting] = useState(getModelRouting());
 
   useFocusEffect(
@@ -108,7 +203,6 @@ export default function SettingsScreen() {
       setEventCount(getActiveCount());
       setSystemPromptState(getSystemPrompt());
       setThresholds(getThresholds());
-      setDecay(getWeightDecay());
       setModelRouting(getModelRouting());
       setEvents(getTopActive(999));
     }, []),
@@ -134,6 +228,31 @@ export default function SettingsScreen() {
       updateBasicIdentityNickname(inputNickname.trim());
     }
     setShowNicknameModal(false);
+  };
+
+  const handleSaveAiName = async () => {
+    await saveAiName(inputAiName);
+    setShowAiNameModal(false);
+  };
+
+  const handleCreateEvent = () => {
+    const text = newEventText.trim();
+    const weight = parseInt(newEventWeight) || 50;
+    const priority = parseInt(newEventPriority) || 5;
+    if (!text) return;
+    insertEvent(text, Math.min(100, Math.max(1, weight)), events.length, Math.min(9, Math.max(1, priority)));
+    setEvents(getTopActive(999));
+    setEventCount(getActiveCount());
+    setShowNewEventModal(false);
+  };
+
+  const handleCreateFragment = () => {
+    if (!editingEvent || !newFragmentSummary.trim()) return;
+    const priority = parseInt(newFragmentPriority) || 5;
+    insertFragment(editingEvent.id, newFragmentSummary.trim(), newFragmentEmotion.trim() || "未标记情绪", Math.min(9, Math.max(1, priority)));
+    setEditorFragments(getFragmentsByEventId(editingEvent.id));
+    setNewFragmentSummary("");
+    setNewFragmentEmotion("");
   };
 
   // 获取模型列表
@@ -172,31 +291,38 @@ export default function SettingsScreen() {
 
   // 是否为提示词类型（可预览）
   const isPreviewable = (key: string) => {
-    return ["system_prompt", "context_template", "state_injection_template", "memory_injection_template", "memory_event_template", "extraction_prompt", "cold_start_template", "dream_consolidation_prompt"].includes(key);
+    return ["system_prompt", "state_injection_template", "memory_injection_template", "memory_event_template", "extraction_prompt", "cold_start_template", "dream_consolidation_prompt"].includes(key);
   };
 
-  // 渲染状态区模板（用 editorValue 替换 {{}}）
+  // 渲染状态区模板（用 editorValue 替换 {{}}），空字段整行移除
+  const EMPTY = "__EMPTY__";
   const renderStateTemplate = (template: string, ui: UserInfo, emotion: string): string => {
     const bi = ui.basic_identity;
     const pref = ui.preferences;
     const sg = ui.social_graph;
     const ps = ui.psycho_state;
     const lq = ui.life_quests;
-    const graphText = sg.length > 0 ? sg.map((s) => `${s.name}(${s.role})：${s.attitude}`).join("\n* ") : "无";
-    const tasksText = lq.ongoing_tasks.length > 0 ? lq.ongoing_tasks.map((t) => `${t.task_name}(${t.status})`).join("；") : "无";
-    return template
+    const graphText = sg.length > 0 ? sg.map((s) => `${s.name}(${s.role})：${s.attitude}`).join("\n* ") : EMPTY;
+    const tasksText = lq.ongoing_tasks.length > 0 ? lq.ongoing_tasks.map((t) => `${t.task_name}(${t.status})`).join("；") : EMPTY;
+    const result = template
       .replace(/\{\{nickname\}\}/g, bi.nickname || "你")
       .replace(/\{\{occupation\}\}/g, bi.occupation || "未知")
       .replace(/\{\{location\}\}/g, bi.location || "未知")
-      .replace(/\{\{likes\}\}/g, pref.likes.join("、") || "无")
-      .replace(/\{\{dislikes\}\}/g, pref.dislikes.join("、") || "无")
+      .replace(/\{\{likes\}\}/g, pref.likes.length > 0 ? pref.likes.join("、") : EMPTY)
+      .replace(/\{\{dislikes\}\}/g, pref.dislikes.length > 0 ? pref.dislikes.join("、") : EMPTY)
       .replace(/\{\{social_graph\}\}/g, graphText)
-      .replace(/\{\{personality_traits\}\}/g, ps.personality_traits.join("、") || "无")
-      .replace(/\{\{current_stressors\}\}/g, ps.current_stressors.join("、") || "无")
-      .replace(/\{\{comm_preference\}\}/g, ps.comm_preference || "无")
-      .replace(/\{\{long_term_goals\}\}/g, lq.long_term_goals.join("、") || "无")
+      .replace(/\{\{personality_traits\}\}/g, ps.personality_traits.length > 0 ? ps.personality_traits.join("、") : EMPTY)
+      .replace(/\{\{current_stressors\}\}/g, ps.current_stressors.length > 0 ? ps.current_stressors.join("、") : EMPTY)
+      .replace(/\{\{comm_preference\}\}/g, ps.comm_preference || EMPTY)
+      .replace(/\{\{long_term_goals\}\}/g, lq.long_term_goals.length > 0 ? lq.long_term_goals.join("、") : EMPTY)
       .replace(/\{\{ongoing_tasks\}\}/g, tasksText)
-      .replace(/\{\{emotion\}\}/g, emotion || "未知");
+      .replace(/\{\{emotion\}\}/g, emotion || EMPTY)
+      // 通用变量
+      .replace(/\[user\]/g, bi.nickname || "你")
+      .replace(/\[now\]/g, new Date().toLocaleString("zh-CN", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }));
+    // 移除空值行和空段落标题
+    return result.split("\n").filter(line => !line.includes(EMPTY)).join("\n")
+      .replace(/\n{3,}/g, "\n\n").trim();
   };
 
   // 渲染记忆区（使用模板）
@@ -267,44 +393,15 @@ export default function SettingsScreen() {
       const events = getTopActive(10);
       return renderMemorySection(events, null) || "（暂无记忆事件）";
     };
-    const getContextTemplate = () => {
-      return key === "context_template" ? editorValue : prompts.context_template;
-    };
 
     switch (key) {
-      // ===== 系统人设：展示在上下文模板中的渲染结果 =====
+      // ===== 系统人设：展示人设内容 =====
       case "system_prompt": {
         const sections: string[] = [];
         sections.push("━━━ 系统人设（当前编辑）━━━");
         sections.push(getSysPrompt());
-        sections.push("", "━━━ 完整上下文预览 ━━━");
-        // 用 context_template 拼装
-        const rendered = getContextTemplate()
-          .replace(/\{\{\{system_prompt\}\}\}/g, getSysPrompt())
-          .replace(/\{\{\{state_info\}\}\}/g, ui ? getStateInfo() : "")
-          .replace(/\{\{\{memory_events\}\}\}/g, getMemoryInfo());
-        sections.push(rendered);
-        return sections.join("\n");
-      }
-
-      // ===== 上下文模板：展示渲染后的完整结果 =====
-      case "context_template": {
-        const sections: string[] = [];
-        sections.push("━━━ 上下文模板（当前编辑）━━━");
-        sections.push(editorValue);
-        sections.push("", "━━━ 渲染结果 ━━━");
-        const sysText = getSysPrompt();
-        const stateText = ui ? getStateInfo() : "";
-        const memText = getMemoryInfo();
-        const rendered = editorValue
-          .replace(/\{\{\{system_prompt\}\}\}/g, sysText)
-          .replace(/\{\{\{state_info\}\}\}/g, stateText || "（冷启动：无用户信息）")
-          .replace(/\{\{\{memory_events\}\}\}/g, memText);
-        sections.push(rendered);
-        if (!ui) {
-          sections.push("", "━━━ 冷启动模式 ━━━");
-          sections.push("状态区和记忆区为空，系统将使用冷启动模板引导对话。");
-        }
+        sections.push("", "━━━ 渲染效果 ━━━");
+        sections.push("作为独立 system message 发送，缓存命中率最高。");
         return sections.join("\n");
       }
 
@@ -350,11 +447,7 @@ export default function SettingsScreen() {
         const sysPrompt = getSysPrompt();
         const coldStart = editorValue.replace(/\[user\]/gi, nickname);
         const fullSys = [sysPrompt, coldStart].filter(Boolean).join("\n\n");
-        const rendered = getContextTemplate()
-          .replace(/\{\{\{system_prompt\}\}\}/g, fullSys)
-          .replace(/\{\{\{state_info\}\}\}/g, "")
-          .replace(/\{\{\{memory_events\}\}\}/g, "");
-        return rendered;
+        return fullSys;
       }
 
       // ===== 提取指令：展示完整提取 prompt =====
@@ -404,7 +497,6 @@ export default function SettingsScreen() {
 
     // 刷新所有配置
     setThresholds(getThresholds());
-    setDecay(getWeightDecay());
     setModelRouting(getModelRouting());
     setSystemPromptState(getSystemPrompt());
     setEditorVisible(false);
@@ -415,7 +507,6 @@ export default function SettingsScreen() {
     if (!editorField) return;
     await resetConfigOverride(editorField.key);
     setThresholds(getThresholds());
-    setDecay(getWeightDecay());
     setModelRouting(getModelRouting());
     setSystemPromptState(getSystemPrompt());
     setEditorVisible(false);
@@ -479,7 +570,6 @@ export default function SettingsScreen() {
   };
 
   const thresholdsVal = thresholds as Record<string, number>;
-  const decayVal = decay as Record<string, number>;
   const bgRouting = modelRouting.background_extraction_config;
   const fgRouting = modelRouting.foreground_chat_config;
 
@@ -492,6 +582,92 @@ export default function SettingsScreen() {
           <Text style={[styles.label, { color: colors.text }]}>深色模式</Text>
           <Text style={[styles.value, { color: colors.accent }]}>{themeMode === "dark" ? "已开启" : "已关闭"}</Text>
         </TouchableOpacity>
+
+        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>聊天气泡颜色（{themeMode === "dark" ? "深色" : "浅色"}模式）</Text>
+
+        {/* 用户消息背景 */}
+        <View style={[styles.colorRow, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.label, { color: colors.text }]}>用户消息背景</Text>
+          <View style={styles.colorChips}>
+            {(themeMode === "light"
+              ? ["#FFE4E1", "#FFD1DC", "#E8D0F0", "#D0E8F0", "#D0F0D8", "#F5E8C0", "#F0D8C0", "#E0E0F0"]
+              : ["#8B4A4A", "#4A8B4A", "#4A4A8B", "#8B8B4A", "#8B4A8B", "#4A8B8B", "#7A5A3A", "#6A6A6A"]
+            ).map((c) => (
+              <TouchableOpacity
+                key={c}
+                style={[
+                  styles.colorChip,
+                  { backgroundColor: c, borderColor: currentCustomColors.bubbleUserBg === c ? colors.accent : colors.border },
+                  currentCustomColors.bubbleUserBg === c && styles.colorChipActive,
+                ]}
+                onPress={() => saveCustomColors({ bubbleUserBg: c }, themeMode)}
+              />
+            ))}
+          </View>
+        </View>
+
+        {/* 用户消息文字 */}
+        <View style={[styles.colorRow, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.label, { color: colors.text }]}>用户消息文字</Text>
+          <View style={styles.colorChips}>
+            {(themeMode === "light"
+              ? ["#000000", "#333333", "#5D524A", "#4A5568", "#5D4A4A", "#4A5D4A", "#8B4513", "#FFFFFF"]
+              : ["#FFFFFF", "#F0F0F0", "#E0D8D0", "#D0D8E0", "#E0D0D0", "#D0E0D0", "#D0D0D0", "#E8E0D8"]
+            ).map((c) => (
+              <TouchableOpacity
+                key={c}
+                style={[
+                  styles.colorChip,
+                  { backgroundColor: c, borderColor: currentCustomColors.bubbleUserText === c ? colors.accent : colors.border },
+                  currentCustomColors.bubbleUserText === c && styles.colorChipActive,
+                ]}
+                onPress={() => saveCustomColors({ bubbleUserText: c }, themeMode)}
+              />
+            ))}
+          </View>
+        </View>
+
+        {/* AI 消息背景 */}
+        <View style={[styles.colorRow, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.label, { color: colors.text }]}>AI 消息背景</Text>
+          <View style={styles.colorChips}>
+            {(themeMode === "light"
+              ? ["#FFFFFF", "#F5F5F5", "#FAF5F0", "#F0F0FA", "#F0FAF5", "#FFF5F0", "#F5F0FA", "#F0F5FA"]
+              : ["#000000", "#1A1A1A", "#2A2A2A", "#1A1A2E", "#2E1A1A", "#1A2E1A", "#2E1A2E", "#1A2E2E"]
+            ).map((c) => (
+              <TouchableOpacity
+                key={c}
+                style={[
+                  styles.colorChip,
+                  { backgroundColor: c, borderColor: currentCustomColors.bubbleAiBg === c ? colors.accent : colors.border },
+                  currentCustomColors.bubbleAiBg === c && styles.colorChipActive,
+                ]}
+                onPress={() => saveCustomColors({ bubbleAiBg: c }, themeMode)}
+              />
+            ))}
+          </View>
+        </View>
+
+        {/* AI 消息文字 */}
+        <View style={[styles.colorRow, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.label, { color: colors.text }]}>AI 消息文字</Text>
+          <View style={styles.colorChips}>
+            {(themeMode === "light"
+              ? ["#000000", "#333333", "#6B6560", "#555450", "#795548", "#5D4037", "#8B6B4A", "#6B4226"]
+              : ["#FFFFFF", "#E8E8E8", "#B0A89E", "#A0A0A0", "#BCAAA4", "#D7CCC8", "#D0C8C0", "#C8C0B8"]
+            ).map((c) => (
+              <TouchableOpacity
+                key={c}
+                style={[
+                  styles.colorChip,
+                  { backgroundColor: c, borderColor: currentCustomColors.bubbleAiText === c ? colors.accent : colors.border },
+                  currentCustomColors.bubbleAiText === c && styles.colorChipActive,
+                ]}
+                onPress={() => saveCustomColors({ bubbleAiText: c }, themeMode)}
+              />
+            ))}
+          </View>
+        </View>
       </View>
 
       {/* API */}
@@ -505,10 +681,42 @@ export default function SettingsScreen() {
           <Text style={[styles.label, { color: colors.text }]}>API Key</Text>
           <Text style={[styles.value, { color: colors.textMuted }]}>{apiKey ? `${apiKey.slice(0, 8)}...` : "未设置"}</Text>
         </TouchableOpacity>
+        <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={() => { setInputAiName(ai_name); setShowAiNameModal(true); }}>
+          <Text style={[styles.label, { color: colors.text }]}>怎么称呼 TA</Text>
+          <Text style={[styles.value, { color: colors.textMuted }]}>{ai_name || "未设置"}</Text>
+        </TouchableOpacity>
         <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={() => { setInputNickname(user_nickname); setShowNicknameModal(true); }}>
           <Text style={[styles.label, { color: colors.text }]}>AI 怎么称呼你</Text>
           <Text style={[styles.value, { color: colors.textMuted }]}>{user_nickname || "未设置"}</Text>
         </TouchableOpacity>
+        <View style={[styles.row, { borderBottomColor: colors.border }]}>
+          <View style={styles.modelInfo}>
+            <Text style={[styles.label, { color: colors.text }]}>流式输出</Text>
+            <Text style={[styles.rowDesc, { color: colors.textMuted }]}>逐字显示，首字更快（网络不稳定时可关闭）</Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.toggle, stream_output ? styles.toggleOn : styles.toggleOff]}
+            onPress={() => saveStreamOutput(!stream_output)}
+          >
+            <Text style={[styles.toggleText, stream_output ? styles.toggleTextOn : styles.toggleTextOff]}>
+              {stream_output ? "开" : "关"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        <View style={[styles.row, { borderBottomColor: colors.border }]}>
+          <View style={styles.modelInfo}>
+            <Text style={[styles.label, { color: colors.text }]}>思考模式</Text>
+            <Text style={[styles.rowDesc, { color: colors.textMuted }]}>AI 输出带思考过程（仅 DeepSeek 等支持模型）</Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.toggle, thinking_mode ? styles.toggleOn : styles.toggleOff]}
+            onPress={() => saveThinkingMode(!thinking_mode)}
+          >
+            <Text style={[styles.toggleText, thinking_mode ? styles.toggleTextOn : styles.toggleTextOff]}>
+              {thinking_mode ? "开" : "关"}
+            </Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* 模型路由 */}
@@ -556,22 +764,22 @@ export default function SettingsScreen() {
         )}
       </View>
 
-      {/* 权重与衰减 */}
+      {/* 提示词设置 - 分组显示 */}
       <View style={[styles.section, { backgroundColor: colors.sectionBg }]}>
-        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>权重与衰减</Text>
-        {DECAY_FIELDS.map((f) =>
-          renderConfigRow("权重与衰减", f, String(decayVal[f.key]))
-        )}
-      </View>
-
-      {/* 提示词与模板 */}
-      <View style={[styles.section, { backgroundColor: colors.sectionBg }]}>
-        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>提示词与模板</Text>
-        {PROMPT_FIELDS.map((f) => {
-          const prompts = getPrompts();
-          const value = (prompts as Record<string, string>)[f.key] ?? "";
-          return renderConfigRow("提示词与模板", f, value);
-        })}
+        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>提示词设置</Text>
+        {PROMPT_GROUPS.map((group) => (
+          <View key={group.title} style={styles.promptGroup}>
+            <View style={styles.promptGroupHeader}>
+              <Text style={[styles.promptGroupTitle, { color: colors.text }]}>{group.icon} {group.title}</Text>
+              {group.description ? <Text style={[styles.promptGroupDesc, { color: colors.textMuted }]}>{group.description}</Text> : null}
+            </View>
+            {group.fields.map((f) => {
+              const prompts = getPrompts();
+              const value = (prompts as Record<string, string>)[f.key] ?? "";
+              return renderConfigRow(group.title, f, value);
+            })}
+          </View>
+        ))}
       </View>
 
       {/* 记忆数据 */}
@@ -584,7 +792,12 @@ export default function SettingsScreen() {
 
       {/* 活跃事件列表 */}
       <View style={[styles.section, { backgroundColor: colors.sectionBg }]}>
-        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>活跃记忆事件 ({eventCount})</Text>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 16, paddingVertical: 12 }}>
+          <Text style={[styles.sectionTitle, { color: colors.textMuted, paddingVertical: 0 }]}>活跃记忆事件 ({eventCount})</Text>
+          <TouchableOpacity onPress={() => { setNewEventText(""); setNewEventWeight("50"); setNewEventPriority("5"); setShowNewEventModal(true); }}>
+            <Text style={[styles.confirmText, { color: colors.accent }]}>+ 新建</Text>
+          </TouchableOpacity>
+        </View>
         {events.length === 0 ? (
           <Text style={[styles.emptyText, { color: colors.textMuted, paddingVertical: 16 }]}>暂无记忆事件</Text>
         ) : (
@@ -593,16 +806,16 @@ export default function SettingsScreen() {
               key={evt.id}
               style={[styles.row, { borderBottomColor: colors.border, alignItems: "flex-start" }]}
               onPress={() => {
-                setEditingEvent(evt);
-                setEditEventText(evt.event_text);
-                setShowEventEditor(true);
+                setSelectedEvent(evt);
+                setEventFragments(getFragmentsByEventId(evt.id));
+                setShowEventDetail(true);
               }}
               onLongPress={() => setDeletingEvent(evt)}
             >
               <View style={[styles.rowLeft, { flex: 1 }]}>
                 <Text style={[styles.label, { color: colors.text, fontSize: 14, lineHeight: 20 }]}>{evt.event_text}</Text>
                 <Text style={[styles.rowDesc, { color: colors.textMuted }]}>
-                  权重 {evt.active_weight} · {new Date(evt.timestamp).toLocaleDateString()}
+                  权重 {evt.active_weight} · 优先级 {evt.priority} · {new Date(evt.timestamp).toLocaleDateString()}
                 </Text>
               </View>
               <Text style={[styles.value, { color: colors.textMuted, fontSize: 12 }]}>#{evt.id}</Text>
@@ -660,6 +873,21 @@ export default function SettingsScreen() {
             <View style={styles.modalButtons}>
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowNicknameModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
               <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveNickname}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* AI名字弹窗 */}
+      <Modal visible={showAiNameModal} transparent animationType="fade">
+        <View style={styles.overlay}>
+          <View style={styles.modal}>
+            <Text style={styles.modalTitle}>怎么称呼 TA</Text>
+            <TextInput style={styles.input} value={inputAiName} onChangeText={setInputAiName} placeholder="留空则显示默认标题" placeholderTextColor="#9B9A97" autoFocus />
+            <Text style={styles.modalHint}>标题栏会显示 TA 的名字</Text>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowAiNameModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveAiName}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
             </View>
           </View>
         </View>
@@ -744,17 +972,38 @@ export default function SettingsScreen() {
               </ScrollView>
             ) : (
               <TextInput
+                ref={editorInputRef}
                 style={[
                   editorField?.type === "multiline" ? styles.editorInputMultiline : styles.editorInputSingle,
                   { borderColor: colors.border, color: colors.text },
                 ]}
                 value={editorValue}
                 onChangeText={setEditorValue}
+                onSelectionChange={(e) => setCursorPos(e.nativeEvent.selection.start)}
                 multiline={editorField?.type === "multiline"}
                 keyboardType={editorField?.type === "number" ? "decimal-pad" : "default"}
                 textAlignVertical={editorField?.type === "multiline" ? "top" : "center"}
                 autoFocus
               />
+            )}
+
+            {/* 变量选择器 */}
+            {!previewMode && editorField && TEMPLATE_VARIABLES[editorField.key] && (
+              <View style={[styles.varPickerContainer, { borderTopColor: colors.border }]}>
+                <Text style={[styles.varPickerTitle, { color: colors.textMuted }]}>点击插入变量：</Text>
+                <View style={styles.varPickerChips}>
+                  {TEMPLATE_VARIABLES[editorField.key].map((v) => (
+                    <TouchableOpacity
+                      key={v.value}
+                      style={[styles.varChip, { backgroundColor: colors.bubbleAi, borderColor: colors.border }]}
+                      onPress={() => insertVariable(v.value)}
+                    >
+                      <Text style={[styles.varChipText, { color: colors.text }]}>{v.label}</Text>
+                      <Text style={[styles.varChipValue, { color: colors.textMuted }]}>{v.value}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
             )}
 
             {!previewMode && (
@@ -772,6 +1021,51 @@ export default function SettingsScreen() {
             )}
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* 新建事件弹窗 */}
+      <Modal visible={showNewEventModal} transparent animationType="fade">
+        <View style={styles.overlay}>
+          <View style={[styles.modal, { maxHeight: "80%" }]}>
+            <Text style={styles.modalTitle}>新建记忆事件</Text>
+            <TextInput
+              style={[styles.input, { minHeight: 100, textAlignVertical: "top" }]}
+              value={newEventText}
+              onChangeText={setNewEventText}
+              placeholder="输入事件内容..."
+              placeholderTextColor="#9B9A97"
+              multiline
+              autoFocus
+            />
+            <View style={{ flexDirection: "row", alignItems: "center", marginTop: 12, gap: 8 }}>
+              <Text style={[styles.modalHint, { marginTop: 0 }]}>权重 (1-100):</Text>
+              <TextInput
+                style={[styles.input, { flex: 1, marginTop: 0 }]}
+                value={newEventWeight}
+                onChangeText={setNewEventWeight}
+                placeholder="50"
+                placeholderTextColor="#9B9A97"
+                keyboardType="number-pad"
+              />
+            </View>
+            <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8, gap: 8 }}>
+              <Text style={[styles.modalHint, { marginTop: 0 }]}>优先级 (1-9):</Text>
+              <TextInput
+                style={[styles.input, { flex: 1, marginTop: 0 }]}
+                value={newEventPriority}
+                onChangeText={setNewEventPriority}
+                placeholder="5"
+                placeholderTextColor="#9B9A97"
+                keyboardType="number-pad"
+              />
+            </View>
+            <Text style={styles.modalHint}>权重：检索命中概率。优先级：1-3琐事，4-6中等，7-9重大（影响衰减速度）</Text>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowNewEventModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.confirmBtn} onPress={handleCreateEvent}><Text style={styles.confirmText}>创建</Text></TouchableOpacity>
+            </View>
+          </View>
+        </View>
       </Modal>
 
       {/* 事件编辑器 */}
@@ -794,17 +1088,17 @@ export default function SettingsScreen() {
               </TouchableOpacity>
             </View>
             {editingEvent && (
-              <View style={{ flex: 1, padding: 20 }}>
+              <ScrollView style={{ flex: 1, padding: 20 }}>
+                {/* 事件内容 */}
                 <Text style={[styles.editorLabel, { color: colors.text, marginHorizontal: 0, marginTop: 0 }]}>事件内容</Text>
                 <TextInput
-                  style={[styles.editorInputMultiline, { borderColor: colors.border, color: colors.text, flex: 1, marginHorizontal: 0, marginTop: 8 }]}
+                  style={[styles.editorInputMultiline, { borderColor: colors.border, color: colors.text, minHeight: 80, marginHorizontal: 0, marginTop: 8 }]}
                   value={editEventText}
                   onChangeText={setEditEventText}
                   multiline
-                  autoFocus
                   textAlignVertical="top"
                 />
-                <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 12 }}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 8 }}>
                   <Text style={[styles.rowDesc, { color: colors.textMuted }]}>
                     权重: {editingEvent.active_weight} · 创建于 {new Date(editingEvent.timestamp).toLocaleString()}
                   </Text>
@@ -815,10 +1109,166 @@ export default function SettingsScreen() {
                     <Text style={[styles.rowDesc, { color: colors.danger }]}>删除此事件</Text>
                   </TouchableOpacity>
                 </View>
-              </View>
+
+                {/* 记忆片段列表 */}
+                <View style={[styles.sectionDivider, { borderTopColor: colors.border, marginTop: 20 }]}>
+                  <Text style={[styles.editorLabel, { color: colors.text, marginHorizontal: 0, marginTop: 16 }]}>
+                    记忆片段 ({editorFragments.length})
+                  </Text>
+                </View>
+                {editorFragments.length === 0 ? (
+                  <Text style={[styles.emptyText, { color: colors.textMuted, marginTop: 8 }]}>暂无记忆片段</Text>
+                ) : (
+                  editorFragments.map((frag) => (
+                    <View key={frag.id} style={[styles.fragmentItem, { borderBottomColor: colors.border }]}>
+                      <Text style={[styles.fragmentSummary, { color: colors.text }]}>{frag.summary}</Text>
+                      {frag.emotion ? (
+                        <Text style={[styles.fragmentEmotion, { color: colors.textMuted }]}>情绪: {frag.emotion}</Text>
+                      ) : null}
+                      <Text style={[styles.fragmentTime, { color: colors.textMuted }]}>
+                        优先级 {frag.priority} · {new Date(frag.timestamp).toLocaleString()}
+                      </Text>
+                    </View>
+                  ))
+                )}
+
+                {/* 添加新片段 */}
+                <View style={[styles.sectionDivider, { borderTopColor: colors.border, marginTop: 16 }]}>
+                  <Text style={[styles.editorLabel, { color: colors.text, marginHorizontal: 0, marginTop: 16 }]}>添加片段</Text>
+                </View>
+                <TextInput
+                  style={[styles.input, { marginTop: 8 }]}
+                  value={newFragmentSummary}
+                  onChangeText={setNewFragmentSummary}
+                  placeholder="片段摘要（必填，建议包含 [user] [time]）"
+                  placeholderTextColor="#9B9A97"
+                  multiline
+                />
+                <TextInput
+                  style={[styles.input, { marginTop: 8 }]}
+                  value={newFragmentEmotion}
+                  onChangeText={setNewFragmentEmotion}
+                  placeholder="情绪标记（选填）"
+                  placeholderTextColor="#9B9A97"
+                />
+                <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8, gap: 8 }}>
+                  <Text style={[styles.modalHint, { marginTop: 0 }]}>优先级 (1-9):</Text>
+                  <TextInput
+                    style={[styles.input, { flex: 1, marginTop: 0 }]}
+                    value={newFragmentPriority}
+                    onChangeText={setNewFragmentPriority}
+                    placeholder="5"
+                    placeholderTextColor="#9B9A97"
+                    keyboardType="number-pad"
+                  />
+                </View>
+                <Text style={[styles.modalHint, { marginTop: 4 }]}>1-3琐事，4-6中等，7-9重大</Text>
+                <TouchableOpacity
+                  style={[styles.setupButton, { backgroundColor: newFragmentSummary.trim() ? colors.accent : colors.btnDisabled, marginTop: 12, marginBottom: 20 }]}
+                  onPress={handleCreateFragment}
+                  disabled={!newFragmentSummary.trim()}
+                >
+                  <Text style={[styles.setupButtonText, { color: colors.textOnAccent }]}>添加片段</Text>
+                </TouchableOpacity>
+              </ScrollView>
             )}
           </View>
         </KeyboardAvoidingView>
+      </Modal>
+
+      {/* 事件详情弹窗 */}
+      <Modal visible={showEventDetail} animationType="slide" onRequestClose={() => setShowEventDetail(false)}>
+        <View style={[styles.editorContainer, { backgroundColor: colors.editorBg }]}>
+          <View style={[styles.editorHeader, { backgroundColor: colors.editorBg, borderBottomColor: colors.border }]}>
+            <TouchableOpacity onPress={() => setShowEventDetail(false)}>
+              <Text style={[styles.cancelText, { color: colors.textMuted }]}>返回</Text>
+            </TouchableOpacity>
+            <Text style={[styles.editorTitle, { color: colors.text }]}>事件详情 #{selectedEvent?.id}</Text>
+            <View style={{ flexDirection: "row", gap: 16 }}>
+              <TouchableOpacity onPress={() => {
+                setShowEventDetail(false);
+                if (selectedEvent) {
+                  setEditingEvent(selectedEvent);
+                  setEditEventText(selectedEvent.event_text);
+                  setEditorFragments(getFragmentsByEventId(selectedEvent.id));
+                  setShowEventEditor(true);
+                }
+              }}>
+                <Text style={[styles.confirmText, { color: colors.accent }]}>编辑</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          <ScrollView style={{ flex: 1, padding: 20 }}>
+            {/* 事件信息 */}
+            <Text style={[styles.editorLabel, { color: colors.text, marginHorizontal: 0, marginTop: 0 }]}>事件内容</Text>
+            <Text style={[styles.detailText, { color: colors.text }]}>{selectedEvent?.event_text}</Text>
+
+            <View style={[styles.detailMeta, { borderTopColor: colors.border, borderBottomColor: colors.border }]}>
+              <View style={styles.detailMetaItem}>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>权重</Text>
+                <Text style={[styles.detailMetaValue, { color: colors.text }]}>{selectedEvent?.active_weight}</Text>
+              </View>
+              <View style={styles.detailMetaItem}>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>优先级</Text>
+                <Text style={[styles.detailMetaValue, { color: colors.text }]}>{selectedEvent?.priority}</Text>
+              </View>
+              <View style={styles.detailMetaItem}>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>创建时间</Text>
+                <Text style={[styles.detailMetaValue, { color: colors.text }]}>
+                  {selectedEvent ? new Date(selectedEvent.timestamp).toLocaleString() : ""}
+                </Text>
+              </View>
+              <View style={styles.detailMetaItem}>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>最后访问</Text>
+                <Text style={[styles.detailMetaValue, { color: colors.text }]}>
+                  {selectedEvent ? new Date(selectedEvent.last_accessed).toLocaleString() : ""}
+                </Text>
+              </View>
+              <View style={styles.detailMetaItem}>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>片段数量</Text>
+                <Text style={[styles.detailMetaValue, { color: colors.text }]}>{eventFragments.length}</Text>
+              </View>
+            </View>
+
+            {/* 记忆片段列表 */}
+            <Text style={[styles.editorLabel, { color: colors.text, marginHorizontal: 0, marginTop: 20 }]}>
+              记忆片段 ({eventFragments.length})
+            </Text>
+            {eventFragments.length === 0 ? (
+              <Text style={[styles.emptyText, { color: colors.textMuted, marginTop: 8 }]}>暂无关联的记忆片段</Text>
+            ) : (
+              eventFragments.map((frag, index) => (
+                <View key={frag.id} style={[styles.fragmentCard, { backgroundColor: colors.sectionBg, borderColor: colors.border }]}>
+                  <View style={styles.fragmentHeader}>
+                    <Text style={[styles.fragmentIndex, { color: colors.textMuted }]}>#{index + 1}</Text>
+                    <View style={{ flexDirection: "row", gap: 8 }}>
+                      <Text style={[styles.fragmentEmotion, { color: colors.textMuted }]}>优先级 {frag.priority}</Text>
+                      <Text style={[styles.fragmentEmotion, { color: colors.accent }]}>{frag.emotion}</Text>
+                    </View>
+                  </View>
+                  <Text style={[styles.fragmentText, { color: colors.text }]}>{frag.summary}</Text>
+                  <Text style={[styles.fragmentTime, { color: colors.textMuted }]}>
+                    {new Date(frag.timestamp).toLocaleString()}
+                  </Text>
+                </View>
+              ))
+            )}
+
+            {/* 操作按钮 */}
+            <View style={[styles.detailActions, { borderTopColor: colors.border }]}>
+              <TouchableOpacity
+                style={[styles.detailActionBtn, { backgroundColor: colors.bg }]}
+                onPress={() => {
+                  setShowEventDetail(false);
+                  setDeletingEvent(selectedEvent);
+                }}
+              >
+                <Text style={[styles.detailActionText, { color: colors.danger }]}>删除此事件</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        </View>
       </Modal>
 
       {/* 事件删除确认 */}
@@ -902,16 +1352,58 @@ const styles = StyleSheet.create({
   editorLabel: { fontSize: 15, fontWeight: "600", color: "#37352F", marginTop: 20, marginHorizontal: 20 },
   editorDesc: { fontSize: 13, color: "#9B9A97", marginTop: 4, marginHorizontal: 20 },
   editorInputSingle: { marginHorizontal: 20, marginTop: 12, borderWidth: 1, borderColor: "#E8E7E4", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: "#37352F" },
-  editorInputMultiline: { flex: 1, marginHorizontal: 20, marginTop: 12, borderWidth: 1, borderColor: "#E8E7E4", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, color: "#37352F", lineHeight: 22 },
+  editorInputMultiline: { flex: 1, minHeight: 200, marginHorizontal: 20, marginTop: 12, borderWidth: 1, borderColor: "#E8E7E4", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 12, fontSize: 14, color: "#37352F", lineHeight: 22 },
   editorFooter: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 20, paddingVertical: 16, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#E8E7E4" },
   resetBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, backgroundColor: "#F7F7F5" },
   resetText: { fontSize: 13, color: "#9B9A97" },
   editorSaveBtn: { marginHorizontal: 20, marginBottom: 34, marginTop: 8, backgroundColor: "#2F81F7", borderRadius: 10, paddingVertical: 14, alignItems: "center" },
   editorSaveBtnText: { color: "#FFFFFF", fontSize: 16, fontWeight: "600" },
+  // 变量选择器
+  varPickerContainer: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 4, borderTopWidth: StyleSheet.hairlineWidth },
+  varPickerTitle: { fontSize: 11, marginBottom: 6 },
+  varPickerChips: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  varChip: { flexDirection: "row", alignItems: "center", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 5, borderWidth: 1, gap: 3 },
+  varChipText: { fontSize: 12, fontWeight: "500" },
+  varChipValue: { fontSize: 10 },
+  // 提示词分组
+  promptGroup: { marginBottom: 8 },
+  promptGroupHeader: { paddingVertical: 12, gap: 4 },
+  promptGroupTitle: { fontSize: 15, fontWeight: "600" },
+  promptGroupDesc: { fontSize: 12, lineHeight: 18 },
+  // 事件详情
+  detailText: { fontSize: 15, lineHeight: 24, marginTop: 8 },
+  detailMeta: { flexDirection: "row", flexWrap: "wrap", gap: 16, paddingVertical: 16, marginTop: 16, borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth },
+  detailMetaItem: { minWidth: 80 },
+  detailMetaLabel: { fontSize: 11, marginBottom: 4 },
+  detailMetaValue: { fontSize: 14, fontWeight: "500" },
+  fragmentCard: { borderRadius: 10, padding: 14, marginTop: 10, borderWidth: 1 },
+  fragmentHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
+  fragmentIndex: { fontSize: 12 },
+  fragmentEmotion: { fontSize: 13, fontWeight: "600" },
+  fragmentText: { fontSize: 14, lineHeight: 20 },
+  fragmentTime: { fontSize: 11, marginTop: 8 },
+  sectionDivider: { borderTopWidth: StyleSheet.hairlineWidth },
+  fragmentItem: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth },
+  fragmentSummary: { fontSize: 14, lineHeight: 20 },
+  detailActions: { paddingVertical: 24, marginTop: 24, borderTopWidth: StyleSheet.hairlineWidth },
+  detailActionBtn: { paddingVertical: 14, borderRadius: 10, alignItems: "center" },
+  detailActionText: { fontSize: 15, fontWeight: "600" },
+  // 颜色选择器
+  colorRow: { paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth },
+  colorChips: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 10 },
+  colorChip: { width: 32, height: 32, borderRadius: 16, borderWidth: 2 },
+  colorChipActive: { borderWidth: 3 },
   // 预览
   editorHeaderRight: { flexDirection: "row", alignItems: "center", gap: 16 },
   previewToggle: { paddingHorizontal: 12, paddingVertical: 6, backgroundColor: "#F0F0EE", borderRadius: 6 },
   previewToggleText: { fontSize: 14, color: "#37352F", fontWeight: "500" },
   previewContainer: { flex: 1, marginHorizontal: 20, marginTop: 12, backgroundColor: "#F7F7F5", borderRadius: 8, padding: 14 },
   previewText: { fontSize: 13, color: "#37352F", lineHeight: 20, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" },
+  // 开关
+  toggle: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, minWidth: 50, alignItems: "center" },
+  toggleOn: { backgroundColor: "#2F81F7" },
+  toggleOff: { backgroundColor: "#F0F0EE" },
+  toggleText: { fontSize: 14, fontWeight: "600" },
+  toggleTextOn: { color: "#FFFFFF" },
+  toggleTextOff: { color: "#37352F" },
 });

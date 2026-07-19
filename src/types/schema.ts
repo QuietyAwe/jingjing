@@ -15,6 +15,8 @@ export interface MemoryFragment {
   summary: string;
   /** 情绪状态描述 */
   emotion: string;
+  /** 重要性权重 1-9（1-3琐事，4-6中等，7-9重大） */
+  priority: number;
 }
 
 /** 记忆事件表 (memory_events) */
@@ -29,6 +31,8 @@ export interface MemoryEvent {
   last_accessed: string;
   /** 0: 活跃, 1: 软归档 */
   is_archived: 0 | 1;
+  /** 重要性权重 1-9（1-3琐事，4-6中等，7-9重大） */
+  priority: number;
 }
 
 /** 系统元数据表 (system_metadata) */
@@ -67,6 +71,8 @@ export interface PsychoState {
 export interface OngoingTask {
   task_name: string;
   status: string;
+  /** 可选：到期时间 ISO8601 */
+  due_time?: string;
 }
 
 export interface LifeQuests {
@@ -87,6 +93,8 @@ export interface UserInfo {
 export interface NewFragment {
   summary: string;
   emotion: string;
+  /** 重要性权重 1-9（1-3琐事，4-6中等，7-9重大） */
+  priority: number;
   /** 挂靠的已有索引事件 ID，-1 表示需要新建 */
   target_event_index: number;
   /** target_event_index 为 -1 时，新建事件的索引文本 */
@@ -107,7 +115,6 @@ export interface PromptsConfig {
   state_injection_template: string;
   dream_consolidation_prompt: string;
   cold_start_template: string;
-  context_template: string;
   memory_injection_template: string;
   memory_event_template: string;
 }
@@ -156,4 +163,6 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: string;
+  /** 思考内容（思考模式开启时） */
+  thinking?: string;
 }

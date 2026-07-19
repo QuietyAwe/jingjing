@@ -3,13 +3,13 @@ import {
   View,
   FlatList,
   StyleSheet,
+  Keyboard,
   Text,
   TextInput,
   TouchableOpacity,
   Pressable,
   KeyboardAvoidingView,
   Platform,
-  ActivityIndicator,
   ScrollView,
   Modal,
 } from "react-native";
@@ -17,7 +17,7 @@ import dayjs from "dayjs";
 
 import ChatBubble, { StreamingBubble } from "@/components/ChatBubble";
 import { InputBar } from "@/components/InputBar";
-import { useChatStore } from "@/store/chatStore";
+import { useChatStore, logDebug } from "@/store/chatStore";
 import { useMetaStore } from "@/store/metaStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { buildChatContext } from "@/memory/chatHandler";
@@ -25,7 +25,8 @@ import { streamChat } from "@/llm/foreground";
 import { hasApiKey } from "@/llm/client";
 import { shouldConsolidate, runConsolidation } from "@/memory/consolidation";
 import { resetIdleTimer } from "@/memory/dreaming";
-import { getMeta, updateBasicIdentityNickname } from "@/db/queries";
+import { checkDuePromises, markPromiseReminded } from "@/memory/promiseChecker";
+import { getMeta, updateBasicIdentityNickname, setUserInfo, getUserInfo } from "@/db/queries";
 import { useTheme } from "@/theme/useTheme";
 import type { ChatMessage } from "@/types/schema";
 
@@ -34,9 +35,8 @@ export default function ChatScreen() {
     messages,
     isLoading,
     streamingText,
-    lastSystemPrompt,
-    lastKeywords,
-    lastMemoryCount,
+    streamingChunks,
+    streamingThinking,
     debugLogs,
     addMessage,
     deleteMessage,
@@ -44,13 +44,15 @@ export default function ChatScreen() {
     setLoading,
     setStreamingText,
     appendStreamingText,
+    setStreamingThinking,
+    appendStreamingThinking,
     setDebugInfo,
     clearDebugLogs,
     getHistory,
   } = useChatStore();
 
   const { load: loadMeta, incrementTurn } = useMetaStore();
-  const { loadApiKey, saveApiKey, saveBaseUrl, saveUserNickname, apiKey, baseUrl, user_nickname, isReady } =
+  const { loadApiKey, saveApiKey, saveBaseUrl, saveUserNickname, apiKey, baseUrl, user_nickname, ai_name, isReady } =
     useSettingsStore();
 
   const colors = useTheme();
@@ -60,6 +62,7 @@ export default function ChatScreen() {
   const [urlInput, setUrlInput] = useState("https://api.deepseek.com");
   const [nicknameInput, setNicknameInput] = useState("");
   const [showDebug, setShowDebug] = useState(false);
+  const [dotsCount, setDotsCount] = useState(0);
   const flatListRef = useRef<FlatList>(null);
 
   // 长按菜单状态
@@ -74,6 +77,50 @@ export default function ChatScreen() {
     loadApiKey();
     loadMeta();
   }, []);
+
+  // 检查到期约定
+  useEffect(() => {
+    if (!isReady) return;
+
+    const checkPromises = () => {
+      const duePromises = checkDuePromises();
+      if (duePromises.length === 0) return;
+
+      // 为每个到期约定发送系统消息
+      for (const { task, message } of duePromises) {
+        const sysMsg: ChatMessage = {
+          id: dayjs().valueOf().toString() + "_promise",
+          role: "user",
+          content: `[系统消息] ${message}`,
+          timestamp: dayjs().toISOString(),
+        };
+        addMessage(sysMsg);
+
+        // 标记已提醒（删除任务）
+        const updatedTasks = markPromiseReminded(task.task_name);
+        // 需要更新 user_info
+        const userInfo = getUserInfo();
+        if (userInfo) {
+          setUserInfo({
+            ...userInfo,
+            life_quests: {
+              ...userInfo.life_quests,
+              ongoing_tasks: updatedTasks,
+            },
+          });
+        }
+
+        logDebug("约定提醒", `已提醒: ${task.task_name}`);
+      }
+    };
+
+    // 立即检查一次
+    checkPromises();
+
+    // 每分钟检查一次
+    const timer = setInterval(checkPromises, 60000);
+    return () => clearInterval(timer);
+  }, [isReady]);
 
   useEffect(() => {
     if (isReady) {
@@ -95,6 +142,26 @@ export default function ChatScreen() {
       setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
     }
   }, [messages.length, streamingText]);
+
+  // 打字动画
+  useEffect(() => {
+    if (!isLoading) {
+      setDotsCount(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setDotsCount((prev) => (prev + 1) % 4);
+    }, 500);
+    return () => clearInterval(timer);
+  }, [isLoading]);
+
+  // 键盘弹出时滚动到底部
+  useEffect(() => {
+    const sub = Keyboard.addListener("keyboardDidShow", () => {
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    });
+    return () => sub.remove();
+  }, []);
 
   const handleSaveKey = async () => {
     const trimmed = keyInput.trim();
@@ -118,7 +185,7 @@ export default function ChatScreen() {
   };
 
   // 长按菜单操作
-  const handleAction = (action: "copy" | "delete" | "edit" | "regenerate" | "edit_resend") => {
+  const handleAction = (action: "copy" | "delete" | "edit" | "regenerate") => {
     if (!actionTarget) return;
     setShowActionMenu(false);
 
@@ -141,10 +208,6 @@ export default function ChatScreen() {
       case "regenerate":
         handleRegenerate();
         break;
-      case "edit_resend":
-        setEditText(actionTarget.content);
-        setShowEditModal(true);
-        break;
     }
   };
 
@@ -160,6 +223,7 @@ export default function ChatScreen() {
   const doLLMCall = async () => {
     setLoading(true);
     setStreamingText("");
+    setStreamingThinking("");
     try {
       const history = getHistory();
       const currentEmotion = getMeta("last_emotion") || undefined;
@@ -168,25 +232,33 @@ export default function ChatScreen() {
       setDebugInfo(context.systemPrompt, context.keywords, context.memoryCount);
 
       let fullResponse = "";
+      let fullThinking = "";
       await streamChat(context.messages, {
         onDelta: (delta) => {
           fullResponse += delta;
           appendStreamingText(delta);
         },
-        onDone: (text) => {
+        onThinking: (thinking) => {
+          fullThinking += thinking;
+          appendStreamingThinking(thinking);
+        },
+        onDone: (text, thinking) => {
           if (text) fullResponse = text;
+          if (thinking) fullThinking = thinking;
           const aiMsg: ChatMessage = {
             id: dayjs().valueOf().toString(),
             role: "assistant",
             content: fullResponse,
             timestamp: dayjs().toISOString(),
+            thinking: fullThinking || undefined,
           };
           addMessage(aiMsg);
           setStreamingText("");
+          setStreamingThinking("");
           setLoading(false);
-          incrementTurn();
 
-          if (shouldConsolidate()) {
+          const shouldRun = shouldConsolidate();
+          if (shouldRun) {
             const h = useChatStore.getState().messages;
             runConsolidation(h).catch((err) =>
               console.error("[chat] 巩固流异常:", err),
@@ -202,6 +274,7 @@ export default function ChatScreen() {
           };
           addMessage(errorMsg);
           setStreamingText("");
+          setStreamingThinking("");
           setLoading(false);
         },
       });
@@ -214,6 +287,7 @@ export default function ChatScreen() {
         timestamp: dayjs().toISOString(),
       });
       setStreamingText("");
+      setStreamingThinking("");
       setLoading(false);
     }
   };
@@ -250,6 +324,16 @@ export default function ChatScreen() {
   const handleSend = async (text: string) => {
     resetIdleTimer();
 
+    // 上一轮完成（最后一条是 AI 回复）才计数
+    const currentHistory = getHistory();
+    const lastRole = currentHistory.length > 0 ? currentHistory[currentHistory.length - 1].role : "none";
+    if (lastRole === "assistant") {
+      incrementTurn();
+    }
+    const counter = useMetaStore.getState().turnCounter;
+    const locked = useMetaStore.getState().isLocked;
+    logDebug("轮次计数", `lastRole=${lastRole}, turn_counter=${counter}, is_locked=${locked}`);
+
     const userMsg: ChatMessage = {
       id: dayjs().valueOf().toString(),
       role: "user",
@@ -259,6 +343,7 @@ export default function ChatScreen() {
     addMessage(userMsg);
     setLoading(true);
     setStreamingText("");
+    setStreamingThinking("");
 
     try {
       const history = getHistory();
@@ -267,25 +352,33 @@ export default function ChatScreen() {
       setDebugInfo(context.systemPrompt, context.keywords, context.memoryCount);
 
       let fullResponse = "";
+      let fullThinking = "";
       await streamChat(context.messages, {
         onDelta: (delta) => {
           fullResponse += delta;
           appendStreamingText(delta);
         },
-        onDone: (text) => {
+        onThinking: (thinking) => {
+          fullThinking += thinking;
+          appendStreamingThinking(thinking);
+        },
+        onDone: (text, thinking) => {
           if (text) fullResponse = text;
+          if (thinking) fullThinking = thinking;
           const aiMsg: ChatMessage = {
             id: dayjs().valueOf().toString(),
             role: "assistant",
             content: fullResponse,
             timestamp: dayjs().toISOString(),
+            thinking: fullThinking || undefined,
           };
           addMessage(aiMsg);
           setStreamingText("");
+          setStreamingThinking("");
           setLoading(false);
-          incrementTurn();
 
-          if (shouldConsolidate()) {
+          const shouldRun = shouldConsolidate();
+          if (shouldRun) {
             const history = useChatStore.getState().messages;
             runConsolidation(history).catch((err) =>
               console.error("[chat] 巩固流异常:", err),
@@ -301,6 +394,7 @@ export default function ChatScreen() {
           };
           addMessage(errorMsg);
           setStreamingText("");
+          setStreamingThinking("");
           setLoading(false);
         },
       });
@@ -313,6 +407,7 @@ export default function ChatScreen() {
         timestamp: dayjs().toISOString(),
       });
       setStreamingText("");
+      setStreamingThinking("");
       setLoading(false);
     }
   };
@@ -372,7 +467,9 @@ export default function ChatScreen() {
       {/* 标题栏 */}
       <View style={[styles.header, { backgroundColor: colors.sectionBg, borderBottomColor: colors.border }]}>
         <TouchableOpacity onLongPress={() => setShowDebug(true)} delayLongPress={800}>
-          <Text style={[styles.headerTitle, { color: colors.text }]}>私藏</Text>
+          <Text style={[styles.headerTitle, { color: colors.text }]}>
+            {isLoading ? `正在输入中${".".repeat(dotsCount)}` : (ai_name || "私藏")}
+          </Text>
         </TouchableOpacity>
       </View>
 
@@ -395,20 +492,26 @@ export default function ChatScreen() {
             }}
           />
         )}
+        ListFooterComponent={
+          (streamingThinking || streamingChunks.length > 0) ? (
+            <>
+              {/* 流式思考气泡 */}
+              {streamingThinking ? (
+                <View style={[styles.thinkingContainer, { borderColor: colors.border }]}>
+                  <Text style={[styles.thinkingLabel, { color: colors.textMuted }]}>💭 思考中...</Text>
+                  <Text style={[styles.thinkingText, { color: colors.textMuted }]}>{streamingThinking}</Text>
+                </View>
+              ) : null}
+              {/* 流式内容气泡 */}
+              {streamingChunks.map((chunk, index) => (
+                <StreamingBubble key={index} text={chunk} />
+              ))}
+            </>
+          ) : null
+        }
         contentContainerStyle={styles.listContent}
         style={styles.list}
-        onContentSizeChange={() =>
-          flatListRef.current?.scrollToEnd({ animated: true })
-        }
       />
-
-      {streamingText ? <StreamingBubble text={streamingText} /> : null}
-      {isLoading && !streamingText ? (
-        <View style={styles.loadingRow}>
-          <ActivityIndicator size="small" color={colors.textMuted} />
-          <Text style={[styles.loadingText, { color: colors.textMuted }]}>思考中...</Text>
-        </View>
-      ) : null}
 
       <InputBar onSend={handleSend} disabled={isLoading} />
 
@@ -430,11 +533,6 @@ export default function ChatScreen() {
             <TouchableOpacity style={[styles.actionItem, { borderTopColor: colors.border }]} onPress={() => handleAction("edit")}>
               <Text style={[styles.actionText, { color: colors.text }]}>✏️ 编辑</Text>
             </TouchableOpacity>
-            {actionTarget?.role === "user" && isLastOfRole(actionTarget) && (
-              <TouchableOpacity style={[styles.actionItem, { borderTopColor: colors.border }]} onPress={() => handleAction("edit_resend")}>
-                <Text style={[styles.actionText, { color: colors.text }]}>📤 编辑并重新发送</Text>
-              </TouchableOpacity>
-            )}
             <TouchableOpacity style={[styles.actionItem, { borderTopColor: colors.border }]} onPress={() => handleAction("delete")}>
               <Text style={[styles.actionText, { color: colors.danger }]}>🗑️ 删除</Text>
             </TouchableOpacity>
@@ -515,22 +613,10 @@ export default function ChatScreen() {
             </TouchableOpacity>
           </View>
 
-          <ScrollView style={styles.debugScroll}>
-            <Text style={[styles.debugLabel, { color: colors.textMuted }]}>检索关键词</Text>
-            <Text style={[styles.debugValue, { color: colors.text }]}>
-              {lastKeywords.length > 0 ? lastKeywords.join(" / ") : "（无）"}
-            </Text>
-
-            <Text style={[styles.debugLabel, { color: colors.textMuted }]}>记忆命中数</Text>
-            <Text style={[styles.debugValue, { color: colors.text }]}>{lastMemoryCount}</Text>
-
-            <Text style={[styles.debugLabel, { color: colors.textMuted }]}>System Prompt</Text>
-            <View style={[styles.debugPromptBox, { backgroundColor: colors.sectionBg, borderColor: colors.border }]}>
-              <Text style={[styles.debugPromptText, { color: colors.text }]} selectable>
-                {lastSystemPrompt || "（尚未发送消息）"}
-              </Text>
-            </View>
-
+          <ScrollView
+            ref={(ref) => { if (ref && debugLogs.length > 0) setTimeout(() => ref.scrollToEnd({ animated: false }), 100); }}
+            style={styles.debugScroll}
+          >
             <View style={styles.debugLogHeader}>
               <Text style={[styles.debugLabel, { color: colors.textMuted }]}>运行日志</Text>
               <TouchableOpacity onPress={clearDebugLogs}>
@@ -566,8 +652,36 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: 20, fontWeight: "700", letterSpacing: 2 },
   welcomeContainer: { alignItems: "center", justifyContent: "center", paddingTop: 80, paddingBottom: 40 },
   welcomeHint: { fontSize: 15, marginTop: 12 },
-  loadingRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", paddingVertical: 12 },
-  loadingText: { fontSize: 13, marginLeft: 8 },
+  loadingBubble: {
+    marginHorizontal: 16,
+    marginVertical: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 18,
+    borderWidth: 1,
+    alignSelf: "flex-start",
+    maxWidth: "78%",
+  },
+  loadingText: { fontSize: 15 },
+  // 思考气泡
+  thinkingContainer: {
+    marginHorizontal: 16,
+    marginVertical: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderStyle: "dashed",
+    maxWidth: "85%",
+  },
+  thinkingLabel: {
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  thinkingText: {
+    fontSize: 13,
+    lineHeight: 19,
+  },
   // API 设置
   setupContainer: { flex: 1, justifyContent: "center", paddingHorizontal: 40 },
   setupTitle: { fontSize: 24, fontWeight: "700", marginBottom: 8 },
@@ -588,8 +702,6 @@ const styles = StyleSheet.create({
   debugScroll: { flex: 1, padding: 20 },
   debugLabel: { fontSize: 12, fontWeight: "600", textTransform: "uppercase", letterSpacing: 1, marginTop: 16, marginBottom: 6 },
   debugValue: { fontSize: 14, lineHeight: 20 },
-  debugPromptBox: { borderRadius: 8, padding: 16, marginTop: 4, borderWidth: 1 },
-  debugPromptText: { fontSize: 13, lineHeight: 20, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" },
   debugLogHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   debugClearLog: { fontSize: 13, fontWeight: "600", marginTop: 16 },
   debugLogEntry: { borderRadius: 8, padding: 12, marginBottom: 8, borderWidth: 1 },

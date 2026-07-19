@@ -151,13 +151,20 @@ export function mergeUserInfo(patch: UserInfo): void {
     return Array.from(map.values());
   };
 
-  // ongoing_tasks 按 task_name 去重
+  // ongoing_tasks 按 task_name 去重，已完成/已取消的任务删除
   const mergeTasks = (
     a: UserInfo["life_quests"]["ongoing_tasks"],
     b: UserInfo["life_quests"]["ongoing_tasks"]
   ) => {
     const map = new Map(a.map((t) => [t.task_name, t]));
-    for (const t of b) map.set(t.task_name, t);
+    for (const t of b) {
+      if (t.status === "cancelled" || t.status === "completed") {
+        // 已完成或已取消的任务从列表中删除
+        map.delete(t.task_name);
+      } else {
+        map.set(t.task_name, t);
+      }
+    }
     return Array.from(map.values());
   };
 
@@ -210,20 +217,25 @@ export function mergeUserInfo(patch: UserInfo): void {
 export function insertEvent(
   eventText: string,
   activeWeight: number,
-  index: number
+  index: number,
+  priority: number = 5
 ): number {
   if (activeWeight < 1 || activeWeight > 100) {
     throw new Error("active_weight must be between 1 and 100");
   }
+  if (priority < 1 || priority > 9) {
+    throw new Error("priority must be between 1 and 9");
+  }
   const db = getDB();
   const now = dayjs().toISOString();
   const result = db.runSync(
-    'INSERT INTO memory_events ("index", event_text, timestamp, active_weight, last_accessed, is_archived) VALUES (?, ?, ?, ?, ?, 0)',
+    'INSERT INTO memory_events ("index", event_text, timestamp, active_weight, last_accessed, is_archived, priority) VALUES (?, ?, ?, ?, ?, 0, ?)',
     index,
     eventText,
     now,
     activeWeight,
-    now
+    now,
+    priority
   );
   return Number(result.lastInsertRowId);
 }
@@ -271,6 +283,16 @@ export function updateWeight(eventId: number, weight: number): void {
     "UPDATE memory_events SET active_weight = ?, last_accessed = ? WHERE id = ?",
     weight,
     now,
+    eventId
+  );
+}
+
+/** 更新事件优先级（取最大值） */
+export function updateEventPriority(eventId: number, priority: number): void {
+  const db = getDB();
+  db.runSync(
+    "UPDATE memory_events SET priority = MAX(priority, ?) WHERE id = ?",
+    priority,
     eventId
   );
 }
@@ -338,16 +360,21 @@ export function deleteEvent(eventId: number): void {
 export function insertFragment(
   eventIndex: number,
   summary: string,
-  emotion: string
+  emotion: string,
+  priority: number = 5
 ): number {
+  if (priority < 1 || priority > 9) {
+    throw new Error("priority must be between 1 and 9");
+  }
   const db = getDB();
   const now = dayjs().toISOString();
   const result = db.runSync(
-    'INSERT INTO memory_fragments ("index", timestamp, summary, emotion) VALUES (?, ?, ?, ?)',
+    'INSERT INTO memory_fragments ("index", timestamp, summary, emotion, priority) VALUES (?, ?, ?, ?, ?)',
     eventIndex,
     now,
     summary,
-    emotion
+    emotion,
+    priority
   );
   return Number(result.lastInsertRowId);
 }

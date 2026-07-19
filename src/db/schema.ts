@@ -14,7 +14,8 @@ export function initSchema(): void {
       "index" INTEGER NOT NULL,
       timestamp TEXT NOT NULL,
       summary TEXT NOT NULL,
-      emotion TEXT NOT NULL
+      emotion TEXT NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 5
     );
 
     -- 记忆事件表
@@ -25,7 +26,8 @@ export function initSchema(): void {
       timestamp TEXT NOT NULL,
       active_weight INTEGER NOT NULL CHECK(active_weight BETWEEN 1 AND 100),
       last_accessed TEXT NOT NULL,
-      is_archived INTEGER NOT NULL DEFAULT 0
+      is_archived INTEGER NOT NULL DEFAULT 0,
+      priority INTEGER NOT NULL DEFAULT 5
     );
 
     CREATE INDEX IF NOT EXISTS idx_events_archive_weight
@@ -43,4 +45,12 @@ export function initSchema(): void {
       value TEXT NOT NULL
     );
   `);
+
+  // 兼容旧表：添加 priority 字段（如果不存在）
+  try {
+    db.execSync(`ALTER TABLE memory_fragments ADD COLUMN priority INTEGER NOT NULL DEFAULT 5`);
+  } catch {}
+  try {
+    db.execSync(`ALTER TABLE memory_events ADD COLUMN priority INTEGER NOT NULL DEFAULT 5`);
+  } catch {}
 }

@@ -12,6 +12,7 @@ import {
   getTopActive,
   getMeta,
   setMeta,
+  updateEventPriority,
 } from "@/db/queries";
 import { extractConsolidation } from "@/llm/background";
 import { getThresholds } from "@/prompt/config";
@@ -28,10 +29,12 @@ const LOCK_TIMEOUT_MS = 30_000; // 30s 超时
  */
 export function shouldConsolidate(): boolean {
   const locked = getMeta("is_locked");
-  if (locked === "true") return false;
-
   const counter = parseInt(getMeta("turn_counter") ?? "0", 10);
   const { consolidation_window_turns } = getThresholds();
+
+  logDebug("巩固检查", `turn_counter=${counter}, threshold=${consolidation_window_turns}, is_locked=${locked}`);
+
+  if (locked === "true") return false;
   return counter >= consolidation_window_turns;
 }
 
@@ -43,12 +46,15 @@ export function shouldConsolidate(): boolean {
 export async function runConsolidation(
   recentMessages: Array<{ role: string; content: string }>,
 ): Promise<boolean> {
+  const counterBefore = parseInt(getMeta("turn_counter") ?? "0", 10);
+  logDebug("巩固开始", `turn_counter=${counterBefore}, 消息数=${recentMessages.length}`);
+
   // 1. 获取锁
   setMeta("is_locked", "true");
 
   // 30s 超时兜底
   const timeoutTimer = setTimeout(() => {
-    logDebug("巩固超时", "30s 强制解锁");
+    logDebug("巩固超时", "30s 强制解锁, turn_counter=0, is_locked=false");
     setMeta("is_locked", "false");
     setMeta("turn_counter", "0");
   }, LOCK_TIMEOUT_MS);
@@ -76,7 +82,7 @@ export async function runConsolidation(
     // 5. 调用后台 LLM 提取
     const result = await extractConsolidation(userInfo, snapshot, existingEvents, LOCK_TIMEOUT_MS - 2000);
     if (!result) {
-      logDebug("巩固结果", "LLM 提取失败或返回空");
+      logDebug("巩固结果", "LLM 提取失败或返回空, turn_counter=0, is_locked=false");
       clearTimeout(timeoutTimer);
       setMeta("is_locked", "false");
       setMeta("turn_counter", "0");
@@ -98,20 +104,21 @@ export async function runConsolidation(
       // 6b. 确定挂靠事件
       let targetEventId: number;
       const frag = result.new_fragment;
+      const priority = frag.priority || 5;
 
       if (frag.target_event_index > 0) {
         // LLM 指定了已有事件 ID
         targetEventId = frag.target_event_index;
       } else if (frag.new_event_text?.trim()) {
         // LLM 认为需要新建事件
-        targetEventId = insertEvent(frag.new_event_text.trim(), 100, 0);
+        targetEventId = insertEvent(frag.new_event_text.trim(), 100, 0, priority);
       } else {
         // 兜底：挂靠最近活跃事件
         const recent = getTopActive(1);
         if (recent.length > 0) {
           targetEventId = recent[0].id;
         } else {
-          targetEventId = insertEvent("（自动生成的占位事件）", 50, 0);
+          targetEventId = insertEvent("（自动生成的占位事件）", 50, 0, priority);
         }
       }
 
@@ -120,7 +127,11 @@ export async function runConsolidation(
         targetEventId,
         frag.summary,
         frag.emotion,
+        priority,
       );
+
+      // 6d. 更新事件优先级（max 操作）
+      updateEventPriority(targetEventId, priority);
     });
 
     clearTimeout(timeoutTimer);
@@ -132,12 +143,12 @@ export async function runConsolidation(
     setMeta("is_locked", "false");
     setMeta("turn_counter", "0");
 
-    logDebug("巩固完成", `摘要: ${result.new_fragment.summary}\n情绪: ${result.new_fragment.emotion}`);
+    logDebug("巩固完成", `摘要: ${result.new_fragment.summary}\n情绪: ${result.new_fragment.emotion}\nturn_counter=0, is_locked=false`);
     return true;
   } catch (err) {
     clearTimeout(timeoutTimer);
     const errMsg = err instanceof Error ? err.message : String(err);
-    logDebug("巩固异常", errMsg);
+    logDebug("巩固异常", `${errMsg}\nturn_counter=0, is_locked=false`);
     setMeta("is_locked", "false");
     setMeta("turn_counter", "0");
     return false;
