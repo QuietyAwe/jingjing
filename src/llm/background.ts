@@ -10,15 +10,29 @@ import type { UserInfo, ConsolidationResponse, MemoryEvent } from "@/types/schem
 import type { ScheduleItem } from "@/db/queries";
 
 /**
- * 构建提取 prompt：拼接 extraction_prompt + user_info + 已有事件 + 对话快照
+ * 构建提取消息数组：系统指令 + 对话历史 + 提取请求
+ * 对话历史作为独立消息发送，提高缓存命中率
  */
-function buildExtractionPrompt(
+function buildExtractionMessages(
   userInfo: UserInfo,
   snapshot: Array<{ role: string; content: string }>,
   existingEvents: MemoryEvent[],
-): string {
+): Array<{ role: "system" | "user" | "assistant"; content: string }> {
   const { extraction_prompt } = getPrompts();
 
+  // 系统指令
+  const systemMessage = {
+    role: "system" as const,
+    content: "你是一个记忆提取引擎，从对话中提取用户信息和记忆片段，只输出 JSON。",
+  };
+
+  // 对话历史（作为独立消息）
+  const historyMessages = snapshot.map((m) => ({
+    role: m.role as "user" | "assistant",
+    content: m.content,
+  }));
+
+  // 提取请求（包含用户信息、事件列表、输出格式）
   const lines: string[] = [
     extraction_prompt,
     "",
@@ -37,19 +51,16 @@ function buildExtractionPrompt(
   }
 
   lines.push("");
-  lines.push("## 对话快照（最近 10 轮）");
-
-  for (const msg of snapshot) {
-    const tag = msg.role === "user" ? "用户" : "助手";
-    lines.push(`[${tag}] ${msg.content}`);
-  }
-
-  lines.push("");
   lines.push(
     '请严格输出 JSON，格式：{"updated_user_info": {...}, "new_fragment": {"summary": "...", "emotion": "...", "priority": 数字1-9, "target_event_index": 数字或-1, "new_event_text": ""}}',
   );
 
-  return lines.join("\n");
+  const requestMessage = {
+    role: "user" as const,
+    content: lines.join("\n"),
+  };
+
+  return [systemMessage, ...historyMessages, requestMessage];
 }
 
 /**
@@ -61,18 +72,14 @@ export async function extractConsolidation(
   existingEvents: MemoryEvent[],
   timeoutMs: number = 30000,
 ): Promise<ConsolidationResponse | null> {
-  const prompt = buildExtractionPrompt(userInfo, snapshot, existingEvents);
+  const requestMessages = buildExtractionMessages(userInfo, snapshot, existingEvents);
   const routing = getModelRouting();
   const config = routing.background_extraction_config;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  const requestMessages = [
-    { role: "system" as const, content: "你是一个信息提取引擎，只输出 JSON。" },
-    { role: "user" as const, content: prompt },
-  ];
-  logDebug("巩固请求", `模型: ${config.model}\n温度: ${config.temperature}\n快照: ${snapshot.length} 条\n\n=== 完整请求 ===\n${requestMessages.map((m, i) => `[${i}] ${m.role.toUpperCase()}\n${m.content}`).join("\n\n")}`);
+  logDebug("巩固请求", `模型: ${config.model}\n温度: ${config.temperature}\n快照: ${snapshot.length} 条\n消息数: ${requestMessages.length}\n\n=== 完整请求 ===\n${requestMessages.map((m, i) => `[${i}] ${m.role.toUpperCase()}\n${m.content.slice(0, 100)}...`).join("\n\n")}`);
 
   try {
     const client = getClient();
