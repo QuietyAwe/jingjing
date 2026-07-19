@@ -44,6 +44,18 @@ export function initSchema(): void {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+
+    -- 行为时间表
+    CREATE TABLE IF NOT EXISTS behavior_schedule (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      week_start TEXT NOT NULL,
+      day_of_week INTEGER NOT NULL,
+      time_slot INTEGER NOT NULL,
+      activity TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_schedule_week ON behavior_schedule(week_start);
   `);
 
   // 兼容旧表：添加 priority 字段（如果不存在）

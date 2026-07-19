@@ -42,18 +42,19 @@ export function assemblePrompt(
   topEvents: (MemoryEvent & { live_weight: number })[],
   epiphany: MemoryEvent | null,
   chatHistory: ChatMessage[],
-  emotion?: string,
+  currentStatus?: string,
   hitFragments?: Map<number, MemoryFragment[]>,
   tokenBudget: number = DEFAULT_TOKEN_BUDGET
 ): AssembledPrompt {
   const prompts = getPrompts();
   const nickname = useSettingsStore.getState().user_nickname || "用户";
+  const now = dayjs(); // 预计算当前时间，复用
 
   // 1. 稳定部分：系统人设（替换 [user]）
   const systemPromptText = prompts.system_prompt.replace(/\[user\]/gi, nickname);
 
   // 2. 易变部分：状态区 + 记忆区（分开返回，便于缓存优化排列）
-  const stateText = buildStateSection(userInfo, emotion);
+  const stateText = buildStateSection(userInfo, currentStatus, now);
   const memoryText = buildMemorySection(userInfo, topEvents, epiphany, hitFragments);
 
   // 3. 截断：若超预算，按权重从低到高剔除记忆事件
@@ -70,25 +71,26 @@ export function assemblePrompt(
 
 /**
  * 构建状态区 — 使用 state_injection_template 模板
- * 对齐原始文档：基础信息 + 偏好 + 社交图谱 + 心理状态 + 生活主线 + 情绪
+ * 对齐原始文档：基础信息 + 偏好 + 社交图谱 + 心理状态 + 生活主线 + 当前状态
  */
 function buildStateSection(
   userInfo: UserInfo | null,
-  emotion: string | undefined
+  currentStatus: string | undefined,
+  now?: dayjs.Dayjs
 ): string {
   if (!userInfo) return "";
 
   const prompts = getPrompts();
   const template = prompts.state_injection_template;
+  const currentTime = now || dayjs();
 
   // 如果模板存在且包含 {{}} 占位符，使用模板渲染
   if (template && template.includes("{{")) {
-    let result = renderStateTemplate(template, userInfo, emotion);
+    let result = renderStateTemplate(template, userInfo, currentStatus);
     // 替换通用变量 [now]
     if (result.includes("[now]")) {
       const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-      const now = dayjs();
-      result = result.replace(/\[now\]/g, `${now.format("M/D")}(${WEEKDAYS[now.day()]}) ${now.format("HH:mm")}`);
+      result = result.replace(/\[now\]/g, `${currentTime.format("M/D")}(${WEEKDAYS[currentTime.day()]}) ${currentTime.format("HH:mm")}`);
     }
     return result;
   }
@@ -129,7 +131,7 @@ function buildStateSection(
     parts.push(`待办：${tasks}`);
   }
   if (emotion) {
-    parts.push(`当前情绪：${emotion}`);
+    parts.push(`当前状态：${emotion}`);
   }
 
   return `## [用户信息]\n\n${parts.join("\n")}`;
@@ -145,7 +147,7 @@ const EMPTY = "__EMPTY__";
 function renderStateTemplate(
   template: string,
   userInfo: UserInfo,
-  emotion: string | undefined
+  currentStatus: string | undefined
 ): string {
   const bi = userInfo.basic_identity;
   const p = getPlaceholders();
@@ -166,7 +168,7 @@ function renderStateTemplate(
     .replace(/\{\{personality_traits\}\}/g, ps.personality_traits.length > 0 ? ps.personality_traits.join("、") : EMPTY)
     .replace(/\{\{current_stressors\}\}/g, ps.current_stressors.length > 0 ? ps.current_stressors.join("、") : EMPTY)
     .replace(/\{\{long_term_goals\}\}/g, lq.long_term_goals.length > 0 ? lq.long_term_goals.join("、") : EMPTY)
-    .replace(/\{\{emotion\}\}/g, emotion || EMPTY);
+    .replace(/\{\{current_status\}\}/g, currentStatus || EMPTY);
 
   // 社交图谱
   const graphText =
@@ -239,11 +241,12 @@ function buildMemorySection(
 ): string {
   const prompts = getPrompts();
   const eventTpl = prompts.memory_event_template;
+  const now = dayjs(); // 预计算当前时间，复用
 
   // 渲染每条事件
   const eventLines: string[] = [];
   for (const event of topEvents) {
-    const text = replacePlaceholders(event.event_text, event.timestamp, userInfo);
+    const text = replacePlaceholders(event.event_text, event.timestamp, userInfo, now);
     const line = eventTpl
       .replace(/\{\{weight\}\}/g, String(event.live_weight))
       .replace(/\{\{event_text\}\}/g, text);
@@ -253,7 +256,7 @@ function buildMemorySection(
     const fragments = hitFragments?.get(event.id);
     if (fragments && fragments.length > 0) {
       for (const frag of fragments) {
-        const fragText = replacePlaceholders(frag.summary, frag.timestamp, userInfo);
+        const fragText = replacePlaceholders(frag.summary, frag.timestamp, userInfo, now);
         eventLines.push(`  · ${fragText}`);
       }
     } else {
@@ -261,7 +264,7 @@ function buildMemorySection(
       const eventFragments = getFragmentsByEventId(event.id);
       if (eventFragments.length > 0) {
         const latest = eventFragments[eventFragments.length - 1];
-        const fragText = replacePlaceholders(latest.summary, latest.timestamp, userInfo);
+        const fragText = replacePlaceholders(latest.summary, latest.timestamp, userInfo, now);
         eventLines.push(`  · ${fragText}`);
       }
     }
@@ -270,7 +273,7 @@ function buildMemorySection(
   // 渲染灵光一闪
   let epiphanyText = "";
   if (epiphany) {
-    const text = replacePlaceholders(epiphany.event_text, epiphany.timestamp, userInfo);
+    const text = replacePlaceholders(epiphany.event_text, epiphany.timestamp, userInfo, now);
     epiphanyText = `- [灵光一闪·冷记忆] ${text}`;
   }
 
@@ -283,7 +286,6 @@ function buildMemorySection(
     // 替换通用变量 [now]
     if (result.includes("[now]")) {
       const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-      const now = dayjs();
       result = result.replace(/\[now\]/g, `${now.format("M/D")}(${WEEKDAYS[now.day()]}) ${now.format("HH:mm")}`);
     }
     return result;
@@ -308,9 +310,11 @@ function buildMemorySection(
 function replacePlaceholders(
   text: string,
   eventTimestamp: string,
-  userInfo: UserInfo | null
+  userInfo: UserInfo | null,
+  now?: dayjs.Dayjs
 ): string {
   let result = text;
+  const currentTime = now || dayjs();
 
   // [user] → 昵称
   const nickname = userInfo?.basic_identity?.nickname || "用户";
@@ -319,8 +323,7 @@ function replacePlaceholders(
   // [time] → 相对时间
   if (result.includes("[time]") && eventTimestamp) {
     const eventTime = dayjs(eventTimestamp);
-    const now = dayjs();
-    const diffDays = now.diff(eventTime, "day");
+    const diffDays = currentTime.diff(eventTime, "day");
     let relativeTime: string;
 
     if (diffDays < 1) {
@@ -346,8 +349,7 @@ function replacePlaceholders(
   // [now] → 当前时间
   if (result.includes("[now]")) {
     const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-    const now = dayjs();
-    result = result.replace(/\[now\]/g, `${now.format("M/D")}(${WEEKDAYS[now.day()]}) ${now.format("HH:mm")}`);
+    result = result.replace(/\[now\]/g, `${currentTime.format("M/D")}(${WEEKDAYS[currentTime.day()]}) ${currentTime.format("HH:mm")}`);
   }
 
   return result;
@@ -358,16 +360,16 @@ function replacePlaceholders(
  * 优先保护：系统人设 > 状态区 > 最近 15 轮对话 > 灵光一闪 > Top N 事件
  */
 function truncateToFit(
-  systemText: string,
+  memoryText: string,
   topEvents: (MemoryEvent & { live_weight: number })[],
   epiphany: MemoryEvent | null,
   chatHistory: ChatMessage[],
   budget: number
 ): string {
   const historyChars = chatHistory.reduce((sum, m) => sum + m.content.length, 0);
-  const totalChars = systemText.length + historyChars;
+  const totalChars = memoryText.length + historyChars;
 
-  if (totalChars <= budget) return systemText;
+  if (totalChars <= budget) return memoryText;
 
   const excess = totalChars - budget;
 
@@ -375,7 +377,7 @@ function truncateToFit(
   const sortedEvents = [...topEvents].sort((a, b) => a.live_weight - b.live_weight);
 
   // 构建事件行映射（行文本 → 长度）
-  const lines = systemText.split("\n");
+  const lines = memoryText.split("\n");
   const eventLineMap = new Map<string, number>();
   for (const line of lines) {
     if (line.startsWith("- ") && !line.startsWith("- [灵光一闪")) {

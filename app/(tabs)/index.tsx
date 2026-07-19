@@ -26,7 +26,8 @@ import { hasApiKey } from "@/llm/client";
 import { shouldConsolidate, runConsolidation } from "@/memory/consolidation";
 import { resetIdleTimer } from "@/memory/dreaming";
 import { checkDuePromises, markPromiseReminded } from "@/memory/promiseChecker";
-import { getMeta, updateBasicIdentityNickname, setUserInfo, getUserInfo } from "@/db/queries";
+import { checkAndGenerateSchedule } from "@/memory/scheduler";
+import { updateBasicIdentityNickname, setUserInfo, getUserInfo } from "@/db/queries";
 import { useTheme } from "@/theme/useTheme";
 import type { ChatMessage } from "@/types/schema";
 
@@ -225,10 +226,12 @@ export default function ChatScreen() {
     setStreamingText("");
     setStreamingThinking("");
     try {
+      // 检查并生成行为时间表
+      await checkAndGenerateSchedule();
+
       const history = getHistory();
-      const currentEmotion = getMeta("last_emotion") || undefined;
       const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
-      const context = buildChatContext(lastUserMsg?.content || "", history, currentEmotion);
+      const context = buildChatContext(lastUserMsg?.content || "", history);
       setDebugInfo(context.systemPrompt, context.keywords, context.memoryCount);
 
       let fullResponse = "";
@@ -346,9 +349,11 @@ export default function ChatScreen() {
     setStreamingThinking("");
 
     try {
+      // 检查并生成行为时间表
+      await checkAndGenerateSchedule();
+
       const history = getHistory();
-      const currentEmotion = getMeta("last_emotion") || undefined;
-      const context = buildChatContext(text, history, currentEmotion);
+      const context = buildChatContext(text, history);
       setDebugInfo(context.systemPrompt, context.keywords, context.memoryCount);
 
       let fullResponse = "";

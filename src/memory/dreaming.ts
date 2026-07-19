@@ -105,11 +105,14 @@ async function tryDream(): Promise<void> {
     }
 
     // P6-3: 事务提交 + 软归档
+    // 取原事件的最高优先级，保留到折叠后的新事件
+    const maxPriority = Math.max(...coldest.map((e) => e.priority || 5));
+
     const db = getDB();
     await db.withExclusiveTransactionAsync(async () => {
-      // 插入折叠后的新事件
+      // 插入折叠后的新事件（保留原事件最高优先级）
       for (const text of folded) {
-        insertEvent(text, 100, 0);
+        insertEvent(text, 100, 0, maxPriority);
       }
 
       // 软归档原事件

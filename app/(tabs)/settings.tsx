@@ -27,7 +27,7 @@ import {
   setConfigOverride,
   resetConfigOverride,
 } from "@/prompt/config";
-import { getUserInfo, getTopActive, getActiveCount, getMeta, clearAllData, updateBasicIdentityNickname, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment } from "@/db/queries";
+import { getUserInfo, getTopActive, getActiveCount, clearAllData, updateBasicIdentityNickname, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment } from "@/db/queries";
 import { fetchModels } from "@/llm/client";
 import type { UserInfo, MemoryEvent, MemoryFragment } from "@/types/schema";
 
@@ -131,7 +131,7 @@ export default function SettingsScreen() {
       { label: "沟通偏好", value: "{{comm_preference}}" },
       { label: "长期目标", value: "{{long_term_goals}}" },
       { label: "待办任务", value: "{{ongoing_tasks}}" },
-      { label: "当前情绪", value: "{{emotion}}" },
+      { label: "当前状态", value: "{{current_status}}" },
     ],
     memory_injection_template: [
       { label: "事件列表", value: "{{event_list}}" },
@@ -296,7 +296,7 @@ export default function SettingsScreen() {
 
   // 渲染状态区模板（用 editorValue 替换 {{}}），空字段整行移除
   const EMPTY = "__EMPTY__";
-  const renderStateTemplate = (template: string, ui: UserInfo, emotion: string): string => {
+  const renderStateTemplate = (template: string, ui: UserInfo, currentStatus: string): string => {
     const bi = ui.basic_identity;
     const pref = ui.preferences;
     const sg = ui.social_graph;
@@ -316,7 +316,7 @@ export default function SettingsScreen() {
       .replace(/\{\{comm_preference\}\}/g, ps.comm_preference || EMPTY)
       .replace(/\{\{long_term_goals\}\}/g, lq.long_term_goals.length > 0 ? lq.long_term_goals.join("、") : EMPTY)
       .replace(/\{\{ongoing_tasks\}\}/g, tasksText)
-      .replace(/\{\{emotion\}\}/g, emotion || EMPTY)
+      .replace(/\{\{current_status\}\}/g, currentStatus || EMPTY)
       // 通用变量
       .replace(/\[user\]/g, bi.nickname || "你")
       .replace(/\[now\]/g, new Date().toLocaleString("zh-CN", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }));
@@ -375,7 +375,6 @@ export default function SettingsScreen() {
   const buildPreview = (): string => {
     const key = editorField?.key ?? "";
     const ui = getUserInfo();
-    const emotion = getMeta("last_emotion") || "";
     const nickname = user_nickname || "用户";
     const prompts = getPrompts();
 
@@ -387,7 +386,7 @@ export default function SettingsScreen() {
     const getStateInfo = () => {
       const tpl = key === "state_injection_template" ? editorValue : prompts.state_injection_template;
       if (!ui) return "";
-      return tpl.includes("{{") ? renderStateTemplate(tpl, ui, emotion) : "（模板无变量占位符）";
+      return tpl.includes("{{") ? renderStateTemplate(tpl, ui, "（当前状态预览）") : "（模板无变量占位符）";
     };
     const getMemoryInfo = () => {
       const events = getTopActive(10);
@@ -412,7 +411,7 @@ export default function SettingsScreen() {
         sections.push(editorValue);
         sections.push("", "━━━ 渲染结果 ━━━");
         if (ui) {
-          sections.push(renderStateTemplate(editorValue, ui, emotion));
+          sections.push(renderStateTemplate(editorValue, ui, "（当前状态预览）"));
         } else {
           sections.push("（暂无用户数据，无法渲染）");
         }

@@ -404,4 +404,74 @@ export function clearAllData(): void {
   db.runSync("DELETE FROM memory_events");
   db.runSync("DELETE FROM user_info");
   db.runSync("DELETE FROM system_metadata");
+  db.runSync("DELETE FROM behavior_schedule");
+}
+
+// ============================================================
+// 行为时间表 CRUD
+// ============================================================
+
+export interface ScheduleItem {
+  day_of_week: number;  // 0=周一, 6=周日
+  time_slot: number;    // 0=早, 1=上午, 2=午, 3=下午, 4=晚
+  activity: string;
+}
+
+/** 检查本周是否已有时间表 */
+export function hasScheduleForWeek(weekStart: string): boolean {
+  const db = getDB();
+  const row = db.getFirstSync<{ cnt: number }>(
+    "SELECT COUNT(*) as cnt FROM behavior_schedule WHERE week_start = ?",
+    weekStart
+  );
+  return (row?.cnt ?? 0) > 0;
+}
+
+/** 获取整周时间表 */
+export function getWeekSchedule(weekStart: string): ScheduleItem[] {
+  const db = getDB();
+  return db.getAllSync<ScheduleItem>(
+    "SELECT day_of_week, time_slot, activity FROM behavior_schedule WHERE week_start = ? ORDER BY day_of_week, time_slot",
+    weekStart
+  );
+}
+
+/** 获取当前时段的活动 */
+export function getCurrentActivity(dayOfWeek: number, timeSlot: number, weekStart: string): string | null {
+  const db = getDB();
+  const row = db.getFirstSync<{ activity: string }>(
+    "SELECT activity FROM behavior_schedule WHERE week_start = ? AND day_of_week = ? AND time_slot = ?",
+    weekStart,
+    dayOfWeek,
+    timeSlot
+  );
+  return row?.activity ?? null;
+}
+
+/** 获取今天已结束的活动（当前时段之前的） */
+export function getEndedActivities(dayOfWeek: number, timeSlot: number, weekStart: string): string[] {
+  const db = getDB();
+  const rows = db.getAllSync<{ activity: string }>(
+    "SELECT activity FROM behavior_schedule WHERE week_start = ? AND day_of_week = ? AND time_slot < ? ORDER BY time_slot",
+    weekStart,
+    dayOfWeek,
+    timeSlot
+  );
+  return rows.map(r => r.activity);
+}
+
+/** 批量插入时间表 */
+export function insertSchedule(weekStart: string, items: ScheduleItem[]): void {
+  const db = getDB();
+  const now = dayjs().toISOString();
+  for (const item of items) {
+    db.runSync(
+      "INSERT INTO behavior_schedule (week_start, day_of_week, time_slot, activity, created_at) VALUES (?, ?, ?, ?, ?)",
+      weekStart,
+      item.day_of_week,
+      item.time_slot,
+      item.activity,
+      now
+    );
+  }
 }

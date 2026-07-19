@@ -136,10 +136,7 @@ export async function runConsolidation(
 
     clearTimeout(timeoutTimer);
 
-    // 6. 保存最新 emotion 到元数据（供状态区注入）
-    setMeta("last_emotion", result.new_fragment.emotion);
-
-    // 7. 释放锁 + 清零计数
+    // 6. 释放锁 + 清零计数
     setMeta("is_locked", "false");
     setMeta("turn_counter", "0");
 

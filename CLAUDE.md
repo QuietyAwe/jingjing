@@ -49,17 +49,22 @@ messages = [
 ### 2.3 Data Schema
 ```json
 // memory_events: 记忆事件表
-// { id: INTEGER PK, "index": INTEGER, event_text: TEXT, timestamp: TEXT, active_weight: INTEGER (1-100), last_accessed: TEXT, is_archived: INTEGER (0/1) }
+// { id: INTEGER PK, "index": INTEGER, event_text: TEXT, timestamp: TEXT, active_weight: INTEGER (1-100), last_accessed: TEXT, is_archived: INTEGER (0/1), priority: INTEGER (1-9) }
 // INDEX: idx_events_archive_weight ON (is_archived, active_weight)
 
 // memory_fragments: 记忆片段表
-// { id: INTEGER PK, "index": INTEGER (父事件ID), timestamp: TEXT (ISO8601), summary: TEXT (50字内), emotion: TEXT }
+// { id: INTEGER PK, "index": INTEGER (父事件ID), timestamp: TEXT (ISO8601), summary: TEXT (50字内), emotion: TEXT, priority: INTEGER (1-9) }
 
 // system_metadata: 系统元数据表
 // { key: TEXT PK, value: TEXT }
 
 // user_info: 用户信息表（由巩固流增量 Merge 维护）
 // { basic_identity, preferences, social_graph, psycho_state, life_quests }
+
+// behavior_schedule: 行为时间表（AI每周自动生成）
+// { id: INTEGER PK, week_start: TEXT (ISO日期), day_of_week: INTEGER (0-6), time_slot: INTEGER (0-4), activity: TEXT, created_at: TEXT }
+// INDEX: idx_schedule_week ON (week_start)
+// 时段：0=早(6-9), 1=上午(9-12), 2=午(12-15), 3=下午(15-18), 4=晚(18-23)
 ```
 
 ### 2.4 Tech Stack
@@ -82,7 +87,7 @@ src/types/          # TypeScript 类型定义
 ### 2.6 Prompt 模板体系
 * **通用变量**：`[user]`（用户名）、`[now]`（当前时间），所有模板可用
 * **记忆事件专用**：`[time]`（相对时间，如"前两个月"）
-* **状态区变量**：`{{nickname}}`、`{{likes}}` 等14个，空字段自动隐藏
+* **状态区变量**：`{{nickname}}`、`{{likes}}`、`{{current_status}}` 等15个，空字段自动隐藏
 * **记忆区变量**：`{{event_list}}`、`{{epiphany}}`
 * **上下文模板**：`{{{system_prompt}}}`、`{{{state_info}}}`、`{{{memory_events}}}`（已弃用，改为分条发送）
 
@@ -122,6 +127,8 @@ src/types/          # TypeScript 类型定义
 | v1.3 | 07-17 | UI | 调试面板优化：移除系统提示词模块，打开时自动滚动到底部 | 调试工具 |
 | v1.3 | 07-17 | 功能 | 思考模式：设置页开关 + 思考内容提取 + 可展开思考气泡 | 思考模式 |
 | v1.3 | 07-17 | UI | 记忆区时间戳：模板底部显示当前日期时间（中文周几） | 时间显示 |
+| v1.4 | 07-17 | 修复 | 移除 setDecay 调用（权重与衰减设置已删除） | Bug Fix |
+| v1.4 | 07-17 | 架构 | 行为时间表：AI每周自动生成作息表，注入当前状态替代情绪标签 | 行为时间表 |
 
 ---
 
@@ -137,6 +144,7 @@ src/types/          # TypeScript 类型定义
 | **P8-2** | 集成 | AC2 验证：灵光一闪 + Token 截断（预置事件 → 验证抽取/剔除逻辑） | 待启动 |
 | **P8-3** | 集成 | AC3 验证：空库冷启动（清库 → 发送"你好" → 验证无 undefined + 引导人设） | 待启动 |
 | **P9-1** | UI | 提示词编辑器重构：三级分组、废弃字段移除、说明文案、输入框布局优化 | 进行中 |
+| **P10-1** | 功能 | 行为时间表：AI每周自动生成作息表，注入当前状态替代情绪标签 | 已完成 |
 
 ---
 

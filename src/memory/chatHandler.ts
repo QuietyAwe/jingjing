@@ -8,6 +8,7 @@ import { retrieve } from "./retrieval";
 import { assemblePrompt, buildColdStartPrompt } from "@/prompt/assembler";
 import { getThresholds } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
+import { getCurrentStatus } from "./scheduler";
 import type { ChatMessage, UserInfo } from "@/types/schema";
 
 export interface ChatContext {
@@ -32,12 +33,10 @@ export interface ChatContext {
  *
  * @param userInput 用户输入文本
  * @param chatHistory 最近对话历史（已截断为 15 轮）
- * @param currentEmotion 当前情绪状态（来自最新记忆片段）
  */
 export function buildChatContext(
   userInput: string,
   chatHistory: ChatMessage[],
-  currentEmotion?: string
 ): ChatContext {
   // 1. 冷启动检测
   const userInfo = getUserInfo();
@@ -45,6 +44,9 @@ export function buildChatContext(
 
   // 2. 本地检索（PRD 2.1 节第 2-5 步）
   const { topEvents, epiphany, keywords, hitFragments } = retrieve(userInput);
+
+  // 获取当前状态（行为时间表）
+  const currentStatus = getCurrentStatus() || undefined;
 
   // 3. Prompt 拼装
   if (isColdStart) {
@@ -77,7 +79,7 @@ export function buildChatContext(
     topEvents,
     epiphany,
     chatHistory,
-    currentEmotion,
+    currentStatus,
     hitFragments
   );
 

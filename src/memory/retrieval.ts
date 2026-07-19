@@ -65,12 +65,16 @@ export function retrieve(userInput: string): RetrievalResult {
     }
   }
 
-  // 4. 获取所有活跃事件，计算实时权重
+  // 4. 获取所有活跃事件，按存储权重初筛后计算实时权重（减少计算量）
   const allActive = getAllActive();
-  const withLiveWeight = calculateWeights(allActive);
+  const { context_active_events_limit } = getThresholds();
+  // 先按存储权重排序，取 2*N 候选，再计算实时权重精排
+  const candidates = allActive
+    .sort((a, b) => b.active_weight - a.active_weight)
+    .slice(0, context_active_events_limit * 2);
+  const withLiveWeight = calculateWeights(candidates);
 
   // 5. 按实时权重排序取 Top N（数量由 config 控制）
-  const { context_active_events_limit } = getThresholds();
   withLiveWeight.sort((a, b) => b.live_weight - a.live_weight);
   const topEvents = withLiveWeight.slice(0, context_active_events_limit);
 

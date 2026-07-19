@@ -7,6 +7,7 @@ import { getClient } from "./client";
 import { getPrompts, getModelRouting } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
 import type { UserInfo, ConsolidationResponse, MemoryEvent } from "@/types/schema";
+import type { ScheduleItem } from "@/db/queries";
 
 /**
  * 构建提取 prompt：拼接 extraction_prompt + user_info + 已有事件 + 对话快照
@@ -123,3 +124,131 @@ export async function extractConsolidation(
     return null;
   }
 }
+
+/**
+ * 生成每周行为时间表
+ */
+export async function generateSchedule(
+  userInfo: UserInfo,
+  lastWeekSchedule: ScheduleItem[],
+  timeoutMs: number = 30000,
+): Promise<ScheduleItem[] | null> {
+  const { schedule_generation_prompt } = getPrompts();
+  const routing = getModelRouting();
+  const config = routing.background_extraction_config;
+
+  // 构建人设摘要
+  const persona = buildPersonaSummary(userInfo);
+
+  // 构建上周时间表文本
+  let lastWeekText = "（无上周时间表）";
+  if (lastWeekSchedule.length > 0) {
+    const lines: string[] = [];
+    const dayLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+    const slotLabels = ["早(6-9)", "上午(9-12)", "午(12-15)", "下午(15-18)", "晚(18-23)"];
+
+    for (let day = 0; day < 7; day++) {
+      const dayItems = lastWeekSchedule.filter(s => s.day_of_week === day);
+      if (dayItems.length > 0) {
+        lines.push(`${dayLabels[day]}：${dayItems.map(i => `${slotLabels[i.time_slot]}=${i.activity}`).join("，")}`);
+      }
+    }
+    lastWeekText = lines.join("\n") || "（无上周时间表）";
+  }
+
+  const prompt = (schedule_generation_prompt || DEFAULT_SCHEDULE_PROMPT)
+    .replace("{{persona}}", persona)
+    .replace("{{last_week}}", lastWeekText);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const requestMessages = [
+    { role: "system" as const, content: "你是一个生活规划引擎，只输出 JSON。" },
+    { role: "user" as const, content: prompt },
+  ];
+  logDebug("时间表请求", `模型: ${config.model}\n\n=== 完整请求 ===\n${requestMessages.map((m, i) => `[${i}] ${m.role.toUpperCase()}\n${m.content}`).join("\n\n")}`);
+
+  try {
+    const client = getClient();
+    const response = await client.chat.completions.create(
+      {
+        model: config.model,
+        temperature: 0.7,
+        response_format: { type: "json_object" },
+        messages: requestMessages,
+      },
+      { signal: controller.signal },
+    );
+
+    clearTimeout(timer);
+
+    const text = response.choices[0]?.message?.content;
+    logDebug("时间表返回", `=== 完整响应 ===\n${text ?? "（空回复）"}`);
+    if (!text) return null;
+
+    const parsed = JSON.parse(text) as { schedule?: Array<{ day: number; slot: number; activity: string }> };
+    if (!Array.isArray(parsed.schedule) || parsed.schedule.length === 0) {
+      logDebug("时间表返回", "schedule 字段为空");
+      return null;
+    }
+
+    // 验证并转换格式
+    const items: ScheduleItem[] = parsed.schedule
+      .filter(s => s.day >= 0 && s.day <= 6 && s.slot >= 0 && s.slot <= 4 && s.activity)
+      .map(s => ({
+        day_of_week: s.day,
+        time_slot: s.slot,
+        activity: s.activity.slice(0, 20),
+      }));
+
+    logDebug("时间表返回", `解析成功: ${items.length} 条`);
+    return items;
+  } catch (err: unknown) {
+    clearTimeout(timer);
+    if (err instanceof Error && err.name === "AbortError") {
+      logDebug("时间表超时", `${timeoutMs}ms 已丢弃`);
+    } else {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logDebug("时间表失败", errMsg);
+    }
+    return null;
+  }
+}
+
+/** 构建人设摘要（供时间表生成用） */
+function buildPersonaSummary(userInfo: UserInfo): string {
+  const parts: string[] = [];
+  const bi = userInfo.basic_identity;
+  if (bi.nickname) parts.push(`昵称: ${bi.nickname}`);
+  if (bi.occupation) parts.push(`职业: ${bi.occupation}`);
+  if (bi.location) parts.push(`所在地: ${bi.location}`);
+  if (userInfo.preferences.likes.length > 0) parts.push(`喜欢: ${userInfo.preferences.likes.join("、")}`);
+  if (userInfo.psycho_state.personality_traits.length > 0) parts.push(`性格: ${userInfo.psycho_state.personality_traits.join("、")}`);
+  if (userInfo.life_quests.long_term_goals.length > 0) parts.push(`目标: ${userInfo.life_quests.long_term_goals.join("、")}`);
+  return parts.join("\n") || "（暂无人设信息）";
+}
+
+const DEFAULT_SCHEDULE_PROMPT = `请根据以下人设信息，生成一份本周的行为时间表。
+
+## 人设信息
+{{persona}}
+
+## 上周时间表（参考）
+{{last_week}}
+
+## 要求
+1. 根据人设推断合理的日常作息
+2. 工作日和周末要有区别
+3. 活动描述简洁（20字以内），生活化
+4. 可以有重复，但不要每天都完全一样
+5. 周末可以安排休闲、社交活动
+
+## 输出格式
+JSON 对象，包含 schedule 数组，每个元素：
+- day: 0-6（0=周一，6=周日）
+- slot: 0-4（0=早6-9点，1=上午9-12点，2=午12-15点，3=下午15-18点，4=晚18-23点）
+- activity: 活动描述（20字以内）
+
+输出示例：
+{"schedule": [{"day": 0, "slot": 0, "activity": "晨跑"}, ...]}`;
