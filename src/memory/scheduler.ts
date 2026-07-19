@@ -10,10 +10,10 @@ import {
   getCurrentActivity,
   getEndedActivities,
   insertSchedule,
-  getUserInfo,
   type ScheduleItem,
 } from "@/db/queries";
 import { generateSchedule } from "@/llm/background";
+import { getPrompts } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
 
 /** 时段定义 */
@@ -70,9 +70,10 @@ export async function checkAndGenerateSchedule(): Promise<void> {
 
   logDebug("时间表", `本周(${weekStart})无时间表，开始生成`);
 
-  const userInfo = getUserInfo();
-  if (!userInfo) {
-    logDebug("时间表", "无用户信息，跳过生成");
+  // 获取系统人设提示词
+  const { system_prompt } = getPrompts();
+  if (!system_prompt) {
+    logDebug("时间表", "无系统人设提示词，跳过生成");
     return;
   }
 
@@ -83,7 +84,7 @@ export async function checkAndGenerateSchedule(): Promise<void> {
     : [];
 
   try {
-    const schedule = await generateSchedule(userInfo, lastWeekSchedule);
+    const schedule = await generateSchedule(system_prompt, lastWeekSchedule);
     if (schedule && schedule.length > 0) {
       insertSchedule(weekStart, schedule);
       logDebug("时间表", `生成完成，共 ${schedule.length} 条`);

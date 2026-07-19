@@ -127,18 +127,16 @@ export async function extractConsolidation(
 
 /**
  * 生成每周行为时间表
+ * @param systemPrompt 系统人设提示词（AI 的人设）
  */
 export async function generateSchedule(
-  userInfo: UserInfo,
+  systemPrompt: string,
   lastWeekSchedule: ScheduleItem[],
   timeoutMs: number = 30000,
 ): Promise<ScheduleItem[] | null> {
   const { schedule_generation_prompt } = getPrompts();
   const routing = getModelRouting();
   const config = routing.background_extraction_config;
-
-  // 构建人设摘要
-  const persona = buildPersonaSummary(userInfo);
 
   // 构建上周时间表文本
   let lastWeekText = "（无上周时间表）";
@@ -157,7 +155,7 @@ export async function generateSchedule(
   }
 
   const prompt = (schedule_generation_prompt || DEFAULT_SCHEDULE_PROMPT)
-    .replace("{{persona}}", persona)
+    .replace("{{persona}}", systemPrompt)
     .replace("{{last_week}}", lastWeekText);
 
   const controller = new AbortController();
@@ -214,19 +212,6 @@ export async function generateSchedule(
     }
     return null;
   }
-}
-
-/** 构建人设摘要（供时间表生成用） */
-function buildPersonaSummary(userInfo: UserInfo): string {
-  const parts: string[] = [];
-  const bi = userInfo.basic_identity;
-  if (bi.nickname) parts.push(`昵称: ${bi.nickname}`);
-  if (bi.occupation) parts.push(`职业: ${bi.occupation}`);
-  if (bi.location) parts.push(`所在地: ${bi.location}`);
-  if (userInfo.preferences.likes.length > 0) parts.push(`喜欢: ${userInfo.preferences.likes.join("、")}`);
-  if (userInfo.psycho_state.personality_traits.length > 0) parts.push(`性格: ${userInfo.psycho_state.personality_traits.join("、")}`);
-  if (userInfo.life_quests.long_term_goals.length > 0) parts.push(`目标: ${userInfo.life_quests.long_term_goals.join("、")}`);
-  return parts.join("\n") || "（暂无人设信息）";
 }
 
 const DEFAULT_SCHEDULE_PROMPT = `请根据以下人设信息，生成一份本周的行为时间表。
