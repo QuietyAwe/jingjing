@@ -63,7 +63,7 @@ export function retrieve(userInput: string): RetrievalResult {
 
     hitEvents = db.getAllSync<MemoryEvent>(
       `SELECT DISTINCT e.* FROM memory_events e
-       INNER JOIN memory_fragments f ON e.id = f.event_index
+       INNER JOIN memory_fragments f ON e.id = f."index"
        WHERE e.is_archived = 0 ${excludeDefault}
          AND LENGTH(f.summary) >= 10
          AND (${fragConditions})
