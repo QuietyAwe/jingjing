@@ -14,6 +14,7 @@ import {
   setMeta,
   updateEventPriority,
   getDefaultEventId,
+  getEventById,
 } from "@/db/queries";
 import { extractConsolidation } from "@/llm/background";
 import { getThresholds } from "@/prompt/config";
@@ -77,8 +78,15 @@ export async function runConsolidation(
     // 3. 取最近 10 轮快照（20 条）
     const snapshot = recentMessages.slice(-20);
 
-    // 4. 取已有索引事件（供 LLM 判断挂靠）
+    // 4. 取已有索引事件（供 LLM 判断挂靠，包含默认事件）
     const existingEvents = getTopActive(50);
+    const defaultEventId = getDefaultEventId();
+    if (defaultEventId) {
+      const defaultEvent = getEventById(defaultEventId);
+      if (defaultEvent) {
+        existingEvents.unshift(defaultEvent); // 默认事件放最前面
+      }
+    }
 
     // 5. 调用后台 LLM 提取
     const result = await extractConsolidation(userInfo, snapshot, existingEvents, LOCK_TIMEOUT_MS - 2000);

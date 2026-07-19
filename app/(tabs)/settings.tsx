@@ -27,8 +27,10 @@ import {
   setConfigOverride,
   resetConfigOverride,
 } from "@/prompt/config";
-import { getUserInfo, getTopActive, getActiveCount, clearAllData, updateBasicIdentityNickname, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment } from "@/db/queries";
-import { fetchModels } from "@/llm/client";
+import { getUserInfo, getTopActive, getActiveCount, clearAllData, updateBasicIdentityNickname, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById } from "@/db/queries";
+import { getWeekStart } from "@/memory/scheduler";
+import { fetchModels, getClient } from "@/llm/client";
+import { CollapsibleSection } from "@/components/CollapsibleSection";
 import type { UserInfo, MemoryEvent, MemoryFragment } from "@/types/schema";
 
 // 配置项元数据
@@ -197,6 +199,13 @@ export default function SettingsScreen() {
   const [thresholds, setThresholds] = useState(getThresholds());
   const [modelRouting, setModelRouting] = useState(getModelRouting());
 
+  // 人设编辑器
+  const [personaModalVisible, setPersonaModalVisible] = useState(false);
+  const [personaInput, setPersonaInput] = useState("");
+  const [personaExtracting, setPersonaExtracting] = useState(false);
+  const [personaResult, setPersonaResult] = useState<UserInfo | null>(null);
+  const [personaError, setPersonaError] = useState("");
+
   useFocusEffect(
     useCallback(() => {
       setUserInfo(getUserInfo());
@@ -204,7 +213,13 @@ export default function SettingsScreen() {
       setSystemPromptState(getSystemPrompt());
       setThresholds(getThresholds());
       setModelRouting(getModelRouting());
-      setEvents(getTopActive(999));
+      const activeEvents = getTopActive(999);
+      const defaultId = getDefaultEventId();
+      if (defaultId) {
+        const defaultEvt = getEventById(defaultId);
+        if (defaultEvt) activeEvents.unshift(defaultEvt);
+      }
+      setEvents(activeEvents);
     }, []),
   );
 
@@ -528,6 +543,76 @@ export default function SettingsScreen() {
     ]);
   };
 
+  // 人设提取：用户输入一段话 → LLM 解析为 UserInfo
+  const handleExtractPersona = async () => {
+    const text = personaInput.trim();
+    if (!text) return;
+    setPersonaExtracting(true);
+    setPersonaError("");
+    setPersonaResult(null);
+
+    const prompt = `你是一个用户画像提取引擎。从以下文本中提取用户信息，输出严格 JSON。
+
+文本：
+${text}
+
+输出格式：
+{
+  "basic_identity": {"nickname":"", "gender":"", "birthday":"", "occupation":"", "location":""},
+  "preferences": {"likes":[], "dislikes":[]},
+  "social_graph": [],
+  "psycho_state": {"personality_traits":[], "current_stressors":[], "comm_preference":""},
+  "life_quests": {"long_term_goals":[], "ongoing_tasks":[]}
+}
+
+规则：
+- 只提取文本中明确提到的信息，不要推测
+- 未提到的字段留空字符串或空数组
+- likes/dislikes/personality_traits/long_term_goals 用字符串数组
+- social_graph 暂时留空数组
+- 只输出 JSON，不要其他文字`;
+
+    try {
+      const client = getClient();
+      const config = getModelRouting().background_extraction_config;
+      const response = await client.chat.completions.create({
+        model: config.model,
+        temperature: 0.0,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: "你是一个用户画像提取引擎，只输出 JSON。" },
+          { role: "user", content: prompt },
+        ],
+      });
+
+      const raw = response.choices[0]?.message?.content;
+      if (!raw) throw new Error("AI 返回为空");
+
+      const parsed = JSON.parse(raw) as UserInfo;
+      // 基础校验
+      if (!parsed.basic_identity || !parsed.preferences) {
+        throw new Error("返回格式不正确");
+      }
+      setPersonaResult(parsed);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "提取失败";
+      setPersonaError(msg);
+    } finally {
+      setPersonaExtracting(false);
+    }
+  };
+
+  // 确认合并人设
+  const handleMergePersona = () => {
+    if (!personaResult) return;
+    mergeUserInfo(personaResult);
+    setUserInfo(getUserInfo());
+    setPersonaModalVisible(false);
+    setPersonaInput("");
+    setPersonaResult(null);
+    Alert.alert("已更新", "用户画像已合并更新。");
+  };
+
   // 通用配置行
   const renderConfigRow = (sectionTitle: string, field: ConfigField, currentValue: string) => {
     const isChanged = currentValue !== getConfigDefault(field.key);
@@ -575,8 +660,7 @@ export default function SettingsScreen() {
   return (
     <ScrollView style={[styles.container, { backgroundColor: colors.bg }]}>
       {/* 外观 */}
-      <View style={[styles.section, { backgroundColor: colors.sectionBg }]}>
-        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>外观</Text>
+      <CollapsibleSection title="外观" icon="🎨" defaultExpanded={false}>
         <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={toggleTheme}>
           <Text style={[styles.label, { color: colors.text }]}>深色模式</Text>
           <Text style={[styles.value, { color: colors.accent }]}>{themeMode === "dark" ? "已开启" : "已关闭"}</Text>
@@ -667,11 +751,10 @@ export default function SettingsScreen() {
             ))}
           </View>
         </View>
-      </View>
+      </CollapsibleSection>
 
       {/* API */}
-      <View style={[styles.section, { backgroundColor: colors.sectionBg }]}>
-        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>API</Text>
+      <CollapsibleSection title="API" icon="🔑" defaultExpanded={true}>
         <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={() => { setInputUrl(baseUrl); setShowUrlModal(true); }}>
           <Text style={[styles.label, { color: colors.text }]}>API 地址</Text>
           <Text style={[styles.value, { color: colors.textMuted }]} numberOfLines={1}>{baseUrl.replace(/^https?:\/\//, "")}</Text>
@@ -716,11 +799,10 @@ export default function SettingsScreen() {
             </Text>
           </TouchableOpacity>
         </View>
-      </View>
+      </CollapsibleSection>
 
       {/* 模型路由 */}
-      <View style={[styles.section, { backgroundColor: colors.sectionBg }]}>
-        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>模型路由</Text>
+      <CollapsibleSection title="模型路由" icon="🤖" defaultExpanded={false}>
 
         {/* 前台模型 */}
         <View style={[styles.modelRow, { borderBottomColor: colors.border }]}>
@@ -753,19 +835,17 @@ export default function SettingsScreen() {
         </View>
 
         {renderConfigRow("模型路由", { key: "background_temperature", label: "后台温度", type: "number", description: "建议 0，追求结构稳定" }, String(bgRouting.temperature))}
-      </View>
+      </CollapsibleSection>
 
       {/* 记忆流转阈值 */}
-      <View style={[styles.section, { backgroundColor: colors.sectionBg }]}>
-        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>记忆流转阈值</Text>
+      <CollapsibleSection title="记忆流转阈值" icon="⚙️" defaultExpanded={false}>
         {THRESHOLD_FIELDS.map((f) =>
           renderConfigRow("记忆流转阈值", f, String(thresholdsVal[f.key]))
         )}
-      </View>
+      </CollapsibleSection>
 
       {/* 提示词设置 - 分组显示 */}
-      <View style={[styles.section, { backgroundColor: colors.sectionBg }]}>
-        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>提示词设置</Text>
+      <CollapsibleSection title="提示词设置" icon="📝" defaultExpanded={false}>
         {PROMPT_GROUPS.map((group) => (
           <View key={group.title} style={styles.promptGroup}>
             <View style={styles.promptGroupHeader}>
@@ -779,24 +859,32 @@ export default function SettingsScreen() {
             })}
           </View>
         ))}
-      </View>
+      </CollapsibleSection>
 
-      {/* 记忆数据 */}
-      <View style={[styles.section, { backgroundColor: colors.sectionBg }]}>
-        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>用户画像</Text>
+      {/* 用户画像 */}
+      <CollapsibleSection title="用户画像" icon="👤" defaultExpanded={true}>
         <View style={[styles.infoBlock, { borderBottomColor: colors.border }]}>
           {renderUserInfo()}
         </View>
-      </View>
+        <TouchableOpacity
+          style={[styles.actionRow, { borderBottomColor: colors.border }]}
+          onPress={() => { setPersonaInput(""); setPersonaResult(null); setPersonaError(""); setPersonaModalVisible(true); }}
+        >
+          <Text style={[styles.actionText, { color: colors.accent }]}>✨ AI 提取人设</Text>
+        </TouchableOpacity>
+      </CollapsibleSection>
 
       {/* 活跃事件列表 */}
-      <View style={[styles.section, { backgroundColor: colors.sectionBg }]}>
-        <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 16, paddingVertical: 12 }}>
-          <Text style={[styles.sectionTitle, { color: colors.textMuted, paddingVertical: 0 }]}>活跃记忆事件 ({eventCount})</Text>
+      <CollapsibleSection
+        title={`活跃记忆事件 (${eventCount})`}
+        icon="🧠"
+        defaultExpanded={false}
+        right={
           <TouchableOpacity onPress={() => { setNewEventText(""); setNewEventWeight("50"); setNewEventPriority("5"); setShowNewEventModal(true); }}>
             <Text style={[styles.confirmText, { color: colors.accent }]}>+ 新建</Text>
           </TouchableOpacity>
-        </View>
+        }
+      >
         {events.length === 0 ? (
           <Text style={[styles.emptyText, { color: colors.textMuted, paddingVertical: 16 }]}>暂无记忆事件</Text>
         ) : (
@@ -821,15 +909,25 @@ export default function SettingsScreen() {
             </TouchableOpacity>
           ))
         )}
-      </View>
+      </CollapsibleSection>
 
       {/* 数据管理 */}
-      <View style={[styles.section, { backgroundColor: colors.sectionBg }]}>
-        <Text style={[styles.sectionTitle, { color: colors.textMuted }]}>数据管理</Text>
+      <CollapsibleSection title="数据管理" icon="🗑️" defaultExpanded={false}>
+        <TouchableOpacity style={[styles.actionRow, { borderBottomColor: colors.border }]} onPress={() => {
+          Alert.alert("删除本周时间表", "确定要删除本周的行为时间表吗？下次对话时会自动重新生成。", [
+            { text: "取消", style: "cancel" },
+            { text: "删除", style: "destructive", onPress: () => {
+              deleteScheduleForWeek(getWeekStart());
+              Alert.alert("已删除", "本周时间表已清除。");
+            }},
+          ]);
+        }}>
+          <Text style={[styles.actionText, { color: colors.danger }]}>删除本周时间表</Text>
+        </TouchableOpacity>
         <TouchableOpacity style={[styles.actionRow, { borderBottomColor: colors.border }]} onPress={handleClearData}>
           <Text style={[styles.actionText, { color: colors.danger }]}>清除所有数据</Text>
         </TouchableOpacity>
-      </View>
+      </CollapsibleSection>
 
       <Text style={[styles.hint, { color: colors.textMuted }]}>支持所有 OpenAI 兼容 API：OpenAI / DeepSeek / Moonshot / 本地模型等</Text>
 
@@ -1295,6 +1393,117 @@ export default function SettingsScreen() {
           </View>
         </Pressable>
       </Modal>
+
+      {/* 人设编辑器 */}
+      <Modal visible={personaModalVisible} animationType="slide" onRequestClose={() => setPersonaModalVisible(false)}>
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+          <View style={[styles.editorContainer, { backgroundColor: colors.editorBg }]}>
+            <View style={[styles.editorHeader, { backgroundColor: colors.editorBg, borderBottomColor: colors.border }]}>
+              <TouchableOpacity onPress={() => setPersonaModalVisible(false)}>
+                <Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text>
+              </TouchableOpacity>
+              <Text style={[styles.editorTitle, { color: colors.text }]}>AI 提取人设</Text>
+              {personaResult ? (
+                <TouchableOpacity onPress={handleMergePersona}>
+                  <Text style={[styles.confirmText, { color: colors.accent }]}>合并</Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={{ width: 50 }} />
+              )}
+            </View>
+
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 20 }}>
+              {!personaResult ? (
+                <>
+                  <Text style={[styles.editorLabel, { color: colors.text, marginHorizontal: 0, marginTop: 0 }]}>输入一段自我介绍</Text>
+                  <Text style={[styles.editorDesc, { color: colors.textMuted, marginHorizontal: 0 }]}>
+                    写下关于你的任何信息：身份、喜好、性格、人际关系等，AI 会自动提取为结构化画像。
+                  </Text>
+                  <TextInput
+                    style={[styles.editorInputMultiline, { borderColor: colors.border, color: colors.text, minHeight: 180, marginHorizontal: 0, marginTop: 12 }]}
+                    value={personaInput}
+                    onChangeText={setPersonaInput}
+                    placeholder="例如：我叫小明，25岁，在北京做程序员。平时喜欢打篮球和看科幻电影，不太喜欢社交应酬。性格偏内向但很重感情，最近工作压力比较大..."
+                    placeholderTextColor={colors.placeholder}
+                    multiline
+                    textAlignVertical="top"
+                    autoFocus
+                  />
+                  {personaError ? (
+                    <Text style={[styles.modelErrorText, { color: colors.danger, marginTop: 8 }]}>{personaError}</Text>
+                  ) : null}
+                  <TouchableOpacity
+                    style={[styles.setupButton, { backgroundColor: personaInput.trim() ? colors.accent : colors.btnDisabled, marginTop: 16 }]}
+                    onPress={handleExtractPersona}
+                    disabled={!personaInput.trim() || personaExtracting}
+                  >
+                    <Text style={[styles.setupButtonText, { color: colors.textOnAccent }]}>
+                      {personaExtracting ? "提取中..." : "✨ 开始提取"}
+                    </Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <>
+                  <Text style={[styles.editorLabel, { color: colors.text, marginHorizontal: 0, marginTop: 0 }]}>提取结果</Text>
+                  <Text style={[styles.editorDesc, { color: colors.textMuted, marginHorizontal: 0 }]}>
+                    以下是 AI 从你的描述中提取的信息，将合并到现有画像中。点击「合并」确认。
+                  </Text>
+
+                  {/* 基础信息 */}
+                  <View style={[styles.infoBlock, { borderBottomColor: colors.border, marginTop: 16 }]}>
+                    <Text style={[styles.infoTitle, { color: colors.text }]}>基础信息</Text>
+                    {personaResult.basic_identity.nickname && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>昵称：{personaResult.basic_identity.nickname}</Text>}
+                    {personaResult.basic_identity.gender && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>性别：{personaResult.basic_identity.gender}</Text>}
+                    {personaResult.basic_identity.occupation && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>职业：{personaResult.basic_identity.occupation}</Text>}
+                    {personaResult.basic_identity.location && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>城市：{personaResult.basic_identity.location}</Text>}
+                    {personaResult.basic_identity.birthday && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>生日：{personaResult.basic_identity.birthday}</Text>}
+                  </View>
+
+                  {/* 偏好 */}
+                  {(personaResult.preferences.likes.length > 0 || personaResult.preferences.dislikes.length > 0) && (
+                    <View style={[styles.infoBlock, { borderBottomColor: colors.border }]}>
+                      <Text style={[styles.infoTitle, { color: colors.text }]}>偏好</Text>
+                      {personaResult.preferences.likes.length > 0 && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>喜欢：{personaResult.preferences.likes.join("、")}</Text>}
+                      {personaResult.preferences.dislikes.length > 0 && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>讨厌：{personaResult.preferences.dislikes.join("、")}</Text>}
+                    </View>
+                  )}
+
+                  {/* 心理状态 */}
+                  {(personaResult.psycho_state.personality_traits.length > 0 || personaResult.psycho_state.comm_preference) && (
+                    <View style={[styles.infoBlock, { borderBottomColor: colors.border }]}>
+                      <Text style={[styles.infoTitle, { color: colors.text }]}>心理状态</Text>
+                      {personaResult.psycho_state.personality_traits.length > 0 && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>性格：{personaResult.psycho_state.personality_traits.join("、")}</Text>}
+                      {personaResult.psycho_state.current_stressors.length > 0 && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>压力：{personaResult.psycho_state.current_stressors.join("、")}</Text>}
+                      {personaResult.psycho_state.comm_preference && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>沟通偏好：{personaResult.psycho_state.comm_preference}</Text>}
+                    </View>
+                  )}
+
+                  {/* 生活主线 */}
+                  {personaResult.life_quests.long_term_goals.length > 0 && (
+                    <View style={[styles.infoBlock, { borderBottomColor: colors.border }]}>
+                      <Text style={[styles.infoTitle, { color: colors.text }]}>生活主线</Text>
+                      <Text style={[styles.infoLine, { color: colors.textSecondary }]}>目标：{personaResult.life_quests.long_term_goals.join("、")}</Text>
+                    </View>
+                  )}
+
+                  <TouchableOpacity
+                    style={[styles.setupButton, { backgroundColor: colors.accent, marginTop: 20 }]}
+                    onPress={handleMergePersona}
+                  >
+                    <Text style={[styles.setupButtonText, { color: colors.textOnAccent }]}>合并到现有画像</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.resetBtn, { marginTop: 12, alignSelf: "center" }]}
+                    onPress={() => { setPersonaResult(null); setPersonaError(""); }}
+                  >
+                    <Text style={[styles.resetText, { color: colors.textMuted }]}>重新输入</Text>
+                  </TouchableOpacity>
+                </>
+              )}
+            </ScrollView>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </ScrollView>
   );
 }
@@ -1405,4 +1614,6 @@ const styles = StyleSheet.create({
   toggleText: { fontSize: 14, fontWeight: "600" },
   toggleTextOn: { color: "#FFFFFF" },
   toggleTextOff: { color: "#37352F" },
+  setupButton: { paddingVertical: 14, borderRadius: 10, alignItems: "center" },
+  setupButtonText: { fontSize: 16, fontWeight: "600" },
 });

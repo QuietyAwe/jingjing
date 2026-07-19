@@ -250,6 +250,15 @@ export function insertEvent(
 }
 
 /** 获取 Top N 高权重活跃事件（实时衰减后排序） */
+/** 根据 ID 获取单个事件 */
+export function getEventById(eventId: number): MemoryEvent | null {
+  const db = getDB();
+  return db.getFirstSync<MemoryEvent>(
+    "SELECT * FROM memory_events WHERE id = ?",
+    eventId
+  );
+}
+
 /** 获取 Top N 高权重活跃事件（排除默认事件） */
 export function getTopActive(limit: number): MemoryEvent[] {
   const db = getDB();
@@ -453,6 +462,12 @@ export interface ScheduleItem {
   day_of_week: number;  // 0=周一, 6=周日
   time_slot: number;    // 0=早, 1=上午, 2=午, 3=下午, 4=晚
   activity: string;
+}
+
+/** 删除指定周的时间表 */
+export function deleteScheduleForWeek(weekStart: string): void {
+  const db = getDB();
+  db.runSync("DELETE FROM behavior_schedule WHERE week_start = ?", weekStart);
 }
 
 /** 检查本周是否已有时间表 */
