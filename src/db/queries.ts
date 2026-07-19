@@ -250,19 +250,24 @@ export function insertEvent(
 }
 
 /** 获取 Top N 高权重活跃事件（实时衰减后排序） */
+/** 获取 Top N 高权重活跃事件（排除默认事件） */
 export function getTopActive(limit: number): MemoryEvent[] {
   const db = getDB();
+  const defaultEventId = getDefaultEventId();
+  const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
   return db.getAllSync<MemoryEvent>(
-    "SELECT * FROM memory_events WHERE is_archived = 0 ORDER BY active_weight DESC, last_accessed DESC LIMIT ?",
+    `SELECT * FROM memory_events WHERE is_archived = 0 ${excludeDefault} ORDER BY active_weight DESC, last_accessed DESC LIMIT ?`,
     limit
   );
 }
 
-/** 获取所有活跃事件（用于衰减计算） */
+/** 获取所有活跃事件（用于衰减计算，排除默认事件） */
 export function getAllActive(): MemoryEvent[] {
   const db = getDB();
+  const defaultEventId = getDefaultEventId();
+  const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
   return db.getAllSync<MemoryEvent>(
-    "SELECT * FROM memory_events WHERE is_archived = 0"
+    `SELECT * FROM memory_events WHERE is_archived = 0 ${excludeDefault}`
   );
 }
 
@@ -272,15 +277,18 @@ export function getAllActive(): MemoryEvent[] {
  */
 export function getEpiphanyRandom(excludeIds: number[] = []): MemoryEvent | null {
   const db = getDB();
-  if (excludeIds.length === 0) {
+  const defaultEventId = getDefaultEventId();
+  // 默认事件也加入排除列表
+  const allExcludeIds = defaultEventId ? [...excludeIds, defaultEventId] : excludeIds;
+  if (allExcludeIds.length === 0) {
     return db.getFirstSync<MemoryEvent>(
       "SELECT * FROM memory_events WHERE is_archived = 0 AND active_weight < 40 ORDER BY RANDOM() LIMIT 1"
     );
   }
-  const placeholders = excludeIds.map(() => "?").join(",");
+  const placeholders = allExcludeIds.map(() => "?").join(",");
   return db.getFirstSync<MemoryEvent>(
     `SELECT * FROM memory_events WHERE is_archived = 0 AND active_weight < 40 AND id NOT IN (${placeholders}) ORDER BY RANDOM() LIMIT 1`,
-    ...excludeIds
+    ...allExcludeIds
   );
 }
 
@@ -316,19 +324,25 @@ export function softArchive(eventId: number): void {
 }
 
 /** 获取所有活跃事件数量 */
+/** 获取活跃事件数量（排除默认事件） */
 export function getActiveCount(): number {
   const db = getDB();
+  const defaultEventId = getDefaultEventId();
+  const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
   const row = db.getFirstSync<{ cnt: number }>(
-    "SELECT COUNT(*) as cnt FROM memory_events WHERE is_archived = 0"
+    `SELECT COUNT(*) as cnt FROM memory_events WHERE is_archived = 0 ${excludeDefault}`
   );
   return row?.cnt ?? 0;
 }
 
 /** 获取权重最低的 N 条冷事件（做梦流用） */
+/** 获取权重最低的 N 条冷事件（做梦流用，排除默认事件） */
 export function getColdestEvents(limit: number): MemoryEvent[] {
   const db = getDB();
+  const defaultEventId = getDefaultEventId();
+  const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
   return db.getAllSync<MemoryEvent>(
-    "SELECT * FROM memory_events WHERE is_archived = 0 ORDER BY active_weight ASC, last_accessed ASC LIMIT ?",
+    `SELECT * FROM memory_events WHERE is_archived = 0 ${excludeDefault} ORDER BY active_weight ASC, last_accessed ASC LIMIT ?`,
     limit
   );
 }

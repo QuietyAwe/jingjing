@@ -33,11 +33,12 @@ export function getWeekStart(date: dayjs.Dayjs = dayjs()): string {
 
 /** 根据当前时间获取时段索引 */
 export function getCurrentTimeSlot(hour: number): number {
-  if (hour < 9) return 0;
-  if (hour < 12) return 1;
-  if (hour < 15) return 2;
-  if (hour < 18) return 3;
-  return 4;
+  if (hour < 6) return -1;  // 深夜/凌晨，无对应时段
+  if (hour < 9) return 0;   // 早(6-9点)
+  if (hour < 12) return 1;  // 上午(9-12点)
+  if (hour < 15) return 2;  // 午(12-15点)
+  if (hour < 18) return 3;  // 下午(15-18点)
+  return 4;                 // 晚(18-23点)
 }
 
 /** 根据当前时间获取星期几（0=周一, 6=周日） */
@@ -98,6 +99,11 @@ export function getCurrentStatus(): string | null {
   const now = dayjs();
   const dayOfWeek = getCurrentDayOfWeek();
   const timeSlot = getCurrentTimeSlot(now.hour());
+
+  // 深夜时段（0-6点）直接返回睡觉状态
+  if (timeSlot === -1) {
+    return "当前：睡觉中";
+  }
 
   const currentActivity = getCurrentActivity(dayOfWeek, timeSlot, weekStart);
   if (!currentActivity) return null;
