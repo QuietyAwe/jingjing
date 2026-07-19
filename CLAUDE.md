@@ -57,6 +57,7 @@ messages = [
 
 // system_metadata: 系统元数据表
 // { key: TEXT PK, value: TEXT }
+// 常用 key：is_locked, turn_counter, last_emotion, default_event_id
 
 // user_info: 用户信息表（由巩固流增量 Merge 维护）
 // { basic_identity, preferences, social_graph, psycho_state, life_quests }
@@ -129,6 +130,8 @@ src/types/          # TypeScript 类型定义
 | v1.3 | 07-17 | UI | 记忆区时间戳：模板底部显示当前日期时间（中文周几） | 时间显示 |
 | v1.4 | 07-17 | 修复 | 移除 setDecay 调用（权重与衰减设置已删除） | Bug Fix |
 | v1.4 | 07-17 | 架构 | 行为时间表：AI每周自动生成作息表，注入当前状态替代情绪标签 | 行为时间表 |
+| v1.5 | 07-17 | 架构 | 默认事件"日常闲聊"：巩固流兜底，不参与检索，减少垃圾信息 | 默认事件 |
+| v1.5 | 07-17 | 优化 | 检索策略：优先检索事件，未命中再检索片段，节省查询开销 | 检索优化 |
 
 ---
 

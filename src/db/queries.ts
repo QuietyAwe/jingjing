@@ -31,6 +31,15 @@ export function setMeta(key: string, value: string): void {
   );
 }
 
+/** 获取默认事件"日常闲聊"的 ID */
+export function getDefaultEventId(): number | null {
+  const db = getDB();
+  const row = db.getFirstSync<SystemMetadata>(
+    "SELECT value FROM system_metadata WHERE key = 'default_event_id'"
+  );
+  return row ? parseInt(row.value, 10) : null;
+}
+
 // ============================================================
 // P2-2: user_info 读写与增量 Merge
 // ============================================================
@@ -405,6 +414,21 @@ export function clearAllData(): void {
   db.runSync("DELETE FROM user_info");
   db.runSync("DELETE FROM system_metadata");
   db.runSync("DELETE FROM behavior_schedule");
+
+  // 重新初始化默认事件"日常闲聊"
+  const now = dayjs().toISOString();
+  const result = db.runSync(
+    'INSERT INTO memory_events ("index", event_text, timestamp, active_weight, last_accessed, is_archived, priority) VALUES (0, ?, ?, 50, ?, 0, 1)',
+    "日常闲聊",
+    now,
+    now
+  );
+  const eventId = Number(result.lastInsertRowId);
+  db.runSync(
+    'INSERT INTO system_metadata (key, value) VALUES (?, ?)',
+    "default_event_id",
+    String(eventId)
+  );
 }
 
 // ============================================================

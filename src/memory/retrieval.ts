@@ -6,7 +6,7 @@
 import { tokenize } from "./tokenize";
 import { calculateWeight, calculateWeights } from "./decay";
 import { getDB } from "@/db/connection";
-import { updateWeight, getEpiphanyRandom, getAllActive, getFragmentsByEventId } from "@/db/queries";
+import { updateWeight, getEpiphanyRandom, getAllActive, getFragmentsByEventId, getDefaultEventId } from "@/db/queries";
 import { getThresholds, getWeightDecay } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
 import type { MemoryEvent, MemoryFragment } from "@/types/schema";
@@ -34,18 +34,20 @@ export function retrieve(userInput: string): RetrievalResult {
   // 1. 分词
   const keywords = tokenize(userInput, 3);
 
-  // 2. 优先检索事件(event_text)
+  // 2. 优先检索事件(event_text)，排除默认事件"日常闲聊"
   let hitEvents: MemoryEvent[] = [];
   const hitEventIds = new Set<number>();
   const db = getDB();
+  const defaultEventId = getDefaultEventId();
 
   if (keywords.length > 0) {
     const eventConditions = keywords.map(() => "event_text LIKE ?").join(" OR ");
+    const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
     const params = keywords.map((k) => `%${k}%`);
 
     hitEvents = db.getAllSync<MemoryEvent>(
       `SELECT * FROM memory_events
-       WHERE is_archived = 0 AND (${eventConditions})
+       WHERE is_archived = 0 ${excludeDefault} AND (${eventConditions})
        ORDER BY active_weight DESC
        LIMIT 3`,
       ...params
@@ -53,15 +55,16 @@ export function retrieve(userInput: string): RetrievalResult {
     hitEvents.forEach((e) => hitEventIds.add(e.id));
   }
 
-  // 3. 如果事件未命中，再检索片段(summary)
+  // 3. 如果事件未命中，再检索片段(summary)，同样排除默认事件
   if (hitEvents.length === 0 && keywords.length > 0) {
     const fragConditions = keywords.map(() => "f.summary LIKE ?").join(" OR ");
+    const excludeDefault = defaultEventId ? `AND e.id != ${defaultEventId}` : "";
     const params = keywords.map((k) => `%${k}%`);
 
     hitEvents = db.getAllSync<MemoryEvent>(
       `SELECT DISTINCT e.* FROM memory_events e
        INNER JOIN memory_fragments f ON e.id = f.event_index
-       WHERE e.is_archived = 0
+       WHERE e.is_archived = 0 ${excludeDefault}
          AND LENGTH(f.summary) >= 10
          AND (${fragConditions})
        ORDER BY e.active_weight DESC

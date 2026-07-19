@@ -13,6 +13,7 @@ import {
   getMeta,
   setMeta,
   updateEventPriority,
+  getDefaultEventId,
 } from "@/db/queries";
 import { extractConsolidation } from "@/llm/background";
 import { getThresholds } from "@/prompt/config";
@@ -113,12 +114,13 @@ export async function runConsolidation(
         // LLM 认为需要新建事件
         targetEventId = insertEvent(frag.new_event_text.trim(), 100, 0, priority);
       } else {
-        // 兜底：挂靠最近活跃事件
-        const recent = getTopActive(1);
-        if (recent.length > 0) {
-          targetEventId = recent[0].id;
+        // 兜底：挂靠默认事件"日常闲聊"
+        const defaultId = getDefaultEventId();
+        if (defaultId) {
+          targetEventId = defaultId;
         } else {
-          targetEventId = insertEvent("（自动生成的占位事件）", 50, 0, priority);
+          // 默认事件不存在时，创建占位事件
+          targetEventId = insertEvent("日常闲聊", 50, 0, 1);
         }
       }
 

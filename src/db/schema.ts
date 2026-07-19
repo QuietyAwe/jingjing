@@ -1,4 +1,5 @@
 import { getDB } from "./connection";
+import dayjs from "dayjs";
 
 /**
  * 初始化数据库表结构 — 对齐 PRD 4.1 节
@@ -65,4 +66,37 @@ export function initSchema(): void {
   try {
     db.execSync(`ALTER TABLE memory_events ADD COLUMN priority INTEGER NOT NULL DEFAULT 5`);
   } catch {}
+
+  // 初始化默认事件"日常闲聊"（用于兜底，减少垃圾信息）
+  initDefaultEvent(db);
+}
+
+/**
+ * 初始化默认事件"日常闲聊"
+ * 用于巩固流兜底：没有提取到有价值信息时，挂靠到此事件
+ * 不参与检索，避免污染搜索结果
+ */
+function initDefaultEvent(db: ReturnType<typeof getDB>): void {
+  const existing = db.getFirstSync<{ value: string }>(
+    "SELECT value FROM system_metadata WHERE key = 'default_event_id'"
+  );
+
+  if (existing) return; // 已存在，跳过
+
+  // 创建默认事件
+  const now = dayjs().toISOString();
+  const result = db.runSync(
+    'INSERT INTO memory_events ("index", event_text, timestamp, active_weight, last_accessed, is_archived, priority) VALUES (0, ?, ?, 50, ?, 0, 1)',
+    "日常闲聊",
+    now,
+    now
+  );
+
+  // 存储默认事件 ID 到元数据
+  const eventId = Number(result.lastInsertRowId);
+  db.runSync(
+    'INSERT INTO system_metadata (key, value) VALUES (?, ?)',
+    "default_event_id",
+    String(eventId)
+  );
 }
