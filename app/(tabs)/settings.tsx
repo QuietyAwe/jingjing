@@ -13,6 +13,7 @@ import {
   Platform,
 } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
+import dayjs from "dayjs";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useTheme, useThemeStore } from "@/theme/useTheme";
 import { lightColors, darkColors } from "@/theme/colors";
@@ -32,6 +33,32 @@ import { getWeekStart } from "@/memory/scheduler";
 import { fetchModels, getClient } from "@/llm/client";
 import { CollapsibleSection } from "@/components/CollapsibleSection";
 import type { UserInfo, MemoryEvent, MemoryFragment } from "@/types/schema";
+
+// 替换片段中的 [user] [time] 占位符
+function replaceFragmentPlaceholder(text: string, timestamp: string, nickname: string): string {
+  let result = text.replace(/\[user\]/gi, nickname || "用户");
+  if (result.includes("[time]") && timestamp) {
+    const now = dayjs();
+    const eventTime = dayjs(timestamp);
+    const diffDays = now.diff(eventTime, "day");
+    let relativeTime: string;
+    if (diffDays < 1) relativeTime = "今天";
+    else if (diffDays < 2) relativeTime = "昨天";
+    else if (diffDays < 7) relativeTime = `${diffDays}天前`;
+    else if (diffDays < 30) {
+      const weeks = Math.floor(diffDays / 7);
+      relativeTime = weeks <= 1 ? "上周" : `${weeks}周前`;
+    } else if (diffDays < 365) {
+      const months = Math.floor(diffDays / 30);
+      relativeTime = months <= 1 ? "上个月" : `前${months}个月`;
+    } else {
+      const years = Math.floor(diffDays / 365);
+      relativeTime = years <= 1 ? "去年" : `${years}年前`;
+    }
+    result = result.replace(/\[time\]/g, relativeTime);
+  }
+  return result;
+}
 
 // 配置项元数据
 interface ConfigField {
@@ -64,6 +91,7 @@ const PROMPT_GROUPS: PromptGroup[] = [
       { key: "state_injection_template", label: "② 状态区注入模板", type: "multiline", description: "定义用户信息的注入格式。此部分在10轮对话内保持稳定，空字段自动隐藏。" },
       { key: "memory_injection_template", label: "③ 记忆区注入模板", type: "multiline", description: "定义记忆区的整体结构。每次检索可能注入不同事件。" },
       { key: "memory_event_template", label: "└ 记忆事件格式", type: "multiline", description: "定义单条记忆事件的格式。[time] 为相对于事件发生时间的描述。" },
+      { key: "promise_injection_template", label: "约定提醒模板", type: "multiline", description: "当与用户有时间约定到期时，注入此模板提醒用户。{{promises}} 为约定内容。" },
     ],
   },
   {
@@ -79,6 +107,7 @@ const PROMPT_GROUPS: PromptGroup[] = [
     title: "特殊场景",
     fields: [
       { key: "cold_start_template", label: "冷启动模板", type: "multiline", description: "当数据库为空时，与系统人设组合使用，引导用户自我介绍。" },
+      { key: "schedule_generation_prompt", label: "时间表生成指令", type: "multiline", description: "每周自动生成行为时间表时使用。{{persona}} 为 AI 人设，{{last_week}} 为上周时间表。" },
     ],
   },
 ];
@@ -874,6 +903,40 @@ ${text}
         </TouchableOpacity>
       </CollapsibleSection>
 
+      {/* 约定提醒 */}
+      <CollapsibleSection
+        title={`约定提醒 (${userInfo?.life_quests?.ongoing_tasks?.filter(t => t.due_time)?.length || 0})`}
+        icon="⏰"
+        defaultExpanded={true}
+      >
+        {!userInfo?.life_quests?.ongoing_tasks?.some(t => t.due_time) ? (
+          <Text style={[styles.emptyText, { color: colors.textMuted, paddingVertical: 16 }]}>暂无约定</Text>
+        ) : (
+          userInfo.life_quests.ongoing_tasks
+            .filter(t => t.due_time)
+            .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf())
+            .map((task, index) => {
+              const dueTime = dayjs(task.due_time);
+              const isPast = dueTime.isBefore(dayjs());
+              return (
+                <View key={index} style={[styles.promiseItem, { borderBottomColor: colors.border }]}>
+                  <View style={styles.promiseContent}>
+                    <Text style={[styles.promiseText, { color: isPast ? colors.danger : colors.text }]}>
+                      {task.task_name}
+                    </Text>
+                    <Text style={[styles.promiseTime, { color: isPast ? colors.danger : colors.textMuted }]}>
+                      {isPast ? "已过期 " : ""}{dueTime.format("M/D HH:mm")}
+                    </Text>
+                  </View>
+                  {task.status !== "in_progress" && (
+                    <Text style={[styles.promiseStatus, { color: colors.textMuted }]}>{task.status}</Text>
+                  )}
+                </View>
+              );
+            })
+        )}
+      </CollapsibleSection>
+
       {/* 活跃事件列表 */}
       <CollapsibleSection
         title={`活跃记忆事件 (${eventCount})`}
@@ -1218,13 +1281,18 @@ ${text}
                 ) : (
                   editorFragments.map((frag) => (
                     <View key={frag.id} style={[styles.fragmentItem, { borderBottomColor: colors.border }]}>
-                      <Text style={[styles.fragmentSummary, { color: colors.text }]}>{frag.summary}</Text>
-                      {frag.emotion ? (
-                        <Text style={[styles.fragmentEmotion, { color: colors.textMuted }]}>情绪: {frag.emotion}</Text>
-                      ) : null}
-                      <Text style={[styles.fragmentTime, { color: colors.textMuted }]}>
-                        优先级 {frag.priority} · {new Date(frag.timestamp).toLocaleString()}
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                        <Text style={[styles.fragmentPriority, { color: colors.textMuted }]}>P{frag.priority}</Text>
+                        <Text style={[styles.fragmentTime, { color: colors.textMuted }]}>
+                          {new Date(frag.timestamp).toLocaleString()}
+                        </Text>
+                      </View>
+                      <Text style={[styles.fragmentSummary, { color: colors.text }]}>
+                        {replaceFragmentPlaceholder(frag.summary, frag.timestamp, user_nickname)}
                       </Text>
+                      {frag.emotion ? (
+                        <Text style={[styles.fragmentEmotionLine, { color: colors.accent }]}>情绪：{frag.emotion}</Text>
+                      ) : null}
                     </View>
                   ))
                 )}
@@ -1339,12 +1407,14 @@ ${text}
                 <View key={frag.id} style={[styles.fragmentCard, { backgroundColor: colors.sectionBg, borderColor: colors.border }]}>
                   <View style={styles.fragmentHeader}>
                     <Text style={[styles.fragmentIndex, { color: colors.textMuted }]}>#{index + 1}</Text>
-                    <View style={{ flexDirection: "row", gap: 8 }}>
-                      <Text style={[styles.fragmentEmotion, { color: colors.textMuted }]}>优先级 {frag.priority}</Text>
-                      <Text style={[styles.fragmentEmotion, { color: colors.accent }]}>{frag.emotion}</Text>
-                    </View>
+                    <Text style={[styles.fragmentPriority, { color: colors.textMuted }]}>P{frag.priority}</Text>
                   </View>
-                  <Text style={[styles.fragmentText, { color: colors.text }]}>{frag.summary}</Text>
+                  <Text style={[styles.fragmentText, { color: colors.text }]}>
+                    {replaceFragmentPlaceholder(frag.summary, frag.timestamp, user_nickname)}
+                  </Text>
+                  {frag.emotion ? (
+                    <Text style={[styles.fragmentEmotionLine, { color: colors.accent }]}>情绪：{replaceFragmentPlaceholder(frag.emotion, frag.timestamp, user_nickname)}</Text>
+                  ) : null}
                   <Text style={[styles.fragmentTime, { color: colors.textMuted }]}>
                     {new Date(frag.timestamp).toLocaleString()}
                   </Text>
@@ -1578,6 +1648,12 @@ const styles = StyleSheet.create({
   promptGroupHeader: { paddingVertical: 12, gap: 4 },
   promptGroupTitle: { fontSize: 15, fontWeight: "600" },
   promptGroupDesc: { fontSize: 12, lineHeight: 18 },
+  // 约定提醒
+  promiseItem: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth },
+  promiseContent: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  promiseText: { fontSize: 14, flex: 1, marginRight: 12 },
+  promiseTime: { fontSize: 12, flexShrink: 0 },
+  promiseStatus: { fontSize: 11, marginTop: 4 },
   // 事件详情
   detailText: { fontSize: 15, lineHeight: 24, marginTop: 8 },
   detailMeta: { flexDirection: "row", flexWrap: "wrap", gap: 16, paddingVertical: 16, marginTop: 16, borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth },
@@ -1587,9 +1663,10 @@ const styles = StyleSheet.create({
   fragmentCard: { borderRadius: 10, padding: 14, marginTop: 10, borderWidth: 1 },
   fragmentHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
   fragmentIndex: { fontSize: 12 },
-  fragmentEmotion: { fontSize: 13, fontWeight: "600" },
+  fragmentPriority: { fontSize: 12, fontWeight: "600" },
   fragmentText: { fontSize: 14, lineHeight: 20 },
-  fragmentTime: { fontSize: 11, marginTop: 8 },
+  fragmentEmotionLine: { fontSize: 13, marginTop: 6 },
+  fragmentTime: { fontSize: 11, marginTop: 4 },
   sectionDivider: { borderTopWidth: StyleSheet.hairlineWidth },
   fragmentItem: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth },
   fragmentSummary: { fontSize: 14, lineHeight: 20 },
