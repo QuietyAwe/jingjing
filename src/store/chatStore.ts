@@ -1,6 +1,6 @@
 // ============================================================
 // 聊天状态（全量持久化）
-// UI 显示全部历史，LLM 上下文仅取最近 15 轮
+// UI 显示全部历史，LLM 上下文仅取最近 N 轮
 // ============================================================
 
 import { create } from "zustand";
@@ -8,7 +8,8 @@ import { persist, createJSONStorage } from "zustand/middleware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { ChatMessage } from "@/types/schema";
 
-const CONTEXT_WINDOW = 30; // LLM 上下文：最近 15 轮 × 2 条
+// 滑动窗口：巩固窗口×2 + 当前轮预留，默认 10×2+2=22
+const CONTEXT_WINDOW = 22;
 
 export interface DebugLog {
   time: string;
@@ -109,7 +110,7 @@ export const useChatStore = create<ChatState>()(
 
       clearDebugLogs: () => set({ debugLogs: [] }),
 
-      /** LLM 上下文：最近 15 轮 */
+      /** LLM 上下文：最近 N 轮（滑动窗口，不影响完整消息记录） */
       getHistory: () => get().messages.slice(-CONTEXT_WINDOW),
     }),
     {

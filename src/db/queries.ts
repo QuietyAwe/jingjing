@@ -420,6 +420,12 @@ export function getFragmentsByEventId(eventId: number): MemoryFragment[] {
   );
 }
 
+/** 删除单条记忆片段 */
+export function deleteFragment(fragmentId: number): void {
+  const db = getDB();
+  db.runSync("DELETE FROM memory_fragments WHERE id = ?", fragmentId);
+}
+
 /** 获取最新一条记忆片段的 emotion（用于状态区注入） */
 export function getLatestEmotion(): string | null {
   const db = getDB();

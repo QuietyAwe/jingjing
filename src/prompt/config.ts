@@ -73,6 +73,8 @@ export function getConfigDefault(key: string): string {
     state_injection_template: config.prompts.state_injection_template,
     dream_consolidation_prompt: config.prompts.dream_consolidation_prompt,
     cold_start_template: config.prompts.cold_start_template,
+    schedule_generation_prompt: config.prompts.schedule_generation_prompt,
+    promise_injection_template: config.prompts.promise_injection_template,
   };
   return defaults[key] ?? "";
 }
@@ -111,6 +113,8 @@ export function getPrompts() {
     cold_start_template: getOverride("cold_start_template", config.prompts.cold_start_template),
     memory_injection_template: getOverride("memory_injection_template", config.prompts.memory_injection_template),
     memory_event_template: getOverride("memory_event_template", config.prompts.memory_event_template),
+    schedule_generation_prompt: getOverride("schedule_generation_prompt", config.prompts.schedule_generation_prompt),
+    promise_injection_template: getOverride("promise_injection_template", config.prompts.promise_injection_template),
   };
 }
 

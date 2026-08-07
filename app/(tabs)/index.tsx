@@ -12,6 +12,7 @@ import {
   Platform,
   ScrollView,
   Modal,
+  Alert,
 } from "react-native";
 import dayjs from "dayjs";
 
@@ -186,7 +187,7 @@ export default function ChatScreen() {
   };
 
   // 长按菜单操作
-  const handleAction = (action: "copy" | "delete" | "edit" | "regenerate") => {
+  const handleAction = async (action: "copy" | "delete" | "edit" | "regenerate") => {
     if (!actionTarget) return;
     setShowActionMenu(false);
 
@@ -194,9 +195,11 @@ export default function ChatScreen() {
       case "copy":
         try {
           const Clipboard = require("expo-clipboard");
-          Clipboard.setStringAsync(actionTarget.content);
-        } catch {
-          // expo-clipboard 不可用时忽略
+          await Clipboard.setStringAsync(actionTarget.content);
+          Alert.alert("已复制", "消息内容已复制到剪贴板");
+        } catch (e) {
+          console.warn("复制失败:", e);
+          Alert.alert("复制失败", "无法复制消息内容");
         }
         break;
       case "delete":
@@ -337,6 +340,9 @@ export default function ChatScreen() {
     const locked = useMetaStore.getState().isLocked;
     logDebug("轮次计数", `lastRole=${lastRole}, turn_counter=${counter}, is_locked=${locked}`);
 
+    // 保存当前消息快照（不含本轮消息），供巩固流使用
+    const snapshotForConsolidation = [...useChatStore.getState().messages];
+
     const userMsg: ChatMessage = {
       id: dayjs().valueOf().toString(),
       role: "user",
@@ -384,8 +390,8 @@ export default function ChatScreen() {
 
           const shouldRun = shouldConsolidate();
           if (shouldRun) {
-            const history = useChatStore.getState().messages;
-            runConsolidation(history).catch((err) =>
+            // 使用之前保存的快照，不含当前轮次的消息
+            runConsolidation(snapshotForConsolidation).catch((err) =>
               console.error("[chat] 巩固流异常:", err),
             );
           }
@@ -465,8 +471,8 @@ export default function ChatScreen() {
 
   return (
     <KeyboardAvoidingView
-      style={[styles.container, { backgroundColor: colors.sectionBg }]}
-      behavior={Platform.OS === "ios" ? "padding" : "height"}
+      style={[styles.container, { backgroundColor: colors.bg }]}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
     >
       {/* 标题栏 */}
@@ -569,8 +575,8 @@ export default function ChatScreen() {
       {/* 编辑消息 */}
       <Modal visible={showEditModal} animationType="slide" onRequestClose={() => setShowEditModal(false)}>
         <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          style={{ flex: 1, backgroundColor: colors.bg }}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
           <View style={[styles.editContainer, { backgroundColor: colors.sectionBg }]}>
             <View style={[styles.editHeader, { backgroundColor: colors.sectionBg, borderBottomColor: colors.border }]}>

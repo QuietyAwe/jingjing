@@ -4,6 +4,7 @@ import { initSchema } from "@/db/schema";
 import { useMetaStore } from "@/store/metaStore";
 import { startDreaming } from "@/memory/dreaming";
 import { loadConfigOverrides } from "@/prompt/config";
+import { useThemeStore, getThemeColors } from "@/theme/useTheme";
 
 // App 启动时初始化数据库表结构
 initSchema();
@@ -19,10 +20,19 @@ loadConfigOverrides();
 startDreaming();
 
 export default function RootLayout() {
+  const { themeMode } = useThemeStore();
+  const isDark = themeMode === "dark";
+  const colors = getThemeColors();
+
   return (
     <>
-      <StatusBar style="dark" />
-      <Stack screenOptions={{ headerShown: false }} />
+      <StatusBar style={isDark ? "light" : "dark"} />
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          contentStyle: { backgroundColor: colors.bg },
+        }}
+      />
     </>
   );
 }

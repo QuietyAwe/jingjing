@@ -105,6 +105,24 @@ export function retrieve(userInput: string): RetrievalResult {
     epiphany = getEpiphanyRandom(excludeIds);
   }
 
+  // 8. 无强关联时，补充最近的"日常闲聊"片段
+  if (hitEvents.length === 0 && defaultEventId) {
+    const chatFragments = getFragmentsByEventId(defaultEventId);
+    if (chatFragments.length > 0) {
+      // 取最近 3 条闲聊片段
+      const recentChats = chatFragments.slice(-3);
+      hitFragments.set(defaultEventId, recentChats);
+      // 把日常闲聊事件也加入 hitEvents
+      const defaultEvent = db.getFirstSync<MemoryEvent>(
+        "SELECT * FROM memory_events WHERE id = ?",
+        defaultEventId
+      );
+      if (defaultEvent) {
+        hitEvents.push(defaultEvent);
+      }
+    }
+  }
+
   logDebug("检索", `关键词: ${keywords.join(", ") || "无"}\n命中: ${hitEvents.length} 条事件 (${Array.from(hitFragments.values()).reduce((s, f) => s + f.length, 0)} 片段)\nTop${topEvents.length}: ${topEvents.map((e) => e.event_text.slice(0, 20)).join(" | ")}\n灵光一闪: ${epiphany ? epiphany.event_text.slice(0, 30) : "未触发"}`);
 
   return { hitEvents, hitFragments, topEvents, epiphany, keywords };

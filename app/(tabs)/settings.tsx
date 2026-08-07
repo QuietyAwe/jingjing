@@ -28,15 +28,16 @@ import {
   setConfigOverride,
   resetConfigOverride,
 } from "@/prompt/config";
-import { getUserInfo, getTopActive, getActiveCount, clearAllData, updateBasicIdentityNickname, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById } from "@/db/queries";
+import { getUserInfo, getTopActive, getActiveCount, clearAllData, updateBasicIdentityNickname, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById } from "@/db/queries";
 import { getWeekStart } from "@/memory/scheduler";
 import { fetchModels, getClient } from "@/llm/client";
 import { CollapsibleSection } from "@/components/CollapsibleSection";
 import type { UserInfo, MemoryEvent, MemoryFragment } from "@/types/schema";
 
-// 替换片段中的 [user] [time] 占位符
-function replaceFragmentPlaceholder(text: string, timestamp: string, nickname: string): string {
+// 替换片段中的 [user] [ai] [time] 占位符
+function replaceFragmentPlaceholder(text: string, timestamp: string, nickname: string, aiName?: string): string {
   let result = text.replace(/\[user\]/gi, nickname || "用户");
+  result = result.replace(/\[ai\]/gi, aiName || "私藏");
   if (result.includes("[time]") && timestamp) {
     const now = dayjs();
     const eventTime = dayjs(timestamp);
@@ -347,7 +348,8 @@ export default function SettingsScreen() {
     const ps = ui.psycho_state;
     const lq = ui.life_quests;
     const graphText = sg.length > 0 ? sg.map((s) => `${s.name}(${s.role})：${s.attitude}`).join("\n* ") : EMPTY;
-    const tasksText = lq.ongoing_tasks.length > 0 ? lq.ongoing_tasks.map((t) => `${t.task_name}(${t.status})`).join("；") : EMPTY;
+    const validTasks = lq.ongoing_tasks.filter(t => t.task_name && t.status);
+    const tasksText = validTasks.length > 0 ? validTasks.map((t) => `${t.task_name}(${t.status})`).join("；") : EMPTY;
     const result = template
       .replace(/\{\{nickname\}\}/g, bi.nickname || "你")
       .replace(/\{\{occupation\}\}/g, bi.occupation || "未知")
@@ -377,6 +379,7 @@ export default function SettingsScreen() {
     memInjectTplOverride?: string
   ): string => {
     const nickname = user_nickname || "用户";
+    const aiName = ai_name || "私藏";
     const prompts = getPrompts();
     const eventTpl = memEventTplOverride || prompts.memory_event_template;
     const injectTpl = memInjectTplOverride || prompts.memory_injection_template;
@@ -384,7 +387,9 @@ export default function SettingsScreen() {
     // 渲染每条事件
     const eventLines: string[] = [];
     for (const e of events) {
-      const text = e.event_text.replace(/\[user\]/gi, nickname);
+      const text = e.event_text
+        .replace(/\[user\]/gi, nickname)
+        .replace(/\[ai\]/gi, aiName);
       const line = eventTpl
         .replace(/\{\{weight\}\}/g, String(e.active_weight))
         .replace(/\{\{event_text\}\}/g, text);
@@ -394,7 +399,9 @@ export default function SettingsScreen() {
     // 渲染灵光一闪
     let epiphanyText = "";
     if (epiphany) {
-      const text = epiphany.event_text.replace(/\[user\]/gi, nickname);
+      const text = epiphany.event_text
+        .replace(/\[user\]/gi, nickname)
+        .replace(/\[ai\]/gi, aiName);
       epiphanyText = `- [灵光一闪·冷记忆] ${text}`;
     }
 
@@ -905,15 +912,15 @@ ${text}
 
       {/* 约定提醒 */}
       <CollapsibleSection
-        title={`约定提醒 (${userInfo?.life_quests?.ongoing_tasks?.filter(t => t.due_time)?.length || 0})`}
+        title={`约定提醒 (${userInfo?.life_quests?.ongoing_tasks?.filter(t => t.due_time && t.task_name)?.length || 0})`}
         icon="⏰"
         defaultExpanded={true}
       >
-        {!userInfo?.life_quests?.ongoing_tasks?.some(t => t.due_time) ? (
+        {!userInfo?.life_quests?.ongoing_tasks?.some(t => t.due_time && t.task_name) ? (
           <Text style={[styles.emptyText, { color: colors.textMuted, paddingVertical: 16 }]}>暂无约定</Text>
         ) : (
           userInfo.life_quests.ongoing_tasks
-            .filter(t => t.due_time)
+            .filter(t => t.due_time && t.task_name)
             .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf())
             .map((task, index) => {
               const dueTime = dayjs(task.due_time);
@@ -928,7 +935,7 @@ ${text}
                       {isPast ? "已过期 " : ""}{dueTime.format("M/D HH:mm")}
                     </Text>
                   </View>
-                  {task.status !== "in_progress" && (
+                  {task.status && task.status !== "in_progress" && (
                     <Text style={[styles.promiseStatus, { color: colors.textMuted }]}>{task.status}</Text>
                   )}
                 </View>
@@ -1099,8 +1106,8 @@ ${text}
       {/* 通用配置编辑器 */}
       <Modal visible={editorVisible} animationType="slide">
         <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          style={{ flex: 1, backgroundColor: colors.bg }}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
           <View style={[styles.editorContainer, { backgroundColor: colors.editorBg }]}>
             <View style={[styles.editorHeader, { backgroundColor: colors.editorBg, borderBottomColor: colors.border }]}>
@@ -1230,7 +1237,7 @@ ${text}
 
       {/* 事件编辑器 */}
       <Modal visible={showEventEditor} animationType="slide" onRequestClose={() => setShowEventEditor(false)}>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+        <KeyboardAvoidingView style={{ flex: 1, backgroundColor: colors.bg }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={[styles.editorContainer, { backgroundColor: colors.editorBg }]}>
             <View style={[styles.editorHeader, { backgroundColor: colors.editorBg, borderBottomColor: colors.border }]}>
               <TouchableOpacity onPress={() => setShowEventEditor(false)}>
@@ -1288,10 +1295,10 @@ ${text}
                         </Text>
                       </View>
                       <Text style={[styles.fragmentSummary, { color: colors.text }]}>
-                        {replaceFragmentPlaceholder(frag.summary, frag.timestamp, user_nickname)}
+                        {replaceFragmentPlaceholder(frag.summary, frag.timestamp, user_nickname, ai_name)}
                       </Text>
                       {frag.emotion ? (
-                        <Text style={[styles.fragmentEmotionLine, { color: colors.accent }]}>情绪：{frag.emotion}</Text>
+                        <Text style={[styles.fragmentEmotionLine, { color: colors.accent }]}>情绪：{replaceFragmentPlaceholder(frag.emotion, frag.timestamp, user_nickname, ai_name)}</Text>
                       ) : null}
                     </View>
                   ))
@@ -1406,14 +1413,29 @@ ${text}
               eventFragments.map((frag, index) => (
                 <View key={frag.id} style={[styles.fragmentCard, { backgroundColor: colors.sectionBg, borderColor: colors.border }]}>
                   <View style={styles.fragmentHeader}>
-                    <Text style={[styles.fragmentIndex, { color: colors.textMuted }]}>#{index + 1}</Text>
-                    <Text style={[styles.fragmentPriority, { color: colors.textMuted }]}>P{frag.priority}</Text>
+                    <View style={{ flexDirection: "row", alignItems: "center" }}>
+                      <Text style={[styles.fragmentIndex, { color: colors.textMuted }]}>#{index + 1}</Text>
+                      <Text style={[styles.fragmentPriority, { color: colors.textMuted, marginLeft: 8 }]}>P{frag.priority}</Text>
+                    </View>
+                    <TouchableOpacity
+                      onPress={() => {
+                        Alert.alert("删除片段", "确认删除这条记忆片段？", [
+                          { text: "取消", style: "cancel" },
+                          { text: "删除", style: "destructive", onPress: () => {
+                            deleteFragment(frag.id);
+                            setEventFragments(getFragmentsByEventId(selectedEvent!.id));
+                          }},
+                        ]);
+                      }}
+                    >
+                      <Text style={[styles.fragmentDelete, { color: colors.danger }]}>删除</Text>
+                    </TouchableOpacity>
                   </View>
                   <Text style={[styles.fragmentText, { color: colors.text }]}>
-                    {replaceFragmentPlaceholder(frag.summary, frag.timestamp, user_nickname)}
+                    {replaceFragmentPlaceholder(frag.summary, frag.timestamp, user_nickname, ai_name)}
                   </Text>
                   {frag.emotion ? (
-                    <Text style={[styles.fragmentEmotionLine, { color: colors.accent }]}>情绪：{replaceFragmentPlaceholder(frag.emotion, frag.timestamp, user_nickname)}</Text>
+                    <Text style={[styles.fragmentEmotionLine, { color: colors.accent }]}>情绪：{replaceFragmentPlaceholder(frag.emotion, frag.timestamp, user_nickname, ai_name)}</Text>
                   ) : null}
                   <Text style={[styles.fragmentTime, { color: colors.textMuted }]}>
                     {new Date(frag.timestamp).toLocaleString()}
@@ -1466,7 +1488,7 @@ ${text}
 
       {/* 人设编辑器 */}
       <Modal visible={personaModalVisible} animationType="slide" onRequestClose={() => setPersonaModalVisible(false)}>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+        <KeyboardAvoidingView style={{ flex: 1, backgroundColor: colors.bg }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={[styles.editorContainer, { backgroundColor: colors.editorBg }]}>
             <View style={[styles.editorHeader, { backgroundColor: colors.editorBg, borderBottomColor: colors.border }]}>
               <TouchableOpacity onPress={() => setPersonaModalVisible(false)}>
@@ -1664,6 +1686,7 @@ const styles = StyleSheet.create({
   fragmentHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
   fragmentIndex: { fontSize: 12 },
   fragmentPriority: { fontSize: 12, fontWeight: "600" },
+  fragmentDelete: { fontSize: 12 },
   fragmentText: { fontSize: 14, lineHeight: 20 },
   fragmentEmotionLine: { fontSize: 13, marginTop: 6 },
   fragmentTime: { fontSize: 11, marginTop: 4 },

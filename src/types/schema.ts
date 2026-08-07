@@ -117,6 +117,8 @@ export interface PromptsConfig {
   cold_start_template: string;
   memory_injection_template: string;
   memory_event_template: string;
+  schedule_generation_prompt: string;
+  promise_injection_template: string;
 }
 
 export interface DefaultPlaceholders {

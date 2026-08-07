@@ -104,17 +104,30 @@ export async function checkAndGenerateSchedule(): Promise<void> {
  * 获取当前状态描述
  * 用于注入到 Prompt 的状态区
  */
+// 缓存深夜状态，避免每次调用都随机变化
+let cachedLateNightStatus: string | null = null;
+let cachedLateNightHour: number = -1;
+
 export function getCurrentStatus(): string | null {
   const weekStart = getWeekStart();
   const now = dayjs();
   const dayOfWeek = getCurrentDayOfWeek();
   const timeSlot = getCurrentTimeSlot(now.hour());
 
-  // 深夜时段（0-6点）随机返回深夜活动
+  // 深夜时段（0-6点）使用缓存，同一小时内保持一致
   if (timeSlot === -1) {
-    const randomActivity = LATE_NIGHT_ACTIVITIES[Math.floor(Math.random() * LATE_NIGHT_ACTIVITIES.length)];
-    return `当前：${randomActivity}`;
+    const currentHour = now.hour();
+    if (cachedLateNightHour !== currentHour || !cachedLateNightStatus) {
+      const randomActivity = LATE_NIGHT_ACTIVITIES[Math.floor(Math.random() * LATE_NIGHT_ACTIVITIES.length)];
+      cachedLateNightStatus = `当前：${randomActivity}`;
+      cachedLateNightHour = currentHour;
+    }
+    return cachedLateNightStatus;
   }
+
+  // 非深夜时段清除缓存
+  cachedLateNightStatus = null;
+  cachedLateNightHour = -1;
 
   const currentActivity = getCurrentActivity(dayOfWeek, timeSlot, weekStart);
   if (!currentActivity) return null;

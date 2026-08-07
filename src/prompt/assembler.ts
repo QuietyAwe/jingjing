@@ -124,14 +124,15 @@ function buildStateSection(
   if (userInfo.life_quests.long_term_goals.length > 0) {
     parts.push(`愿望：${userInfo.life_quests.long_term_goals.join("、")}`);
   }
-  if (userInfo.life_quests.ongoing_tasks.length > 0) {
-    const tasks = userInfo.life_quests.ongoing_tasks
+  const validTasks = userInfo.life_quests.ongoing_tasks.filter(t => t.task_name && t.status);
+  if (validTasks.length > 0) {
+    const tasks = validTasks
       .map((t) => `${t.task_name}(${t.status})`)
       .join("；");
     parts.push(`待办：${tasks}`);
   }
-  if (emotion) {
-    parts.push(`当前状态：${emotion}`);
+  if (currentStatus) {
+    parts.push(`当前状态：${currentStatus}`);
   }
 
   return `## [用户信息]\n\n${parts.join("\n")}`;
@@ -177,10 +178,11 @@ function renderStateTemplate(
       : EMPTY;
   result = result.replace(/\{\{social_graph\}\}/g, graphText);
 
-  // 待办任务
+  // 待办任务（过滤掉无效任务）
+  const validTasks = lq.ongoing_tasks.filter(t => t.task_name && t.status);
   const tasksText =
-    lq.ongoing_tasks.length > 0
-      ? lq.ongoing_tasks.map((t) => `${t.task_name}(${t.status})`).join("；")
+    validTasks.length > 0
+      ? validTasks.map((t) => `${t.task_name}(${t.status})`).join("；")
       : EMPTY;
   result = result.replace(/\{\{ongoing_tasks\}\}/g, tasksText);
 
@@ -319,6 +321,10 @@ function replacePlaceholders(
   // [user] → 昵称
   const nickname = userInfo?.basic_identity?.nickname || "用户";
   result = result.replace(/\[user\]/g, nickname);
+
+  // [ai] → AI 名称
+  const aiName = useSettingsStore.getState().ai_name || "私藏";
+  result = result.replace(/\[ai\]/g, aiName);
 
   // [time] → 相对时间
   if (result.includes("[time]") && eventTimestamp) {
