@@ -105,20 +105,21 @@ export function retrieve(userInput: string): RetrievalResult {
     epiphany = getEpiphanyRandom(excludeIds);
   }
 
-  // 8. 无强关联时，补充最近的"日常闲聊"片段
+  // 8. 无强关联时，补充最近的"日常闲聊"片段到 topEvents
   if (hitEvents.length === 0 && defaultEventId) {
     const chatFragments = getFragmentsByEventId(defaultEventId);
     if (chatFragments.length > 0) {
       // 取最近 3 条闲聊片段
       const recentChats = chatFragments.slice(-3);
       hitFragments.set(defaultEventId, recentChats);
-      // 把日常闲聊事件也加入 hitEvents
+      // 把日常闲聊事件加入 topEvents（这样会被渲染到记忆区）
       const defaultEvent = db.getFirstSync<MemoryEvent>(
         "SELECT * FROM memory_events WHERE id = ?",
         defaultEventId
       );
       if (defaultEvent) {
-        hitEvents.push(defaultEvent);
+        const live_weight = calculateWeight(defaultEvent.active_weight, defaultEvent.last_accessed, defaultEvent.priority);
+        topEvents.unshift({ ...defaultEvent, live_weight });
       }
     }
   }
