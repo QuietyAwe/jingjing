@@ -8,7 +8,7 @@
     "dream_consolidation_prompt": "你是一个记忆整理引擎。请将以下琐碎的记忆事件进行语义折叠，合并为 1-2 条高度概括的新事件文本。\n\n规则：\n1. 只保留核心事实和情感主线，遗忘细枝末节\n2. 事件文本只写关键词，不含 [user] [time] 占位符，例如「日本旅行计划」「工作压力」\n3. 如果事件之间没有语义关联，不要强行合并\n4. 每条概括事件控制在 20 字以内",
     "cold_start_template": "## [系统指引]\n你与[user]刚刚相识。你的数据库中目前没有任何关于[user]的信息。请用充满好奇、温柔、体贴的态度，在接下来的对话中，引导[user]慢慢向你介绍自己。",
     "context_template": "{{{system_prompt}}}\n\n{{{state_info}}}\n\n{{{memory_events}}}",
-    "memory_injection_template": "## 记忆区\n\n{{event_list}}\n\n{{epiphany}}\n\n---\n当前时间：[now]",
+    "memory_injection_template": "## 记忆区\n\n{{event_list}}\n\n{{epiphany}}",
     "memory_event_template": "- {{event_text}}"
   },
   "default_placeholders": {
