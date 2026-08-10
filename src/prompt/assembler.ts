@@ -60,11 +60,18 @@ export function assemblePrompt(
   // 3. 截断：若超预算，按权重从低到高剔除记忆事件
   const truncatedMemory = truncateToFit(memoryText, topEvents, epiphany, chatHistory, tokenBudget);
 
-  // 4. 转换历史为 API 格式
-  const messages = chatHistory.map((m) => ({
-    role: m.role as "user" | "assistant",
-    content: m.content,
-  }));
+  // 4. 转换历史为 API 格式（首条和末条带时间戳，让 AI 感知时间流逝）
+  const messages = chatHistory.map((m, i) => {
+    // 第一条和最后一条消息带时间，中间的不带（节省 token）
+    const showTime = i === 0 || i === chatHistory.length - 1;
+    const timePrefix = showTime && m.timestamp
+      ? `[${dayjs(m.timestamp).format("M/D HH:mm")}] `
+      : "";
+    return {
+      role: m.role as "user" | "assistant",
+      content: timePrefix + m.content,
+    };
+  });
 
   return { system: systemPromptText, state: stateText, memory: truncatedMemory, messages };
 }
@@ -355,7 +362,7 @@ function replacePlaceholders(
   // [now] → 当前时间
   if (result.includes("[now]")) {
     const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-    result = result.replace(/\[now\]/g, `${currentTime.format("M/D")}(${WEEKDAYS[currentTime.day()]}) ${currentTime.format("HH:mm")}`);
+    result = result.replace(/\[now\]/g, `${currentTime.format("YYYY年M月D日")} ${WEEKDAYS[currentTime.day()]} ${currentTime.format("HH:mm")}`);
   }
 
   return result;
