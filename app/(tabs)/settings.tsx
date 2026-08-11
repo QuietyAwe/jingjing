@@ -32,6 +32,7 @@ import { getUserInfo, getTopActive, getActiveCount, clearAllData, updateBasicIde
 import { getWeekStart } from "@/memory/scheduler";
 import { fetchModels, getClient } from "@/llm/client";
 import { CollapsibleSection } from "@/components/CollapsibleSection";
+import { exportBackup, importBackup } from "../../src/utils/backup";
 import type { UserInfo, MemoryEvent, MemoryFragment } from "@/types/schema";
 
 // 替换片段中的 [user] [ai] [time] 占位符
@@ -983,6 +984,30 @@ ${text}
 
       {/* 数据管理 */}
       <CollapsibleSection title="数据管理" icon="🗑️" defaultExpanded={false}>
+        <TouchableOpacity style={[styles.actionRow, { borderBottomColor: colors.border }]} onPress={async () => {
+          try {
+            await exportBackup();
+          } catch (e: any) {
+            Alert.alert("导出失败", e.message || "无法导出数据");
+          }
+        }}>
+          <Text style={[styles.actionText, { color: colors.text }]}>📦 导出备份</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.actionRow, { borderBottomColor: colors.border }]} onPress={() => {
+          Alert.alert("导入备份", "导入会覆盖当前所有数据（聊天记录、记忆、设置），确定继续？", [
+            { text: "取消", style: "cancel" },
+            { text: "导入", style: "destructive", onPress: async () => {
+              try {
+                const result = await importBackup();
+                Alert.alert(result.success ? "导入成功" : "导入失败", result.message);
+              } catch (e: any) {
+                Alert.alert("导入失败", e.message || "无法导入数据");
+              }
+            }},
+          ]);
+        }}>
+          <Text style={[styles.actionText, { color: colors.text }]}>📥 导入备份</Text>
+        </TouchableOpacity>
         <TouchableOpacity style={[styles.actionRow, { borderBottomColor: colors.border }]} onPress={() => {
           Alert.alert("删除本周时间表", "确定要删除本周的行为时间表吗？下次对话时会自动重新生成。", [
             { text: "取消", style: "cancel" },
