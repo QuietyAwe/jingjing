@@ -194,8 +194,8 @@ export default function ChatScreen() {
     switch (action) {
       case "copy":
         try {
-          const Clipboard = require("expo-clipboard");
-          await Clipboard.setStringAsync(actionTarget.content);
+          const { Clipboard } = require("react-native");
+          Clipboard.setString(actionTarget.content);
           Alert.alert("已复制", "消息内容已复制到剪贴板");
         } catch (e) {
           console.warn("复制失败:", e);
