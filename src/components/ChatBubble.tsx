@@ -6,7 +6,7 @@
 import { View, Text, StyleSheet, Pressable } from "react-native";
 import type { ChatMessage } from "@/types/schema";
 import { useTheme, useCurrentCustomColors } from "@/theme/useTheme";
-import { useState } from "react";
+import { useState, useMemo } from "react";
 
 /** 模拟真人聊天风格：分割 + 去句号 + 长句逗号再拆 */
 function splitForChat(text: string): string[] {
@@ -53,7 +53,10 @@ export default function ChatBubble({ message, onLongPress }: Props) {
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
 
   // AI 消息按段落分割成多个气泡（模拟真人聊天风格）
-  const paragraphs = isUser ? [message.content] : splitForChat(message.content);
+  const paragraphs = useMemo(
+    () => isUser ? [message.content] : splitForChat(message.content),
+    [isUser, message.content]
+  );
 
   const bubbleContent = (
     <>
