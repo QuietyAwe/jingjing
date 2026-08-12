@@ -1,22 +1,27 @@
 // ============================================================
 // P3-2: 艾宾浩斯衰减计算器
 // 公式: W_now = max(1, floor(W_last * e^(-d * t_hours)))
-// 优先级越高衰减越慢：priority 1-9 对应衰减系数 0.12 ~ 0.03
+// 优先级越高衰减越慢：priority 1-9 对应衰减系数按配置缩放
 // ============================================================
 
 import dayjs from "dayjs";
+import { getWeightDecay } from "@/prompt/config";
 
-const DEFAULT_DECAY_RATE = 0.06;
+const DEFAULT_BASE_RATE = 0.06;
 
 /**
  * 根据优先级计算衰减系数
- * priority 1（琐事）→ 衰减快（0.12）
- * priority 9（重大）→ 衰减慢（0.03）
+ * priority 1（琐事）→ 衰减快
+ * priority 9（重大）→ 衰减慢
+ * 基准系数由配置 ebbinghaus_decay_rate 控制（默认 0.06）
  */
 function getDecayRate(priority: number): number {
-  // 线性映射：priority 1-9 → decay 0.12-0.03
+  const baseRate = getWeightDecay().ebbinghaus_decay_rate || DEFAULT_BASE_RATE;
+  // 以 baseRate 为中位数（priority 5），线性映射到 priority 1-9
+  // priority 1 → baseRate * 2, priority 5 → baseRate, priority 9 → baseRate * 0.5
   const clamped = Math.max(1, Math.min(9, priority));
-  return 0.12 - (clamped - 1) * (0.09 / 8);
+  const factor = 2 - (clamped - 1) * (1.5 / 8);
+  return baseRate * factor;
 }
 
 /**

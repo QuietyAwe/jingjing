@@ -3,7 +3,7 @@
 // 检查到期的 due_time 任务，触发系统消息提醒
 // ============================================================
 
-import { getUserInfo } from "@/db/queries";
+import { getUserInfo, setUserInfo } from "@/db/queries";
 import { getPrompts } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
 import dayjs from "dayjs";
@@ -60,13 +60,21 @@ function buildPromiseMessage(task: OngoingTask): string {
 
 /**
  * 标记约定已提醒（删除任务）
- * 返回更新后的任务列表
+ * 内部完成读取-修改-写入闭环，避免竞态
+ * @returns 是否成功删除
  */
-export function markPromiseReminded(taskName: string): OngoingTask[] {
+export function markPromiseReminded(taskName: string): boolean {
   const userInfo = getUserInfo();
-  if (!userInfo) return [];
+  if (!userInfo) return false;
 
-  return userInfo.life_quests.ongoing_tasks.filter(
+  const updatedTasks = userInfo.life_quests.ongoing_tasks.filter(
     (t) => t.task_name !== taskName
   );
+
+  setUserInfo({
+    ...userInfo,
+    life_quests: { ...userInfo.life_quests, ongoing_tasks: updatedTasks },
+  });
+
+  return true;
 }

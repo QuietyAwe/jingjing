@@ -54,11 +54,10 @@ export async function runConsolidation(
   // 1. 获取锁
   setMeta("is_locked", "true");
 
-  // 30s 超时兜底
+  // 30s 超时兜底（只释放锁，不清零计数器，下次达到阈值时重试）
   const timeoutTimer = setTimeout(() => {
-    logDebug("巩固超时", "30s 强制解锁, turn_counter=0, is_locked=false");
+    logDebug("巩固超时", "30s 强制解锁, is_locked=false");
     setMeta("is_locked", "false");
-    setMeta("turn_counter", "0");
   }, LOCK_TIMEOUT_MS);
 
   try {
@@ -91,10 +90,9 @@ export async function runConsolidation(
     // 5. 调用后台 LLM 提取
     const result = await extractConsolidation(userInfo, snapshot, existingEvents, LOCK_TIMEOUT_MS - 2000);
     if (!result) {
-      logDebug("巩固结果", "LLM 提取失败或返回空, turn_counter=0, is_locked=false");
+      logDebug("巩固结果", "LLM 提取失败或返回空, is_locked=false, 保留计数器下次重试");
       clearTimeout(timeoutTimer);
       setMeta("is_locked", "false");
-      setMeta("turn_counter", "0");
       return false;
     }
 
@@ -155,9 +153,8 @@ export async function runConsolidation(
   } catch (err) {
     clearTimeout(timeoutTimer);
     const errMsg = err instanceof Error ? err.message : String(err);
-    logDebug("巩固异常", `${errMsg}\nturn_counter=0, is_locked=false`);
+    logDebug("巩固异常", `${errMsg}\nis_locked=false, 保留计数器下次重试`);
     setMeta("is_locked", "false");
-    setMeta("turn_counter", "0");
     return false;
   }
 }

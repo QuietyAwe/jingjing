@@ -175,11 +175,6 @@ export default function SettingsScreen() {
       { label: "相对时间", value: "[time]" },
       { label: "事件内容", value: "{{event_text}}" },
     ],
-    context_template: [
-      { label: "系统人设", value: "{{{system_prompt}}}" },
-      { label: "状态区", value: "{{{state_info}}}" },
-      { label: "记忆区", value: "{{{memory_events}}}" },
-    ],
   };
 
   // 在光标位置插入变量

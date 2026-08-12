@@ -356,10 +356,11 @@ export function getColdestEvents(limit: number): MemoryEvent[] {
   );
 }
 
-/** 批量软归档 */
+/** 批量软归档（同时删除关联片段，避免孤儿数据） */
 export function softArchiveBatch(eventIds: number[]): void {
   const db = getDB();
   for (const id of eventIds) {
+    db.runSync('DELETE FROM memory_fragments WHERE "index" = ?', id);
     db.runSync(
       "UPDATE memory_events SET is_archived = 1 WHERE id = ?",
       id

@@ -28,7 +28,7 @@ import { shouldConsolidate, runConsolidation } from "@/memory/consolidation";
 import { resetIdleTimer } from "@/memory/dreaming";
 import { checkDuePromises, markPromiseReminded } from "@/memory/promiseChecker";
 import { checkAndGenerateSchedule } from "@/memory/scheduler";
-import { updateBasicIdentityNickname, setUserInfo, getUserInfo } from "@/db/queries";
+import { updateBasicIdentityNickname } from "@/db/queries";
 import { useTheme } from "@/theme/useTheme";
 import type { ChatMessage } from "@/types/schema";
 
@@ -98,19 +98,8 @@ export default function ChatScreen() {
         };
         addMessage(sysMsg);
 
-        // 标记已提醒（删除任务）
-        const updatedTasks = markPromiseReminded(task.task_name);
-        // 需要更新 user_info
-        const userInfo = getUserInfo();
-        if (userInfo) {
-          setUserInfo({
-            ...userInfo,
-            life_quests: {
-              ...userInfo.life_quests,
-              ongoing_tasks: updatedTasks,
-            },
-          });
-        }
+        // 标记已提醒（内部完成数据库更新）
+        markPromiseReminded(task.task_name);
 
         logDebug("约定提醒", `已提醒: ${task.task_name}`);
       }

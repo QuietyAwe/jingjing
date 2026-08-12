@@ -58,7 +58,7 @@ export function assemblePrompt(
   const memoryText = buildMemorySection(userInfo, topEvents, epiphany, hitFragments);
 
   // 3. 截断：若超预算，按权重从低到高剔除记忆事件
-  const truncatedMemory = truncateToFit(memoryText, topEvents, epiphany, chatHistory, tokenBudget);
+  const truncatedMemory = truncateToFit(memoryText, topEvents, epiphany, chatHistory, userInfo, tokenBudget);
 
   // 4. 转换历史为 API 格式（首条和末条带时间戳，让 AI 感知时间流逝）
   const messages = chatHistory.map((m, i) => {
@@ -377,6 +377,7 @@ function truncateToFit(
   topEvents: (MemoryEvent & { live_weight: number })[],
   epiphany: MemoryEvent | null,
   chatHistory: ChatMessage[],
+  userInfo: UserInfo | null,
   budget: number
 ): string {
   const historyChars = chatHistory.reduce((sum, m) => sum + m.content.length, 0);
@@ -412,10 +413,9 @@ function truncateToFit(
   }
 
   // 按权重从低到高逐个删除事件行（通过事件文本匹配）
-  const nickname = useSettingsStore.getState().user_nickname || "用户";
   for (const event of sortedEvents) {
     if (removed >= excess) break;
-    const eventText = replacePlaceholders(event.event_text, event.timestamp, null);
+    const eventText = replacePlaceholders(event.event_text, event.timestamp, userInfo);
     for (const [line, len] of eventLineMap) {
       if (line.includes(eventText) && !removedLines.has(line)) {
         removedLines.add(line);
