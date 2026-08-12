@@ -24,9 +24,9 @@ interface BackupData {
 }
 
 /** 导出所有数据 */
-export async function exportBackup(): Promise<boolean> {
+export async function exportBackup(): Promise<{ success: boolean; message: string }> {
   try {
-    // 1. 读取 AsyncStorage
+    // 1. 读取 AsyncStorage（聊天记录、设置、提示词等全部 key）
     const keys = await AsyncStorage.getAllKeys();
     const pairs = await AsyncStorage.multiGet(keys);
     const asyncStorage: Record<string, string> = {};
@@ -61,10 +61,20 @@ export async function exportBackup(): Promise<boolean> {
       dialogTitle: "导出备份数据",
     });
 
-    return true;
+    // 返回摘要
+    const chatMsgCount = asyncStorage.chat_messages
+      ? JSON.parse(asyncStorage.chat_messages).state?.messages?.length ?? 0
+      : 0;
+    const summary = [
+      `聊天记录: ${chatMsgCount} 条`,
+      `记忆事件: ${memory_events.length} 个`,
+      `记忆片段: ${memory_fragments.length} 条`,
+      `设置项: ${Object.keys(asyncStorage).length} 个 key`,
+    ].join(", ");
+    return { success: true, message: summary };
   } catch (e) {
     console.error("导出失败:", e);
-    return false;
+    return { success: false, message: "导出失败：" + (e instanceof Error ? e.message : String(e)) };
   }
 }
 
@@ -91,7 +101,9 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
       return { success: false, message: "备份文件格式无效" };
     }
 
-    // 4. 恢复 AsyncStorage
+    // 4. 恢复 AsyncStorage（先清空旧数据再写入，避免残留）
+    const existingKeys = await AsyncStorage.getAllKeys();
+    if (existingKeys.length > 0) await AsyncStorage.multiRemove(existingKeys);
     const pairs = Object.entries(backup.asyncStorage);
     await AsyncStorage.multiSet(pairs);
 

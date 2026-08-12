@@ -986,7 +986,12 @@ ${text}
       <CollapsibleSection title="数据管理" icon="🗑️" defaultExpanded={false}>
         <TouchableOpacity style={[styles.actionRow, { borderBottomColor: colors.border }]} onPress={async () => {
           try {
-            await exportBackup();
+            const result = await exportBackup();
+            if (result.success) {
+              Alert.alert("导出成功", result.message);
+            } else {
+              Alert.alert("导出失败", result.message);
+            }
           } catch (e: any) {
             Alert.alert("导出失败", e.message || "无法导出数据");
           }
