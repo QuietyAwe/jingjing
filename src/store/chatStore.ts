@@ -86,8 +86,8 @@ export const useChatStore = create<ChatState>()(
       appendStreamingText: (delta) =>
         set((state) => {
           const newText = state.streamingText + delta;
-          // 按段落分割
-          const parts = newText.split("\n\n");
+          // 按换行分割（流式阶段不处理标点，完成后由 ChatBubble 统一处理）
+          const parts = newText.split(/\n+/);
           const chunks = parts.filter((p) => p.trim());
           return { streamingText: newText, streamingChunks: chunks };
         }),

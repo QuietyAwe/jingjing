@@ -8,6 +8,38 @@ import type { ChatMessage } from "@/types/schema";
 import { useTheme, useCurrentCustomColors } from "@/theme/useTheme";
 import { useState } from "react";
 
+/** 模拟真人聊天风格：分割 + 去句号 + 长句逗号再拆 */
+function splitForChat(text: string): string[] {
+  const LONG_THRESHOLD = 20;
+  const result: string[] = [];
+
+  // 1. 按任意换行分割
+  const lines = text.split(/\n+/);
+
+  for (const line of lines) {
+    let seg = line.trim();
+    if (!seg) continue;
+
+    // 2. 去末尾句号
+    seg = seg.replace(/。+$/, "");
+
+    if (!seg) continue;
+
+    // 3. 超过阈值且有逗号 → 按逗号再拆
+    if (seg.length > LONG_THRESHOLD && seg.includes("，")) {
+      const parts = seg.split("，");
+      for (const part of parts) {
+        const p = part.trim();
+        if (p) result.push(p);
+      }
+    } else {
+      result.push(seg);
+    }
+  }
+
+  return result;
+}
+
 interface Props {
   message: ChatMessage;
   onLongPress?: () => void;
@@ -20,8 +52,8 @@ export default function ChatBubble({ message, onLongPress }: Props) {
   const [pressed, setPressed] = useState(false);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
 
-  // AI 消息按段落分割成多个气泡
-  const paragraphs = isUser ? [message.content] : message.content.split(/\n\n+/).filter((p) => p.trim());
+  // AI 消息按段落分割成多个气泡（模拟真人聊天风格）
+  const paragraphs = isUser ? [message.content] : splitForChat(message.content);
 
   const bubbleContent = (
     <>
