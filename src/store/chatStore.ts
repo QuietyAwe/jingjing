@@ -53,6 +53,8 @@ interface ChatState {
   clearDebugLogs: () => void;
   /** 获取用于 LLM 调用的历史消息（不含 system） */
   getHistory: () => ChatMessage[];
+  /** 从 AsyncStorage 重新加载消息（导入备份后调用） */
+  reloadMessages: () => Promise<void>;
 }
 
 export const useChatStore = create<ChatState>()(
@@ -112,6 +114,19 @@ export const useChatStore = create<ChatState>()(
 
       /** LLM 上下文：最近 N 轮（滑动窗口，不影响完整消息记录） */
       getHistory: () => get().messages.slice(-CONTEXT_WINDOW),
+
+      /** 从 AsyncStorage 重新加载消息（导入备份后调用） */
+      reloadMessages: async () => {
+        try {
+          const raw = await AsyncStorage.getItem("chat_messages");
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            set({ messages: parsed.state?.messages ?? [] });
+          }
+        } catch (e) {
+          console.warn("reloadMessages 失败:", e);
+        }
+      },
     }),
     {
       name: "chat_messages",

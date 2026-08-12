@@ -1004,7 +1004,15 @@ ${text}
             { text: "导入", style: "destructive", onPress: async () => {
               try {
                 const result = await importBackup();
-                Alert.alert(result.success ? "导入成功" : "导入失败", result.message);
+                if (result.success) {
+                  // 重新加载聊天记录到 Zustand store
+                  await useChatStore.getState().reloadMessages();
+                  // 重新加载设置
+                  await useSettingsStore.getState().loadApiKey();
+                  Alert.alert("导入成功", result.message);
+                } else {
+                  Alert.alert("导入失败", result.message);
+                }
               } catch (e: any) {
                 Alert.alert("导入失败", e.message || "无法导入数据");
               }
