@@ -175,10 +175,10 @@ export async function runConsolidation(
     clearTimeout(timeoutTimer);
 
     // 6. 释放锁 + 清零计数 + 记录巩固进度（同步更新内存 + DB）
-    setMeta("last_consolidated_index", String(recentMessages.length));
+    setMeta("last_consolidated_index", String(windowStart));
     useMetaStore.getState().reset();
 
-    logDebug("巩固完成", `摘要: ${result.new_fragment.summary}\n情绪: ${result.new_fragment.emotion}\n进度: last_consolidated_index=${recentMessages.length}`);
+    logDebug("巩固完成", `摘要: ${result.new_fragment.summary}\n情绪: ${result.new_fragment.emotion}\n进度: last_consolidated_index=${windowStart}`);
     return true;
   } catch (err) {
     clearTimeout(timeoutTimer);
