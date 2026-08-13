@@ -37,6 +37,9 @@ function buildExtractionMessages(
   const lines: string[] = [
     extraction_prompt,
     "",
+    "## 当前时间",
+    new Date().toISOString().replace("T", " ").slice(0, 19),
+    "",
     "## 当前用户信息",
     JSON.stringify(userInfo, null, 2),
     "",
