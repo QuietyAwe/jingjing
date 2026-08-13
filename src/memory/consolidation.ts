@@ -15,6 +15,7 @@ import {
   updateEventPriority,
   getDefaultEventId,
   getEventById,
+  getFragmentsByEventId,
 } from "@/db/queries";
 import { extractConsolidation } from "@/llm/background";
 import { getThresholds } from "@/prompt/config";
@@ -79,7 +80,7 @@ export async function runConsolidation(
     const snapshot = recentMessages.slice(-20);
 
     // 4. 取已有索引事件（供 LLM 判断挂靠，包含默认事件）
-    const existingEvents = getTopActive(50);
+    const existingEvents = getTopActive(20);
     const defaultEventId = getDefaultEventId();
     if (defaultEventId) {
       const defaultEvent = getEventById(defaultEventId);
@@ -88,8 +89,20 @@ export async function runConsolidation(
       }
     }
 
+    // 4b. 每个事件取最近 3 条片段摘要（让 LLM 知道已提取过什么）
+    const eventFragments = new Map<number, string[]>();
+    for (const evt of existingEvents) {
+      const frags = getFragmentsByEventId(evt.id);
+      if (frags.length > 0) {
+        eventFragments.set(
+          evt.id,
+          frags.slice(-3).map((f) => f.summary),
+        );
+      }
+    }
+
     // 5. 调用后台 LLM 提取
-    const result = await extractConsolidation(userInfo, snapshot, existingEvents, LOCK_TIMEOUT_MS - 2000);
+    const result = await extractConsolidation(userInfo, snapshot, existingEvents, eventFragments, LOCK_TIMEOUT_MS - 2000);
     if (!result) {
       logDebug("巩固结果", "LLM 提取失败或返回空, is_locked=false, 保留计数器下次重试");
       clearTimeout(timeoutTimer);

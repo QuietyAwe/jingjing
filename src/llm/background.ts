@@ -17,6 +17,7 @@ function buildExtractionMessages(
   userInfo: UserInfo,
   snapshot: Array<{ role: string; content: string }>,
   existingEvents: MemoryEvent[],
+  eventFragments: Map<number, string[]>,
 ): Array<{ role: "system" | "user" | "assistant"; content: string }> {
   const { extraction_prompt } = getPrompts();
 
@@ -47,6 +48,12 @@ function buildExtractionMessages(
   } else {
     for (const e of existingEvents) {
       lines.push(`- [id:${e.id}] ${e.event_text}`);
+      const frags = eventFragments.get(e.id);
+      if (frags) {
+        for (const summary of frags) {
+          lines.push(`  · ${summary}`);
+        }
+      }
     }
   }
 
@@ -70,9 +77,10 @@ export async function extractConsolidation(
   userInfo: UserInfo,
   snapshot: Array<{ role: string; content: string }>,
   existingEvents: MemoryEvent[],
+  eventFragments: Map<number, string[]>,
   timeoutMs: number = 30000,
 ): Promise<ConsolidationResponse | null> {
-  const requestMessages = buildExtractionMessages(userInfo, snapshot, existingEvents);
+  const requestMessages = buildExtractionMessages(userInfo, snapshot, existingEvents, eventFragments);
   const routing = getModelRouting();
   const config = routing.background_extraction_config;
 
