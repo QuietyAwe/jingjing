@@ -6,7 +6,7 @@
 import { getClient } from "./client";
 import { getPrompts, getModelRouting } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
-import type { UserInfo, ConsolidationResponse, MemoryEvent } from "@/types/schema";
+import type { ConsolidationResponse, MemoryEvent } from "@/types/schema";
 import type { ScheduleItem } from "@/db/queries";
 
 /**
@@ -14,7 +14,6 @@ import type { ScheduleItem } from "@/db/queries";
  * 对话历史作为独立消息发送，提高缓存命中率
  */
 function buildExtractionMessages(
-  userInfo: UserInfo,
   snapshot: Array<{ role: string; content: string }>,
   existingEvents: MemoryEvent[],
   eventFragments: Map<number, string[]>,
@@ -24,7 +23,7 @@ function buildExtractionMessages(
   // 系统指令
   const systemMessage = {
     role: "system" as const,
-    content: "你是一个记忆提取引擎，从对话中提取用户信息和记忆片段，只输出 JSON。",
+    content: "你是一个记忆提取引擎，从对话中提取增量用户信息和记忆片段，只输出 JSON。",
   };
 
   // 对话历史（作为独立消息）
@@ -33,15 +32,12 @@ function buildExtractionMessages(
     content: m.content,
   }));
 
-  // 提取请求（包含用户信息、事件列表、输出格式）
+  // 提取请求（增量模式：不传完整 userInfo，LLM 只提取新信息）
   const lines: string[] = [
     extraction_prompt,
     "",
     "## 当前时间",
     new Date().toISOString().replace("T", " ").slice(0, 19),
-    "",
-    "## 当前用户信息",
-    JSON.stringify(userInfo, null, 2),
     "",
     "## 已有索引事件",
   ];
@@ -62,7 +58,7 @@ function buildExtractionMessages(
 
   lines.push("");
   lines.push(
-    '请严格输出 JSON，格式：{"updated_user_info": {...}, "new_fragment": {"summary": "...", "emotion": "...", "priority": 数字1-9, "target_event_index": 数字或-1, "new_event_text": ""}}',
+    '请严格输出 JSON，格式：{"new_info": {只写本次新发现的字段, 没有新信息的字段不要输出}, "new_fragment": {"summary": "...", "emotion": "...", "priority": 数字1-9, "target_event_index": 数字或-1, "new_event_text": ""}}',
   );
 
   const requestMessage = {
@@ -77,13 +73,12 @@ function buildExtractionMessages(
  * 调用后台 LLM 提取用户信息与记忆片段
  */
 export async function extractConsolidation(
-  userInfo: UserInfo,
   snapshot: Array<{ role: string; content: string }>,
   existingEvents: MemoryEvent[],
   eventFragments: Map<number, string[]>,
   timeoutMs: number = 30000,
 ): Promise<ConsolidationResponse | null> {
-  const requestMessages = buildExtractionMessages(userInfo, snapshot, existingEvents, eventFragments);
+  const requestMessages = buildExtractionMessages(snapshot, existingEvents, eventFragments);
   const routing = getModelRouting();
   const config = routing.background_extraction_config;
 
@@ -114,7 +109,7 @@ export async function extractConsolidation(
 
     const parsed = JSON.parse(text) as ConsolidationResponse;
 
-    if (!parsed.updated_user_info || !parsed.new_fragment) {
+    if (!parsed.new_info || !parsed.new_fragment) {
       logDebug("巩固返回", `JSON 缺少字段\n${text.slice(0, 200)}`);
       return null;
     }

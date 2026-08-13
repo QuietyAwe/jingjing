@@ -4,6 +4,7 @@ import type {
   UserInfo,
   MemoryEvent,
   MemoryFragment,
+  ConsolidationResponse,
 } from "@/types/schema";
 import dayjs from "dayjs";
 
@@ -135,40 +136,49 @@ export function setUserInfo(info: UserInfo): void {
 /**
  * 增量 Merge 用户信息 — 对齐 PRD 2.2 节第 4 步
  * 对数组字段执行值去重追加，非数组字段直接覆盖
+ * patch 可以是 Partial，缺失字段保持原值
  */
-export function mergeUserInfo(patch: UserInfo): void {
+export function mergeUserInfo(patch: ConsolidationResponse["new_info"]): void {
   const existing = getUserInfo();
   if (!existing) {
-    setUserInfo(patch);
+    // 首次：用 patch 填充，缺失字段用空值
+    const empty: UserInfo = {
+      basic_identity: { nickname: "", gender: "", birthday: "", occupation: "", location: "" },
+      preferences: { likes: [], dislikes: [] },
+      social_graph: [],
+      psycho_state: { personality_traits: [], current_stressors: [], comm_preference: "" },
+      life_quests: { long_term_goals: [], ongoing_tasks: [] },
+    };
+    setUserInfo(mergeUserInfoDelta(empty, patch));
     return;
   }
+  setUserInfo(mergeUserInfoDelta(existing, patch));
+}
 
-  // 数组去重追加 helper
-  const mergeArray = (a: string[], b: string[]): string[] => {
+/** 合并 delta 到 existing（纯函数，不写 DB） */
+function mergeUserInfoDelta(existing: UserInfo, patch: ConsolidationResponse["new_info"]): UserInfo {
+  const mergeArray = (a: string[], b?: string[]) => {
+    if (!b || b.length === 0) return a;
     const set = new Set(a);
     for (const item of b) set.add(item);
     return Array.from(set);
   };
 
-  // social_graph 按 name 去重
-  const mergeSocialGraph = (
-    a: UserInfo["social_graph"],
-    b: UserInfo["social_graph"]
-  ) => {
+  const mergeSocialGraph = (a: UserInfo["social_graph"], b?: UserInfo["social_graph"]) => {
+    if (!b || b.length === 0) return a;
     const map = new Map(a.map((e) => [e.name, e]));
-    for (const entry of b) map.set(entry.name, entry); // 新数据覆盖同名
+    for (const entry of b) map.set(entry.name, entry);
     return Array.from(map.values());
   };
 
-  // ongoing_tasks 按 task_name 去重，已完成/已取消的任务删除
   const mergeTasks = (
     a: UserInfo["life_quests"]["ongoing_tasks"],
-    b: UserInfo["life_quests"]["ongoing_tasks"]
+    b?: UserInfo["life_quests"]["ongoing_tasks"],
   ) => {
+    if (!b || b.length === 0) return a;
     const map = new Map(a.map((t) => [t.task_name, t]));
     for (const t of b) {
       if (t.status === "cancelled" || t.status === "completed") {
-        // 已完成或已取消的任务从列表中删除
         map.delete(t.task_name);
       } else {
         map.set(t.task_name, t);
@@ -180,42 +190,22 @@ export function mergeUserInfo(patch: UserInfo): void {
   const merged: UserInfo = {
     basic_identity: { ...existing.basic_identity, ...patch.basic_identity },
     preferences: {
-      likes: mergeArray(existing.preferences.likes, patch.preferences.likes),
-      dislikes: mergeArray(
-        existing.preferences.dislikes,
-        patch.preferences.dislikes
-      ),
+      likes: mergeArray(existing.preferences.likes, patch.preferences?.likes),
+      dislikes: mergeArray(existing.preferences.dislikes, patch.preferences?.dislikes),
     },
-    social_graph: mergeSocialGraph(
-      existing.social_graph,
-      patch.social_graph
-    ),
+    social_graph: mergeSocialGraph(existing.social_graph, patch.social_graph),
     psycho_state: {
-      personality_traits: mergeArray(
-        existing.psycho_state.personality_traits,
-        patch.psycho_state.personality_traits
-      ),
-      current_stressors: mergeArray(
-        existing.psycho_state.current_stressors,
-        patch.psycho_state.current_stressors
-      ),
-      comm_preference:
-        patch.psycho_state.comm_preference ||
-        existing.psycho_state.comm_preference,
+      personality_traits: mergeArray(existing.psycho_state.personality_traits, patch.psycho_state?.personality_traits),
+      current_stressors: mergeArray(existing.psycho_state.current_stressors, patch.psycho_state?.current_stressors),
+      comm_preference: patch.psycho_state?.comm_preference || existing.psycho_state.comm_preference,
     },
     life_quests: {
-      long_term_goals: mergeArray(
-        existing.life_quests.long_term_goals,
-        patch.life_quests.long_term_goals
-      ),
-      ongoing_tasks: mergeTasks(
-        existing.life_quests.ongoing_tasks,
-        patch.life_quests.ongoing_tasks
-      ),
+      long_term_goals: mergeArray(existing.life_quests.long_term_goals, patch.life_quests?.long_term_goals),
+      ongoing_tasks: mergeTasks(existing.life_quests.ongoing_tasks, patch.life_quests?.ongoing_tasks),
     },
   };
 
-  setUserInfo(merged);
+  return merged;
 }
 
 // ============================================================

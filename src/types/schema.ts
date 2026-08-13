@@ -101,9 +101,23 @@ export interface NewFragment {
   new_event_text: string;
 }
 
-/** 后台模型提取完整响应 (PRD 4.4) */
+/** 后台模型提取响应 — 增量模式 (PRD 4.4) */
 export interface ConsolidationResponse {
-  updated_user_info: UserInfo;
+  /** 本次对话中新发现的用户信息（增量，不含旧数据） */
+  new_info: {
+    basic_identity?: Partial<BasicIdentity>;
+    preferences?: { likes?: string[]; dislikes?: string[] };
+    social_graph?: SocialGraphEntry[];
+    psycho_state?: {
+      personality_traits?: string[];
+      current_stressors?: string[];
+      comm_preference?: string;
+    };
+    life_quests?: {
+      long_term_goals?: string[];
+      ongoing_tasks?: Array<{ task_name: string; status: string; due_time?: string }>;
+    };
+  };
   new_fragment: NewFragment;
 }
 

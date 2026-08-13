@@ -101,8 +101,8 @@ export async function runConsolidation(
       }
     }
 
-    // 5. 调用后台 LLM 提取
-    const result = await extractConsolidation(userInfo, snapshot, existingEvents, eventFragments, LOCK_TIMEOUT_MS - 2000);
+    // 5. 调用后台 LLM 提取（增量模式，不传 userInfo）
+    const result = await extractConsolidation(snapshot, existingEvents, eventFragments, LOCK_TIMEOUT_MS - 2000);
     if (!result) {
       logDebug("巩固结果", "LLM 提取失败或返回空, is_locked=false, 保留计数器下次重试");
       clearTimeout(timeoutTimer);
@@ -113,11 +113,11 @@ export async function runConsolidation(
     // 6. 双重关联写入（SQLite 事务）
     const db = getDB();
     await db.withExclusiveTransactionAsync(async () => {
-      // 6a. Merge user_info
-      mergeUserInfo(result.updated_user_info);
+      // 6a. Merge user_info（增量模式，new_info 只含新发现的字段）
+      mergeUserInfo(result.new_info);
 
       // 同步昵称到设置 store
-      const newNickname = result.updated_user_info.basic_identity?.nickname;
+      const newNickname = result.new_info.basic_identity?.nickname;
       if (newNickname) {
         useSettingsStore.getState().saveUserNickname(newNickname);
       }
