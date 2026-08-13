@@ -71,7 +71,7 @@ interface ConfigField {
 }
 
 const THRESHOLD_FIELDS: ConfigField[] = [
-  { key: "consolidation_window_turns", label: "巩固触发轮数", type: "number", description: "对话满多少轮触发后台巩固" },
+  { key: "consolidation_window_turns", label: "上下文轮数上限", type: "number", description: "发送给 AI 和巩固的上下文轮数，同时控制触发频率" },
   { key: "context_active_events_limit", label: "记忆区事件上限", type: "number", description: "上下文中加载的高权重事件数量" },
 ];
 

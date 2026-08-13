@@ -76,8 +76,9 @@ export async function runConsolidation(
       };
     }
 
-    // 3. 取最近 10 轮快照（20 条）
-    const snapshot = recentMessages.slice(-20);
+    // 3. 取最近 N 轮快照（与聊天上下文一致）
+    const { consolidation_window_turns } = getThresholds();
+    const snapshot = recentMessages.slice(-consolidation_window_turns * 2);
 
     // 4. 取已有索引事件（供 LLM 判断挂靠，包含默认事件）
     const existingEvents = getTopActive(20);

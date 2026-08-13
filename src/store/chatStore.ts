@@ -6,10 +6,8 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { getThresholds } from "@/prompt/config";
 import type { ChatMessage } from "@/types/schema";
-
-// 滑动窗口：巩固窗口×2 + 当前轮预留，默认 10×2+2=22
-const CONTEXT_WINDOW = 22;
 
 export interface DebugLog {
   time: string;
@@ -113,7 +111,11 @@ export const useChatStore = create<ChatState>()(
       clearDebugLogs: () => set({ debugLogs: [] }),
 
       /** LLM 上下文：最近 N 轮（滑动窗口，不影响完整消息记录） */
-      getHistory: () => get().messages.slice(-CONTEXT_WINDOW),
+      getHistory: () => {
+        const { consolidation_window_turns } = getThresholds();
+        const window = consolidation_window_turns * 2; // 每轮 = user + assistant
+        return get().messages.slice(-window);
+      },
 
       /** 从 AsyncStorage 重新加载消息（导入备份后调用） */
       reloadMessages: async () => {
