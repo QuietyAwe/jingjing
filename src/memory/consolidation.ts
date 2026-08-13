@@ -101,8 +101,8 @@ export async function runConsolidation(
       }
     }
 
-    // 5. 调用后台 LLM 提取（增量模式，不传 userInfo）
-    const result = await extractConsolidation(snapshot, existingEvents, eventFragments, LOCK_TIMEOUT_MS - 2000);
+    // 5. 调用后台 LLM 提取（增量模式，传 userInfo 供展示已有数据）
+    const result = await extractConsolidation(userInfo, snapshot, existingEvents, eventFragments, LOCK_TIMEOUT_MS - 2000);
     if (!result) {
       logDebug("巩固结果", "LLM 提取失败或返回空, is_locked=false, 保留计数器下次重试");
       clearTimeout(timeoutTimer);

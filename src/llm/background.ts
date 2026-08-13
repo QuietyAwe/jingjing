@@ -6,7 +6,7 @@
 import { getClient } from "./client";
 import { getPrompts, getModelRouting } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
-import type { ConsolidationResponse, MemoryEvent } from "@/types/schema";
+import type { UserInfo, ConsolidationResponse, MemoryEvent } from "@/types/schema";
 import type { ScheduleItem } from "@/db/queries";
 
 /**
@@ -14,6 +14,7 @@ import type { ScheduleItem } from "@/db/queries";
  * 对话历史作为独立消息发送，提高缓存命中率
  */
 function buildExtractionMessages(
+  userInfo: UserInfo,
   snapshot: Array<{ role: string; content: string }>,
   existingEvents: MemoryEvent[],
   eventFragments: Map<number, string[]>,
@@ -32,12 +33,21 @@ function buildExtractionMessages(
     content: m.content,
   }));
 
-  // 提取请求（增量模式：不传完整 userInfo，LLM 只提取新信息）
+  // 提取请求（增量模式：只展示已有数组值，避免 LLM 重复提取）
   const lines: string[] = [
     extraction_prompt,
     "",
     "## 当前时间",
     new Date().toISOString().replace("T", " ").slice(0, 19),
+    "",
+    "## 已有数据（不需要重复提取）",
+    `喜欢：${userInfo.preferences.likes.join("、") || "（无）"}`,
+    `讨厌：${userInfo.preferences.dislikes.join("、") || "（无）"}`,
+    `社交关系：${userInfo.social_graph.map(s => `${s.name}(${s.role})`).join("、") || "（无）"}`,
+    `性格特质：${userInfo.psycho_state.personality_traits.join("、") || "（无）"}`,
+    `近期压力：${userInfo.psycho_state.current_stressors.join("、") || "（无）"}`,
+    `长期目标：${userInfo.life_quests.long_term_goals.join("、") || "（无）"}`,
+    `进行中任务：${userInfo.life_quests.ongoing_tasks.map(t => `${t.task_name}(${t.status})`).join("、") || "（无）"}`,
     "",
     "## 已有索引事件",
   ];
@@ -73,12 +83,13 @@ function buildExtractionMessages(
  * 调用后台 LLM 提取用户信息与记忆片段
  */
 export async function extractConsolidation(
+  userInfo: UserInfo,
   snapshot: Array<{ role: string; content: string }>,
   existingEvents: MemoryEvent[],
   eventFragments: Map<number, string[]>,
   timeoutMs: number = 30000,
 ): Promise<ConsolidationResponse | null> {
-  const requestMessages = buildExtractionMessages(snapshot, existingEvents, eventFragments);
+  const requestMessages = buildExtractionMessages(userInfo, snapshot, existingEvents, eventFragments);
   const routing = getModelRouting();
   const config = routing.background_extraction_config;
 
