@@ -20,6 +20,7 @@ import { extractConsolidation } from "@/llm/background";
 import { getThresholds } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
 import { useSettingsStore } from "@/store/settingsStore";
+import { useMetaStore } from "@/store/metaStore";
 import type { UserInfo } from "@/types/schema";
 import dayjs from "dayjs";
 
@@ -51,13 +52,13 @@ export async function runConsolidation(
   const counterBefore = parseInt(getMeta("turn_counter") ?? "0", 10);
   logDebug("巩固开始", `turn_counter=${counterBefore}, 消息数=${recentMessages.length}`);
 
-  // 1. 获取锁
-  setMeta("is_locked", "true");
+  // 1. 获取锁（同步更新内存 + DB）
+  useMetaStore.getState().setLocked(true);
 
   // 30s 超时兜底（只释放锁，不清零计数器，下次达到阈值时重试）
   const timeoutTimer = setTimeout(() => {
     logDebug("巩固超时", "30s 强制解锁, is_locked=false");
-    setMeta("is_locked", "false");
+    useMetaStore.getState().setLocked(false);
   }, LOCK_TIMEOUT_MS);
 
   try {
@@ -92,7 +93,7 @@ export async function runConsolidation(
     if (!result) {
       logDebug("巩固结果", "LLM 提取失败或返回空, is_locked=false, 保留计数器下次重试");
       clearTimeout(timeoutTimer);
-      setMeta("is_locked", "false");
+      useMetaStore.getState().setLocked(false);
       return false;
     }
 
@@ -144,9 +145,8 @@ export async function runConsolidation(
 
     clearTimeout(timeoutTimer);
 
-    // 6. 释放锁 + 清零计数
-    setMeta("is_locked", "false");
-    setMeta("turn_counter", "0");
+    // 6. 释放锁 + 清零计数（同步更新内存 + DB）
+    useMetaStore.getState().reset();
 
     logDebug("巩固完成", `摘要: ${result.new_fragment.summary}\n情绪: ${result.new_fragment.emotion}\nturn_counter=0, is_locked=false`);
     return true;
@@ -154,7 +154,7 @@ export async function runConsolidation(
     clearTimeout(timeoutTimer);
     const errMsg = err instanceof Error ? err.message : String(err);
     logDebug("巩固异常", `${errMsg}\nis_locked=false, 保留计数器下次重试`);
-    setMeta("is_locked", "false");
+    useMetaStore.getState().setLocked(false);
     return false;
   }
 }
