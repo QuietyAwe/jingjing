@@ -26,10 +26,11 @@ export const useMetaStore = create<MetaState>((set, get) => ({
 
   load: () => {
     const counter = getMeta("turn_counter");
-    const locked = getMeta("is_locked");
+    // 启动时强制清理锁，防止上次崩溃导致死锁
+    setMeta("is_locked", "false");
     set({
       turnCounter: counter ? parseInt(counter, 10) : 0,
-      isLocked: locked === "true",
+      isLocked: false,
     });
   },
 
