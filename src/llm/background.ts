@@ -99,6 +99,8 @@ export async function extractConsolidation(
         model: config.model,
         temperature: config.temperature,
         response_format: { type: "json_object" },
+        // @ts-ignore: DeepSeek thinking 参数，提取默认开启
+        thinking: { type: "enabled" },
         messages: requestMessages,
       },
       { signal: controller.signal },
