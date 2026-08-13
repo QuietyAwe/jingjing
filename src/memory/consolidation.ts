@@ -79,7 +79,17 @@ export async function runConsolidation(
     // 3. 取窗口外的消息（已离开上下文窗口的部分，避免与记忆区重复）
     const { consolidation_window_turns } = getThresholds();
     const windowSize = consolidation_window_turns * 2;
-    const lastConsolidated = parseInt(getMeta("last_consolidated_index") ?? "0", 10);
+    let lastConsolidated = parseInt(getMeta("last_consolidated_index") ?? "0", 10);
+    const lastWindowSize = parseInt(getMeta("last_window_size") ?? "0", 10);
+
+    // 窗口大小变化时重置巩固进度，避免遗漏消息
+    if (lastWindowSize !== windowSize && lastConsolidated > 0) {
+      logDebug("巩固范围", `窗口变化 ${lastWindowSize}→${windowSize}, 重置 last_consolidated_index`);
+      lastConsolidated = 0;
+      setMeta("last_consolidated_index", "0");
+    }
+    setMeta("last_window_size", String(windowSize));
+
     const windowStart = Math.max(0, recentMessages.length - windowSize);
     // 提取范围：上次巩固结束 → 当前窗口开始
     const snapshot = recentMessages.slice(lastConsolidated, windowStart);
