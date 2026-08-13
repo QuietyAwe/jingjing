@@ -81,7 +81,7 @@ export async function runConsolidation(
     const windowSize = consolidation_window_turns * 2;
     const lastConsolidated = parseInt(getMeta("last_consolidated_index") ?? "0", 10);
     const windowStart = Math.max(0, recentMessages.length - windowSize);
-    // 提取范围：上次巩固结束 → 当前窗口开始（窗口内的消息 AI 已经看到，不需要再摘要）
+    // 提取范围：上次巩固结束 → 当前窗口开始
     const snapshot = recentMessages.slice(lastConsolidated, windowStart);
     logDebug("巩固范围", `lastConsolidated=${lastConsolidated}, windowStart=${windowStart}, 提取${snapshot.length}条`);
 
