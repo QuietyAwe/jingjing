@@ -21,12 +21,6 @@ function buildExtractionMessages(
 ): Array<{ role: "system" | "user" | "assistant"; content: string }> {
   const { extraction_prompt } = getPrompts();
 
-  // 系统指令
-  const systemMessage = {
-    role: "system" as const,
-    content: "你是一个记忆提取引擎，从对话中提取增量用户信息和记忆片段，只输出 JSON。",
-  };
-
   // 对话历史（作为独立消息）
   const historyMessages = snapshot.map((m) => ({
     role: m.role as "user" | "assistant",
@@ -76,7 +70,7 @@ function buildExtractionMessages(
     content: lines.join("\n"),
   };
 
-  return [systemMessage, ...historyMessages, requestMessage];
+  return [...historyMessages, requestMessage];
 }
 
 /**
