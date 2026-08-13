@@ -329,9 +329,6 @@ export default function ChatScreen() {
     const locked = useMetaStore.getState().isLocked;
     logDebug("轮次计数", `lastRole=${lastRole}, turn_counter=${counter}, is_locked=${locked}`);
 
-    // 保存当前消息快照（不含本轮消息），供巩固流使用
-    const snapshotForConsolidation = [...useChatStore.getState().messages];
-
     const userMsg: ChatMessage = {
       id: dayjs().valueOf().toString(),
       role: "user",
@@ -379,8 +376,8 @@ export default function ChatScreen() {
 
           const shouldRun = shouldConsolidate();
           if (shouldRun) {
-            // 使用之前保存的快照，不含当前轮次的消息
-            runConsolidation(snapshotForConsolidation).catch((err) =>
+            const h = useChatStore.getState().messages;
+            runConsolidation(h).catch((err) =>
               console.error("[chat] 巩固流异常:", err),
             );
           }

@@ -76,9 +76,14 @@ export async function runConsolidation(
       };
     }
 
-    // 3. 取最近 N 轮快照（与聊天上下文一致）
+    // 3. 取窗口外的消息（已离开上下文窗口的部分，避免与记忆区重复）
     const { consolidation_window_turns } = getThresholds();
-    const snapshot = recentMessages.slice(-consolidation_window_turns * 2);
+    const windowSize = consolidation_window_turns * 2;
+    const lastConsolidated = parseInt(getMeta("last_consolidated_index") ?? "0", 10);
+    const windowStart = Math.max(0, recentMessages.length - windowSize);
+    // 提取范围：上次巩固结束 → 当前窗口开始（窗口内的消息 AI 已经看到，不需要再摘要）
+    const snapshot = recentMessages.slice(lastConsolidated, windowStart);
+    logDebug("巩固范围", `lastConsolidated=${lastConsolidated}, windowStart=${windowStart}, 提取${snapshot.length}条`);
 
     // 4. 取已有索引事件（供 LLM 判断挂靠，包含默认事件）
     const existingEvents = getTopActive(20);
@@ -100,6 +105,16 @@ export async function runConsolidation(
           frags.slice(-3).map((f) => f.summary),
         );
       }
+    }
+
+    // 窗口外没有新消息，跳过提取
+    if (snapshot.length === 0) {
+      logDebug("巩固跳过", "窗口外无新消息");
+      clearTimeout(timeoutTimer);
+      useMetaStore.getState().setLocked(false);
+      // 仍清零计数器，避免反复触发
+      useMetaStore.getState().reset();
+      return true;
     }
 
     // 5. 调用后台 LLM 提取（增量模式，传 userInfo 供展示已有数据）
@@ -159,10 +174,11 @@ export async function runConsolidation(
 
     clearTimeout(timeoutTimer);
 
-    // 6. 释放锁 + 清零计数（同步更新内存 + DB）
+    // 6. 释放锁 + 清零计数 + 记录巩固进度（同步更新内存 + DB）
+    setMeta("last_consolidated_index", String(recentMessages.length));
     useMetaStore.getState().reset();
 
-    logDebug("巩固完成", `摘要: ${result.new_fragment.summary}\n情绪: ${result.new_fragment.emotion}\nturn_counter=0, is_locked=false`);
+    logDebug("巩固完成", `摘要: ${result.new_fragment.summary}\n情绪: ${result.new_fragment.emotion}\n进度: last_consolidated_index=${recentMessages.length}`);
     return true;
   } catch (err) {
     clearTimeout(timeoutTimer);
