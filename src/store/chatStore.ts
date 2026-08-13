@@ -114,7 +114,11 @@ export const useChatStore = create<ChatState>()(
       getHistory: () => {
         const { consolidation_window_turns } = getThresholds();
         const window = consolidation_window_turns * 2; // 每轮 = user + assistant
-        return get().messages.slice(-window);
+        const msgs = get().messages;
+        // 最后一条是 user（刚发送，AI 尚未回复）时，多取 1 条确保第一条是 user
+        const lastRole = msgs[msgs.length - 1]?.role;
+        const len = lastRole === "user" ? window + 1 : window;
+        return msgs.slice(-len);
       },
 
       /** 从 AsyncStorage 重新加载消息（导入备份后调用） */
