@@ -476,6 +476,10 @@ export default function ChatScreen() {
         </View>
       )}
 
+      {/* 最后一条 AI 消息的 id，用于逐条延迟动画 */}
+      {(() => {
+        const lastAiId = [...messages].reverse().find((m) => m.role === "assistant")?.id;
+        return (
       <FlatList
         ref={flatListRef}
         data={messages}
@@ -483,6 +487,7 @@ export default function ChatScreen() {
         renderItem={({ item }) => (
           <ChatBubble
             message={item}
+            isLatest={item.id === lastAiId}
             onLongPress={() => {
               setActionTarget(item);
               setShowActionMenu(true);
@@ -509,6 +514,8 @@ export default function ChatScreen() {
         contentContainerStyle={styles.listContent}
         style={styles.list}
       />
+        );
+      })()}
 
       <InputBar onSend={handleSend} disabled={isLoading} />
 

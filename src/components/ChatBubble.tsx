@@ -6,34 +6,33 @@
 import { View, Text, StyleSheet, Pressable } from "react-native";
 import type { ChatMessage } from "@/types/schema";
 import { useTheme, useCurrentCustomColors } from "@/theme/useTheme";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 
-/** 模拟真人聊天风格：分割 + 去句号 + 长句逗号再拆 */
+/** 模拟真人聊天风格：按句末标点分割 + 去句号 + 长句逗号再拆 */
 function splitForChat(text: string): string[] {
   const LONG_THRESHOLD = 20;
   const result: string[] = [];
 
-  // 1. 按任意换行分割
-  const lines = text.split(/\n+/);
+  // 1. 按换行或句末标点（。？！～…）分割，保留问号感叹号等
+  const segments = text.split(/(?<=[。？！～…])\s*/);
 
-  for (const line of lines) {
-    let seg = line.trim();
-    if (!seg) continue;
+  for (const seg of segments) {
+    let s = seg.trim();
+    if (!s) continue;
 
-    // 2. 去末尾句号
-    seg = seg.replace(/。+$/, "");
-
-    if (!seg) continue;
+    // 2. 去末尾句号（只删句号，保留？！～…）
+    s = s.replace(/。+$/, "").trim();
+    if (!s) continue;
 
     // 3. 超过阈值且有逗号 → 按逗号再拆
-    if (seg.length > LONG_THRESHOLD && seg.includes("，")) {
-      const parts = seg.split("，");
+    if (s.length > LONG_THRESHOLD && s.includes("，")) {
+      const parts = s.split("，");
       for (const part of parts) {
         const p = part.trim();
         if (p) result.push(p);
       }
     } else {
-      result.push(seg);
+      result.push(s);
     }
   }
 
@@ -43,9 +42,11 @@ function splitForChat(text: string): string[] {
 interface Props {
   message: ChatMessage;
   onLongPress?: () => void;
+  /** 是否为最新一条 AI 消息（只有最新的才做逐条延迟） */
+  isLatest?: boolean;
 }
 
-export default function ChatBubble({ message, onLongPress }: Props) {
+export default function ChatBubble({ message, onLongPress, isLatest }: Props) {
   const isUser = message.role === "user";
   const colors = useTheme();
   const customColors = useCurrentCustomColors();
@@ -57,6 +58,22 @@ export default function ChatBubble({ message, onLongPress }: Props) {
     () => isUser ? [message.content] : splitForChat(message.content),
     [isUser, message.content]
   );
+
+  // 仅最新 AI 消息做逐条延迟显示，历史消息全部立即显示
+  const shouldDelay = !isUser && isLatest && paragraphs.length > 1;
+  const [visibleCount, setVisibleCount] = useState(shouldDelay ? 1 : paragraphs.length);
+  useEffect(() => {
+    if (!shouldDelay) {
+      setVisibleCount(paragraphs.length);
+      return;
+    }
+    setVisibleCount(1);
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    for (let i = 1; i < paragraphs.length; i++) {
+      timers.push(setTimeout(() => setVisibleCount(i + 1), i * 800));
+    }
+    return () => timers.forEach(clearTimeout);
+  }, [message.id, shouldDelay]);
 
   const bubbleContent = (
     <>
@@ -79,7 +96,7 @@ export default function ChatBubble({ message, onLongPress }: Props) {
         </View>
       )}
 
-      {paragraphs.map((para, index) => (
+      {paragraphs.slice(0, visibleCount).map((para, index) => (
         <Pressable
           key={index}
           onLongPress={onLongPress}
@@ -112,7 +129,7 @@ export default function ChatBubble({ message, onLongPress }: Props) {
             </Text>
           </View>
           {/* 时间戳只显示在最后一个气泡 */}
-          {index === paragraphs.length - 1 && (
+          {index === visibleCount - 1 && (
             <Text style={[styles.timestamp, { color: colors.textMuted }]}>
               {new Date(message.timestamp).toLocaleTimeString([], {
                 hour: "2-digit",
