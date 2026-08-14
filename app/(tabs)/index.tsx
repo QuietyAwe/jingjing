@@ -135,17 +135,14 @@ export default function ChatScreen() {
   // 自动滚动到底部（编辑/删除操作时不跳转）
   const shouldScrollRef = useRef(false);
   useEffect(() => {
-    if (messages.length > 0) {
+    if (skipScrollRef.current) {
+      skipScrollRef.current = false;
+      return;
+    }
+    if (messages.length > 0 || streamingText) {
       shouldScrollRef.current = true;
     }
   }, [messages.length, streamingText]);
-  // 首次进入：等 FlatList 布局完成后滚到底
-  useEffect(() => {
-    if (messages.length > 0) {
-      const timer = setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 300);
-      return () => clearTimeout(timer);
-    }
-  }, []);
 
   // 打字动画
   useEffect(() => {
@@ -501,6 +498,11 @@ export default function ChatScreen() {
         ref={flatListRef}
         data={messages}
         keyExtractor={(item) => item.id}
+        initialScrollIndex={messages.length > 0 ? messages.length - 1 : undefined}
+        onScrollToIndexFailed={(info) => {
+          // 布局未完成时等一下再滚
+          setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 200);
+        }}
         onContentSizeChange={() => {
           if (shouldScrollRef.current) {
             shouldScrollRef.current = false;
