@@ -135,14 +135,17 @@ export default function ChatScreen() {
   // 自动滚动到底部（编辑/删除操作时不跳转）
   const shouldScrollRef = useRef(false);
   useEffect(() => {
-    if (skipScrollRef.current) {
-      skipScrollRef.current = false;
-      return;
-    }
-    if (messages.length > 0 || streamingText) {
+    if (messages.length > 0) {
       shouldScrollRef.current = true;
     }
   }, [messages.length, streamingText]);
+  // 首次进入：等 FlatList 布局完成后滚到底
+  useEffect(() => {
+    if (messages.length > 0) {
+      const timer = setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 300);
+      return () => clearTimeout(timer);
+    }
+  }, []);
 
   // 打字动画
   useEffect(() => {
