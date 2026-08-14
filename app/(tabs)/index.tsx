@@ -76,6 +76,8 @@ export default function ChatScreen() {
 
   // 逐条延迟动画：仅非流式模式下对刚收到的 AI 回复生效
   const [animatingMsgId, setAnimatingMsgId] = useState<string | null>(null);
+  // 编辑/删除操作时不自动滚底
+  const skipScrollRef = useRef(false);
 
   // 初始化
   useEffect(() => {
@@ -130,8 +132,12 @@ export default function ChatScreen() {
     }
   }, [isReady]);
 
-  // 自动滚动到底部
+  // 自动滚动到底部（编辑/删除操作时不跳转）
   useEffect(() => {
+    if (skipScrollRef.current) {
+      skipScrollRef.current = false;
+      return;
+    }
     if (messages.length > 0 || streamingText) {
       setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
     }
@@ -209,6 +215,7 @@ export default function ChatScreen() {
 
   const confirmDelete = () => {
     if (actionTarget) {
+      skipScrollRef.current = true;
       deleteMessage(actionTarget.id);
     }
     setShowDeleteConfirm(false);
@@ -299,6 +306,7 @@ export default function ChatScreen() {
     const trimmed = editText.trim();
     if (!trimmed) return;
 
+    skipScrollRef.current = true;
     if (resend) {
       editMessage(actionTarget.id, trimmed);
       const idx = messages.findIndex((m) => m.id === actionTarget.id);
@@ -318,6 +326,7 @@ export default function ChatScreen() {
 
   const handleRegenerate = () => {
     if (!actionTarget || actionTarget.role !== "assistant") return;
+    skipScrollRef.current = true;
     deleteMessage(actionTarget.id);
     setActionTarget(null);
     setTimeout(() => doLLMCall(), 100);
