@@ -200,6 +200,11 @@ export default function SettingsScreen() {
 
   // 记忆数据
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
+  // 用户信息编辑
+  const [editFieldModalVisible, setEditFieldModalVisible] = useState(false);
+  const [editFieldLabel, setEditFieldLabel] = useState("");
+  const [editFieldValue, setEditFieldValue] = useState("");
+  const [editFieldKey, setEditFieldKey] = useState("");
   const [eventCount, setEventCount] = useState(0);
   const [systemPrompt, setSystemPromptState] = useState("");
   const [events, setEvents] = useState<MemoryEvent[]>([]);
@@ -667,22 +672,77 @@ ${text}
     );
   };
 
-  // 用户信息摘要
+  // 用户信息摘要（可编辑）
+  const openEditField = (label: string, key: string, value: string) => {
+    setEditFieldLabel(label);
+    setEditFieldKey(key);
+    setEditFieldValue(value);
+    setEditFieldModalVisible(true);
+  };
+
+  const saveEditField = () => {
+    if (!userInfo) return;
+    const val = editFieldValue.trim();
+    const updated = { ...userInfo };
+
+    switch (editFieldKey) {
+      case "nickname": updated.basic_identity = { ...updated.basic_identity, nickname: val }; break;
+      case "gender": updated.basic_identity = { ...updated.basic_identity, gender: val }; break;
+      case "birthday": updated.basic_identity = { ...updated.basic_identity, birthday: val }; break;
+      case "occupation": updated.basic_identity = { ...updated.basic_identity, occupation: val }; break;
+      case "location": updated.basic_identity = { ...updated.basic_identity, location: val }; break;
+      case "likes": updated.preferences = { ...updated.preferences, likes: val ? val.split(/[,，、\s]+/).filter(Boolean) : [] }; break;
+      case "dislikes": updated.preferences = { ...updated.preferences, dislikes: val ? val.split(/[,，、\s]+/).filter(Boolean) : [] }; break;
+      case "personality_traits": updated.psycho_state = { ...updated.psycho_state, personality_traits: val ? val.split(/[,，、\s]+/).filter(Boolean) : [] }; break;
+      case "current_stressors": updated.psycho_state = { ...updated.psycho_state, current_stressors: val ? val.split(/[,，、\s]+/).filter(Boolean) : [] }; break;
+      case "comm_preference": updated.psycho_state = { ...updated.psycho_state, comm_preference: val }; break;
+      case "long_term_goals": updated.life_quests = { ...updated.life_quests, long_term_goals: val ? val.split(/[,，、\s]+/).filter(Boolean) : [] }; break;
+      default: return;
+    }
+
+    setUserInfo(updated);
+    mergeUserInfo({
+      basic_identity: updated.basic_identity,
+      preferences: updated.preferences,
+      psycho_state: updated.psycho_state,
+      life_quests: updated.life_quests,
+    });
+    setEditFieldModalVisible(false);
+  };
+
   const renderUserInfo = () => {
     if (!userInfo) return <Text style={styles.emptyText}>暂无用户数据</Text>;
 
-    const { basic_identity, preferences, social_graph, psycho_state } = userInfo;
-    const lines: string[] = [];
-    if (basic_identity.nickname) lines.push(`昵称：${basic_identity.nickname}`);
-    if (basic_identity.location) lines.push(`城市：${basic_identity.location}`);
-    if (basic_identity.occupation) lines.push(`职业：${basic_identity.occupation}`);
-    if (preferences.likes.length > 0) lines.push(`喜好：${preferences.likes.join("、")}`);
-    if (preferences.dislikes.length > 0) lines.push(`不喜：${preferences.dislikes.join("、")}`);
-    if (social_graph.length > 0) lines.push(`社交：${social_graph.map((s) => s.name).join("、")}`);
-    if (psycho_state.personality_traits.length > 0) lines.push(`特质：${psycho_state.personality_traits.join("、")}`);
+    const { basic_identity, preferences, social_graph, psycho_state, life_quests } = userInfo;
 
-    if (lines.length === 0) return <Text style={[styles.emptyText, { color: colors.textMuted }]}>暂无用户数据</Text>;
-    return lines.map((line, i) => <Text key={i} style={[styles.infoLine, { color: colors.textSecondary }]}>{line}</Text>);
+    const Row = ({ label, value, fieldKey, fieldValue }: { label: string; value: string; fieldKey: string; fieldValue: string }) => (
+      <TouchableOpacity style={[styles.editableRow, { borderBottomColor: colors.border }]} onPress={() => openEditField(label, fieldKey, fieldValue)}>
+        <Text style={[styles.editableLabel, { color: colors.textMuted }]}>{label}</Text>
+        <Text style={[styles.editableValue, { color: colors.text }]}>{value || "点击编辑"}</Text>
+      </TouchableOpacity>
+    );
+
+    return (
+      <>
+        <Row label="昵称" value={basic_identity.nickname} fieldKey="nickname" fieldValue={basic_identity.nickname} />
+        <Row label="性别" value={basic_identity.gender} fieldKey="gender" fieldValue={basic_identity.gender} />
+        <Row label="生日" value={basic_identity.birthday} fieldKey="birthday" fieldValue={basic_identity.birthday} />
+        <Row label="职业" value={basic_identity.occupation} fieldKey="occupation" fieldValue={basic_identity.occupation} />
+        <Row label="城市" value={basic_identity.location} fieldKey="location" fieldValue={basic_identity.location} />
+        <Row label="喜欢" value={preferences.likes.join("、")} fieldKey="likes" fieldValue={preferences.likes.join("、")} />
+        <Row label="讨厌" value={preferences.dislikes.join("、")} fieldKey="dislikes" fieldValue={preferences.dislikes.join("、")} />
+        {social_graph.length > 0 && (
+          <View style={[styles.editableRow, { borderBottomColor: colors.border }]}>
+            <Text style={[styles.editableLabel, { color: colors.textMuted }]}>社交</Text>
+            <Text style={[styles.editableValue, { color: colors.text }]}>{social_graph.map((s) => `${s.name}(${s.role})`).join("、")}</Text>
+          </View>
+        )}
+        <Row label="性格特质" value={psycho_state.personality_traits.join("、")} fieldKey="personality_traits" fieldValue={psycho_state.personality_traits.join("、")} />
+        <Row label="近期压力" value={psycho_state.current_stressors.join("、")} fieldKey="current_stressors" fieldValue={psycho_state.current_stressors.join("、")} />
+        <Row label="沟通偏好" value={psycho_state.comm_preference} fieldKey="comm_preference" fieldValue={psycho_state.comm_preference} />
+        <Row label="长期目标" value={life_quests.long_term_goals.join("、")} fieldKey="long_term_goals" fieldValue={life_quests.long_term_goals.join("、")} />
+      </>
+    );
   };
 
   const thresholdsVal = thresholds as Record<string, number>;
@@ -1629,6 +1689,31 @@ ${text}
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* 用户信息编辑弹窗 */}
+      <Modal visible={editFieldModalVisible} transparent animationType="fade" onRequestClose={() => setEditFieldModalVisible(false)}>
+        <Pressable style={[styles.overlay, { backgroundColor: colors.overlayBg }]} onPress={() => setEditFieldModalVisible(false)}>
+          <View style={[styles.modal, { backgroundColor: colors.sectionBg }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>编辑{editFieldLabel}</Text>
+            <TextInput
+              style={[styles.input, { color: colors.text, borderColor: colors.border }]}
+              value={editFieldValue}
+              onChangeText={setEditFieldValue}
+              placeholder={`输入${editFieldLabel}，多项用逗号分隔`}
+              placeholderTextColor={colors.textMuted}
+              autoFocus
+            />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setEditFieldModalVisible(false)}>
+                <Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.confirmBtn} onPress={saveEditField}>
+                <Text style={[styles.confirmText, { color: colors.accent }]}>保存</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Pressable>
+      </Modal>
     </ScrollView>
   );
 }
@@ -1666,6 +1751,9 @@ const styles = StyleSheet.create({
   infoBlock: { paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E8E7E4" },
   infoTitle: { fontSize: 13, fontWeight: "600", color: "#37352F", marginBottom: 8 },
   infoLine: { fontSize: 14, color: "#555450", lineHeight: 22 },
+  editableRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E8E7E4" },
+  editableLabel: { fontSize: 13, color: "#9B9A97", width: 70 },
+  editableValue: { fontSize: 14, flex: 1, textAlign: "right" },
   emptyText: { fontSize: 14, color: "#9B9A97", fontStyle: "italic" },
   hint: { textAlign: "center", fontSize: 12, color: "#9B9A97", marginTop: 12, marginBottom: 40 },
   overlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "center", alignItems: "center" },
