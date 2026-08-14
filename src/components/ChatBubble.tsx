@@ -6,7 +6,7 @@
 import { View, Text, StyleSheet, Pressable } from "react-native";
 import type { ChatMessage } from "@/types/schema";
 import { useTheme, useCurrentCustomColors } from "@/theme/useTheme";
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 
 /** 模拟真人聊天风格：按句末标点分割 + 去句号 + 长句逗号再拆 */
 function splitForChat(text: string): string[] {
@@ -63,28 +63,24 @@ export default function ChatBubble({ message, onLongPress, shouldAnimate, onAnim
     [isUser, message.content]
   );
 
-  // 逐条延迟显示：仅对 shouldAnimate 的 AI 消息生效
-  const shouldDelay = !isUser && shouldAnimate && paragraphs.length > 1;
+  // 逐条延迟显示：仅消息首次出现时判断一次，后续不再变化
+  const animateRef = useRef(!isUser && shouldAnimate && paragraphs.length > 1);
+  const shouldDelay = animateRef.current;
   const [visibleCount, setVisibleCount] = useState(shouldDelay ? 1 : paragraphs.length);
   useEffect(() => {
-    if (!shouldDelay) {
-      setVisibleCount(paragraphs.length);
-      return;
-    }
-    setVisibleCount(1);
+    if (!shouldDelay) return;
     const timers: ReturnType<typeof setTimeout>[] = [];
     for (let i = 1; i < paragraphs.length; i++) {
       timers.push(setTimeout(() => {
         setVisibleCount(i + 1);
         onBubbleAppear?.();
-        // 最后一条显示完，通知父组件
         if (i === paragraphs.length - 1) {
           onAnimationDone?.();
         }
       }, i * 800));
     }
     return () => timers.forEach(clearTimeout);
-  }, [message.id, shouldDelay]);
+  }, [message.id]);
 
   const bubbleContent = (
     <>
