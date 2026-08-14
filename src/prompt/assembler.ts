@@ -60,10 +60,10 @@ export function assemblePrompt(
   // 3. 截断：若超预算，按权重从低到高剔除记忆事件
   const truncatedMemory = truncateToFit(memoryText, topEvents, epiphany, chatHistory, userInfo, tokenBudget);
 
-  // 4. 转换历史为 API 格式（首条和末条带时间戳，让 AI 感知时间流逝）
+  // 4. 转换历史为 API 格式（最后两条带时间戳，让 AI 感知时间流动）
   const messages = chatHistory.map((m, i) => {
-    // 第一条和最后一条消息带时间，中间的不带（节省 token）
-    const showTime = i === 0 || i === chatHistory.length - 1;
+    // 最后两条消息带时间，中间的不带（节省 token）
+    const showTime = i >= chatHistory.length - 2;
     const timePrefix = showTime && m.timestamp
       ? `[${dayjs(m.timestamp).format("M/D HH:mm")}] `
       : "";
