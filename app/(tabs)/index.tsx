@@ -377,7 +377,7 @@ export default function ChatScreen() {
           setStreamingText("");
           setStreamingThinking("");
           setLoading(false);
-          setAnimatingMsgId(aiMsg.id);
+          // 流式输出已实时展示，不需要逐条延迟动画
 
           const shouldRun = shouldConsolidate();
           if (shouldRun) {
