@@ -133,13 +133,14 @@ export default function ChatScreen() {
   }, [isReady]);
 
   // 自动滚动到底部（编辑/删除操作时不跳转）
+  const shouldScrollRef = useRef(false);
   useEffect(() => {
     if (skipScrollRef.current) {
       skipScrollRef.current = false;
       return;
     }
     if (messages.length > 0 || streamingText) {
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+      shouldScrollRef.current = true;
     }
   }, [messages.length, streamingText]);
 
@@ -497,11 +498,21 @@ export default function ChatScreen() {
         ref={flatListRef}
         data={messages}
         keyExtractor={(item) => item.id}
+        onContentSizeChange={() => {
+          if (shouldScrollRef.current) {
+            shouldScrollRef.current = false;
+            flatListRef.current?.scrollToEnd({ animated: true });
+          }
+        }}
         renderItem={({ item }) => (
           <ChatBubble
             message={item}
             shouldAnimate={item.id === animatingMsgId}
-            onBubbleAppear={() => flatListRef.current?.scrollToEnd({ animated: true })}
+            onBubbleAppear={() => {
+              shouldScrollRef.current = true;
+              // 等布局更新后再滚
+              setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 50);
+            }}
             onLongPress={() => {
               setActionTarget(item);
               setShowActionMenu(true);
