@@ -74,6 +74,9 @@ export default function ChatScreen() {
   const [editText, setEditText] = useState("");
   const [showEditModal, setShowEditModal] = useState(false);
 
+  // 逐条延迟动画：仅对刚收到的 AI 回复生效
+  const [animatingMsgId, setAnimatingMsgId] = useState<string | null>(null);
+
   // 初始化
   useEffect(() => {
     loadApiKey();
@@ -251,6 +254,7 @@ export default function ChatScreen() {
           setStreamingText("");
           setStreamingThinking("");
           setLoading(false);
+          setAnimatingMsgId(aiMsg.id);
 
           const shouldRun = shouldConsolidate();
           if (shouldRun) {
@@ -373,6 +377,7 @@ export default function ChatScreen() {
           setStreamingText("");
           setStreamingThinking("");
           setLoading(false);
+          setAnimatingMsgId(aiMsg.id);
 
           const shouldRun = shouldConsolidate();
           if (shouldRun) {
@@ -476,10 +481,6 @@ export default function ChatScreen() {
         </View>
       )}
 
-      {/* 最后一条 AI 消息的 id，用于逐条延迟动画 */}
-      {(() => {
-        const lastAiId = [...messages].reverse().find((m) => m.role === "assistant")?.id;
-        return (
       <FlatList
         ref={flatListRef}
         data={messages}
@@ -487,7 +488,9 @@ export default function ChatScreen() {
         renderItem={({ item }) => (
           <ChatBubble
             message={item}
-            isLatest={item.id === lastAiId}
+            shouldAnimate={item.id === animatingMsgId}
+            onAnimationDone={() => setAnimatingMsgId(null)}
+            onBubbleAppear={() => flatListRef.current?.scrollToEnd({ animated: true })}
             onLongPress={() => {
               setActionTarget(item);
               setShowActionMenu(true);
@@ -514,8 +517,6 @@ export default function ChatScreen() {
         contentContainerStyle={styles.listContent}
         style={styles.list}
       />
-        );
-      })()}
 
       <InputBar onSend={handleSend} disabled={isLoading} />
 

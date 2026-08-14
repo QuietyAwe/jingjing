@@ -42,11 +42,15 @@ function splitForChat(text: string): string[] {
 interface Props {
   message: ChatMessage;
   onLongPress?: () => void;
-  /** 是否为最新一条 AI 消息（只有最新的才做逐条延迟） */
-  isLatest?: boolean;
+  /** 是否对该消息做逐条延迟动画 */
+  shouldAnimate?: boolean;
+  /** 动画完成回调 */
+  onAnimationDone?: () => void;
+  /** 每显示一条新气泡时回调（用于自动滚底） */
+  onBubbleAppear?: () => void;
 }
 
-export default function ChatBubble({ message, onLongPress, isLatest }: Props) {
+export default function ChatBubble({ message, onLongPress, shouldAnimate, onAnimationDone, onBubbleAppear }: Props) {
   const isUser = message.role === "user";
   const colors = useTheme();
   const customColors = useCurrentCustomColors();
@@ -59,8 +63,8 @@ export default function ChatBubble({ message, onLongPress, isLatest }: Props) {
     [isUser, message.content]
   );
 
-  // 仅最新 AI 消息做逐条延迟显示，历史消息全部立即显示
-  const shouldDelay = !isUser && isLatest && paragraphs.length > 1;
+  // 逐条延迟显示：仅对 shouldAnimate 的 AI 消息生效
+  const shouldDelay = !isUser && shouldAnimate && paragraphs.length > 1;
   const [visibleCount, setVisibleCount] = useState(shouldDelay ? 1 : paragraphs.length);
   useEffect(() => {
     if (!shouldDelay) {
@@ -70,7 +74,14 @@ export default function ChatBubble({ message, onLongPress, isLatest }: Props) {
     setVisibleCount(1);
     const timers: ReturnType<typeof setTimeout>[] = [];
     for (let i = 1; i < paragraphs.length; i++) {
-      timers.push(setTimeout(() => setVisibleCount(i + 1), i * 800));
+      timers.push(setTimeout(() => {
+        setVisibleCount(i + 1);
+        onBubbleAppear?.();
+        // 最后一条显示完，通知父组件
+        if (i === paragraphs.length - 1) {
+          onAnimationDone?.();
+        }
+      }, i * 800));
     }
     return () => timers.forEach(clearTimeout);
   }, [message.id, shouldDelay]);
