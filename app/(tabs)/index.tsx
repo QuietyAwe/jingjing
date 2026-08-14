@@ -74,6 +74,9 @@ export default function ChatScreen() {
   const [editText, setEditText] = useState("");
   const [showEditModal, setShowEditModal] = useState(false);
 
+  // 逐条延迟动画：仅非流式模式下对刚收到的 AI 回复生效
+  const [animatingMsgId, setAnimatingMsgId] = useState<string | null>(null);
+
   // 初始化
   useEffect(() => {
     loadApiKey();
@@ -251,6 +254,10 @@ export default function ChatScreen() {
           setStreamingText("");
           setStreamingThinking("");
           setLoading(false);
+          // 非流式模式：消息一次性出现，需要逐条延迟动画
+          if (!useSettingsStore.getState().stream_output) {
+            setAnimatingMsgId(aiMsg.id);
+          }
 
           const shouldRun = shouldConsolidate();
           if (shouldRun) {
@@ -484,6 +491,8 @@ export default function ChatScreen() {
         renderItem={({ item }) => (
           <ChatBubble
             message={item}
+            shouldAnimate={item.id === animatingMsgId}
+            onBubbleAppear={() => flatListRef.current?.scrollToEnd({ animated: true })}
             onLongPress={() => {
               setActionTarget(item);
               setShowActionMenu(true);

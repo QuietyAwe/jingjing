@@ -6,7 +6,8 @@
 import { View, Text, StyleSheet, Pressable } from "react-native";
 import type { ChatMessage } from "@/types/schema";
 import { useTheme, useCurrentCustomColors } from "@/theme/useTheme";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
+import { useSettingsStore } from "@/store/settingsStore";
 
 /** 模拟真人聊天风格：按句末标点分割 + 去句号 + 长句逗号再拆 */
 function splitForChat(text: string): string[] {
@@ -42,9 +43,13 @@ function splitForChat(text: string): string[] {
 interface Props {
   message: ChatMessage;
   onLongPress?: () => void;
+  /** 非流式模式下对该消息做逐条延迟动画 */
+  shouldAnimate?: boolean;
+  /** 每显示一条新气泡时回调（用于自动滚底） */
+  onBubbleAppear?: () => void;
 }
 
-export default function ChatBubble({ message, onLongPress }: Props) {
+export default function ChatBubble({ message, onLongPress, shouldAnimate, onBubbleAppear }: Props) {
   const isUser = message.role === "user";
   const colors = useTheme();
   const customColors = useCurrentCustomColors();
@@ -56,6 +61,26 @@ export default function ChatBubble({ message, onLongPress }: Props) {
     () => isUser ? [message.content] : splitForChat(message.content),
     [isUser, message.content]
   );
+
+  // 非流式模式：按字数逐条延迟显示，首次出现时锁定决策
+  const animateRef = useRef(!isUser && shouldAnimate && paragraphs.length > 1);
+  const shouldDelay = animateRef.current;
+  const [visibleCount, setVisibleCount] = useState(shouldDelay ? 1 : paragraphs.length);
+  useEffect(() => {
+    if (!shouldDelay) return;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    let acc = 0;
+    for (let i = 1; i < paragraphs.length; i++) {
+      // 按字数计算延迟：每字 50ms，范围 500ms ~ 3000ms
+      const delay = Math.min(3000, Math.max(500, paragraphs[i - 1].length * 50));
+      acc += delay;
+      timers.push(setTimeout(() => {
+        setVisibleCount(i + 1);
+        onBubbleAppear?.();
+      }, acc));
+    }
+    return () => timers.forEach(clearTimeout);
+  }, [message.id]);
 
   const bubbleContent = (
     <>
@@ -78,7 +103,7 @@ export default function ChatBubble({ message, onLongPress }: Props) {
         </View>
       )}
 
-      {paragraphs.map((para, index) => (
+      {paragraphs.slice(0, visibleCount).map((para, index) => (
         <Pressable
           key={index}
           onLongPress={onLongPress}
@@ -111,7 +136,7 @@ export default function ChatBubble({ message, onLongPress }: Props) {
             </Text>
           </View>
           {/* 时间戳只显示在最后一个气泡 */}
-          {index === paragraphs.length - 1 && (
+          {index === visibleCount - 1 && (
             <Text style={[styles.timestamp, { color: colors.textMuted }]}>
               {new Date(message.timestamp).toLocaleTimeString([], {
                 hour: "2-digit",
