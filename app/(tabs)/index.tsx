@@ -132,17 +132,16 @@ export default function ChatScreen() {
     }
   }, [isReady]);
 
-  // 自动滚动到底部（编辑/删除操作时不跳转）
-  const shouldScrollRef = useRef(false);
+  // 流式输出时滚动到底部（编辑/删除操作时不跳转）
   useEffect(() => {
     if (skipScrollRef.current) {
       skipScrollRef.current = false;
       return;
     }
-    if (messages.length > 0 || streamingText) {
-      shouldScrollRef.current = true;
+    if (streamingText) {
+      flatListRef.current?.scrollToEnd({ animated: true });
     }
-  }, [messages.length, streamingText]);
+  }, [streamingText]);
 
   // 打字动画
   useEffect(() => {
@@ -499,15 +498,8 @@ export default function ChatScreen() {
         data={messages}
         keyExtractor={(item) => item.id}
         initialScrollIndex={messages.length > 0 ? messages.length - 1 : undefined}
-        onScrollToIndexFailed={(info) => {
-          // 布局未完成时等一下再滚
+        onScrollToIndexFailed={() => {
           setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 200);
-        }}
-        onContentSizeChange={() => {
-          if (shouldScrollRef.current) {
-            shouldScrollRef.current = false;
-            flatListRef.current?.scrollToEnd({ animated: true });
-          }
         }}
         renderItem={({ item }) => (
           <ChatBubble
