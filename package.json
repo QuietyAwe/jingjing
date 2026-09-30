@@ -7,6 +7,7 @@
     "dayjs": "^1.11.21",
     "expo": "~54.0.0",
     "expo-constants": "~18.0.8",
+    "expo-dev-client": "~6.0.21",
     "expo-document-picker": "~14.0.8",
     "expo-file-system": "~19.0.23",
     "expo-linking": "~8.0.7",
