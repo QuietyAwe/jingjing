@@ -112,8 +112,8 @@ export const useChatStore = create<ChatState>()(
 
       /** LLM 上下文：最近 N 轮（滑动窗口，不影响完整消息记录） */
       getHistory: () => {
-        const { consolidation_window_turns } = getThresholds();
-        const window = consolidation_window_turns * 2; // 每轮 = user + assistant
+        const { context_history_rounds } = getThresholds();
+        const window = context_history_rounds * 2; // 每轮 = user + assistant
         const msgs = get().messages;
         // 最后一条是 user（刚发送，AI 尚未回复）时，多取 1 条确保第一条是 user
         const lastRole = msgs[msgs.length - 1]?.role;

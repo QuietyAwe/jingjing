@@ -6,7 +6,8 @@
 import { tokenize } from "./tokenize";
 import { calculateWeight, calculateWeights } from "./decay";
 import { getDB } from "@/db/connection";
-import { updateWeight, getEpiphanyRandom, getAllActive, getFragmentsByEventId, getDefaultEventId } from "@/db/queries";
+import { updateWeight, getEpiphanyRandom, getAllActive, getFragmentsByEventId, getFragmentsByEventIds, getDefaultEventId } from "@/db/queries";
+import { EVENT_COLUMNS } from "@/db/schema";
 import { getThresholds, getWeightDecay } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
 import type { MemoryEvent, MemoryFragment } from "@/types/schema";
@@ -46,8 +47,8 @@ export function retrieve(userInput: string): RetrievalResult {
     const params = keywords.map((k) => `%${k}%`);
 
     hitEvents = db.getAllSync<MemoryEvent>(
-      `SELECT * FROM memory_events
-       WHERE is_archived = 0 ${excludeDefault} AND (${eventConditions})
+      `SELECT ${EVENT_COLUMNS} FROM memory_events
+       WHERE 1 = 1 ${excludeDefault} AND (${eventConditions})
        ORDER BY active_weight DESC
        LIMIT 3`,
       ...params
@@ -62,9 +63,11 @@ export function retrieve(userInput: string): RetrievalResult {
     const params = keywords.map((k) => `%${k}%`);
 
     hitEvents = db.getAllSync<MemoryEvent>(
-      `SELECT DISTINCT e.* FROM memory_events e
+      `SELECT DISTINCT ${EVENT_COLUMNS.split(", ")
+        .map((c) => `e.${c}`)
+        .join(", ")} FROM memory_events e
        INNER JOIN memory_fragments f ON e.id = f."index"
-       WHERE e.is_archived = 0 ${excludeDefault}
+       WHERE 1 = 1 ${excludeDefault}
          AND LENGTH(f.summary) >= 10
          AND (${fragConditions})
        ORDER BY e.active_weight DESC
@@ -74,13 +77,15 @@ export function retrieve(userInput: string): RetrievalResult {
     hitEvents.forEach((e) => hitEventIds.add(e.id));
   }
 
-  // 4. 刷新命中事件权重为 100 + 更新 last_accessed + 获取关联片段
+  // 4. 刷新命中事件权重为 100 + 更新 last_accessed + 批量获取关联片段
   const hitFragments = new Map<number, MemoryFragment[]>();
-  for (const event of hitEvents) {
-    updateWeight(event.id, 100);
-    const fragments = getFragmentsByEventId(event.id);
-    if (fragments.length > 0) {
-      hitFragments.set(event.id, fragments);
+  if (hitEvents.length > 0) {
+    for (const event of hitEvents) {
+      updateWeight(event.id, 100);
+    }
+    const fetched = getFragmentsByEventIds(hitEvents.map((e) => e.id));
+    for (const [eventId, fragments] of fetched) {
+      if (fragments.length > 0) hitFragments.set(eventId, fragments);
     }
   }
 
@@ -114,7 +119,7 @@ export function retrieve(userInput: string): RetrievalResult {
       hitFragments.set(defaultEventId, recentChats);
       // 把日常闲聊事件加入 topEvents（这样会被渲染到记忆区）
       const defaultEvent = db.getFirstSync<MemoryEvent>(
-        "SELECT * FROM memory_events WHERE id = ?",
+        `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE id = ?`,
         defaultEventId
       );
       if (defaultEvent) {

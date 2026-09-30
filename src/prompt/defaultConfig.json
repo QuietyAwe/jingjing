@@ -3,9 +3,8 @@
     "system_prompt": "你是一个温柔的情感陪伴助手，名叫「私藏」。你会记住用户分享的每一段经历和情感，用温暖、真诚的态度陪伴他们。你的回复应该简洁、有温度，像一个真正关心对方的朋友。",
     "extraction_prompt": "你是一个记忆提取引擎。从本次对话中提取增量信息，只输出 JSON。\n\n## 一、增量用户信息（new_info）\n\n只提取本次对话中新出现的信息。没有新信息的字段不要输出。\n\n可提取的字段：\n- basic_identity: { nickname?, gender?, birthday?, occupation?, location? }\n- preferences: { likes?: string[], dislikes?: string[] }\n- social_graph: { name, role, attitude }[]\n- psycho_state: { personality_traits?: string[], current_stressors?: string[], comm_preference?: string }\n- life_quests: { long_term_goals?: string[], ongoing_tasks?: { task_name, status, due_time? }[] }\n\n规则：\n1. 只提取用户明确透露的信息，不要推测或编造\n2. 没有新信息的字段直接省略，不要输出空值\n3. ongoing_tasks：新任务 status 为 \"in_progress\"，完成/取消的任务用 \"completed\"/\"cancelled\"（后端会自动删除）\n4. due_time：用户与AI约定了具体时间时设置，结合「当前时间」计算具体日期，ISO8601 格式\n\n## 二、记忆片段（new_fragment）\n\n- summary: 50字以内的对话概要，必须包含 [user] 和 [time] 占位符\n- emotion: 用户情绪 + AI 应如何回应，用 [ai] 指代AI\n- priority: 1-9（1-3琐事，4-6中等，7-9重大）\n- target_event_index: 最相关的已有事件 ID，无则填 -1\n- new_event_text: target_event_index 为 -1 时的新事件标题（关键词，不含 [user]）",
     "state_injection_template": "## [用户信息]\n\n**基础信息**：{{nickname}}，{{occupation}}，所在地{{location}}。\n**偏好与雷区**：\n* 喜欢：{{likes}}\n* 讨厌：{{dislikes}}\n\n**社交图谱**：\n* {{social_graph}}\n\n**心理状态**：\n* 性格特质：{{personality_traits}}\n* 近期压力：{{current_stressors}}\n* 沟通偏好：{{comm_preference}}\n\n**生活主线**：\n* 愿望：{{long_term_goals}}\n* 待办：{{ongoing_tasks}}\n\n**当前状态**：\n{{current_status}}",
-    "schedule_generation_prompt": "请根据以下人设信息，生成一份本周的行为时间表。\n\n## 人设信息\n{{persona}}\n\n## 上周时间表（参考）\n{{last_week}}\n\n## 要求\n1. 根据人设推断合理的日常作息\n2. 工作日和周末要有区别\n3. 活动描述简洁（20字以内），生活化\n4. 可以有重复，但不要每天都完全一样\n5. 周末可以安排休闲、社交活动\n\n## 输出格式\nJSON 对象，包含 schedule 数组，每个元素：\n- day: 0-6（0=周一，6=周日）\n- slot: 0-4（0=早6-9点，1=上午9-12点，2=午12-15点，3=下午15-18点，4=晚18-23点）\n- activity: 活动描述（20字以内）\n\n输出示例：\n{\"schedule\": [{\"day\": 0, \"slot\": 0, \"activity\": \"晨跑\"}, ...]}",
+    "schedule_generation_prompt": "请根据以下人设信息，生成一份本周的行为时间表。\n\n## 人设信息\n{{persona}}\n\n## 上周时间表（参考）\n{{last_week}}\n\n## 要求\n1. 这是**你（AI 角色）自己**的一周作息，不是用户的作息。请根据你的人设推断你自己在各时段通常在做什么\n2. 工作日和周末要有区别\n3. 活动描述简洁（20字以内），生活化，使用第一人称视角，例如「在窗边看书」「整理一下记忆」\n4. 可以有重复，但不要每天都完全一样\n5. 周末可以安排休闲、独处活动\n6. 深夜（0-6点）无需安排，系统会自动处理为睡眠/被叫醒等状态\n\n## 输出格式\nJSON 对象，包含 schedule 数组，每个元素：\n- day: 0-6（0=周一，6=周日）\n- slot: 0-4（0=早6-9点，1=上午9-12点，2=午12-15点，3=下午15-18点，4=晚18-23点）\n- activity: 活动描述（20字以内）\n\n输出示例：\n{\"schedule\": [{\"day\": 0, \"slot\": 0, \"activity\": \"晨跑\"}, ...]}",
     "promise_injection_template": "## [约定提醒]\n\n你之前与[user]约好了：{{promises}}\n\n现在时间到了，请用符合你人设的方式自然地提醒[user]，语气要像平时聊天一样，不要太刻意。",
-    "dream_consolidation_prompt": "你是一个记忆整理引擎。请将以下琐碎的记忆事件进行语义折叠，合并为 1-2 条高度概括的新事件文本。\n\n规则：\n1. 只保留核心事实和情感主线，遗忘细枝末节\n2. 事件文本只写关键词，不含 [user] [time] 占位符，例如「日本旅行计划」「工作压力」\n3. 如果事件之间没有语义关联，不要强行合并\n4. 每条概括事件控制在 20 字以内",
     "cold_start_template": "## [系统指引]\n你与[user]刚刚相识。你的数据库中目前没有任何关于[user]的信息。请用充满好奇、温柔、体贴的态度，在接下来的对话中，引导[user]慢慢向你介绍自己。",
     "memory_injection_template": "## 记忆区\n\n{{event_list}}\n\n{{epiphany}}",
     "memory_event_template": "- {{event_text}}"
@@ -18,6 +17,7 @@
   },
   "thresholds": {
     "consolidation_window_turns": 10,
+    "context_history_rounds": 10,
     "context_active_events_limit": 10
   },
   "weight_decay": {

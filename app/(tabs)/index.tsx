@@ -25,10 +25,8 @@ import { buildChatContext } from "@/memory/chatHandler";
 import { streamChat } from "@/llm/foreground";
 import { hasApiKey } from "@/llm/client";
 import { shouldConsolidate, runConsolidation } from "@/memory/consolidation";
-import { resetIdleTimer } from "@/memory/dreaming";
 import { checkDuePromises, markPromiseReminded } from "@/memory/promiseChecker";
 import { checkAndGenerateSchedule } from "@/memory/scheduler";
-import { updateBasicIdentityNickname } from "@/db/queries";
 import { useTheme } from "@/theme/useTheme";
 import type { ChatMessage } from "@/types/schema";
 
@@ -84,6 +82,14 @@ export default function ChatScreen() {
     loadApiKey();
     loadMeta();
   }, []);
+
+  // AI 作息时间表：进入聊天时检查本周是否已生成（不在发送路径上，避免阻塞首条消息）
+  useEffect(() => {
+    if (!isReady) return;
+    checkAndGenerateSchedule().catch((err) => {
+      console.error("[chat] 时间表生成异常:", err);
+    });
+  }, [isReady]);
 
   // 检查到期约定
   useEffect(() => {
@@ -171,8 +177,8 @@ export default function ChatScreen() {
     }
     await saveApiKey(trimmed);
     if (nicknameInput.trim()) {
+      // 称呼的唯一写入口（写入 user_info 画像）
       await saveUserNickname(nicknameInput.trim());
-      updateBasicIdentityNickname(nicknameInput.trim());
     }
     setShowKeyInput(false);
     setKeyInput("");
@@ -228,9 +234,6 @@ export default function ChatScreen() {
     setStreamingText("");
     setStreamingThinking("");
     try {
-      // 检查并生成行为时间表
-      await checkAndGenerateSchedule();
-
       const history = getHistory();
       const lastUserMsg = [...history].reverse().find((m) => m.role === "user");
       const context = buildChatContext(lastUserMsg?.content || "", history);
@@ -333,8 +336,6 @@ export default function ChatScreen() {
   };
 
   const handleSend = async (text: string) => {
-    resetIdleTimer();
-
     // 上一轮完成（最后一条是 AI 回复）才计数
     const currentHistory = getHistory();
     const lastRole = currentHistory.length > 0 ? currentHistory[currentHistory.length - 1].role : "none";
@@ -357,9 +358,6 @@ export default function ChatScreen() {
     setStreamingThinking("");
 
     try {
-      // 检查并生成行为时间表
-      await checkAndGenerateSchedule();
-
       const history = getHistory();
       const context = buildChatContext(text, history);
       setDebugInfo(context.systemPrompt, context.keywords, context.memoryCount);
@@ -506,7 +504,8 @@ export default function ChatScreen() {
             message={item}
             shouldAnimate={item.id === animatingMsgId}
             onBubbleAppear={() => {
-              shouldScrollRef.current = true;
+              // 新气泡出现属于正常消息流，允许自动滚底
+              skipScrollRef.current = false;
               // 等布局更新后再滚
               setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 50);
             }}

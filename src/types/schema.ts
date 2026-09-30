@@ -22,15 +22,11 @@ export interface MemoryFragment {
 /** 记忆事件表 (memory_events) */
 export interface MemoryEvent {
   id: number;
-  /** 索引记忆事件自增 ID */
-  index: number;
   event_text: string;
   timestamp: string;
   /** 活跃权重 1-100 */
   active_weight: number;
   last_accessed: string;
-  /** 0: 活跃, 1: 软归档 */
-  is_archived: 0 | 1;
   /** 重要性权重 1-9（1-3琐事，4-6中等，7-9重大） */
   priority: number;
 }
@@ -127,7 +123,7 @@ export interface PromptsConfig {
   system_prompt: string;
   extraction_prompt: string;
   state_injection_template: string;
-  dream_consolidation_prompt: string;
+
   cold_start_template: string;
   memory_injection_template: string;
   memory_event_template: string;
@@ -143,7 +139,11 @@ export interface DefaultPlaceholders {
 }
 
 export interface ThresholdsConfig {
+  /** 每累计多少轮对话触发一次巩固提取 */
   consolidation_window_turns: number;
+  /** 发送给模型的上下文轮数（与巩固触发频率解耦） */
+  context_history_rounds: number;
+  /** 记忆区加载的高权重事件数量 */
   context_active_events_limit: number;
 }
 

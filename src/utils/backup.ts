@@ -115,11 +115,16 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
     db.execSync("DELETE FROM system_metadata");
     db.execSync("DELETE FROM behavior_schedule");
 
-    // 恢复 memory_events
+    // 恢复 memory_events（旧备份可能仍含 "index" / is_archived，已废弃列不再写入）
     for (const row of backup.sqlite.memory_events) {
       db.runSync(
-        'INSERT INTO memory_events (id, "index", event_text, timestamp, active_weight, last_accessed, is_archived, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        row.id, row.index, row.event_text, row.timestamp, row.active_weight, row.last_accessed, row.is_archived, row.priority
+        "INSERT INTO memory_events (id, event_text, timestamp, active_weight, last_accessed, priority) VALUES (?, ?, ?, ?, ?, ?)",
+        row.id,
+        row.event_text,
+        row.timestamp,
+        row.active_weight,
+        row.last_accessed,
+        row.priority ?? 5
       );
     }
 

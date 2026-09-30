@@ -28,7 +28,7 @@ import {
   setConfigOverride,
   resetConfigOverride,
 } from "@/prompt/config";
-import { getUserInfo, getTopActive, getActiveCount, clearAllData, updateBasicIdentityNickname, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById } from "@/db/queries";
+import { getUserInfo, getTopActive, getActiveCount, clearAllData, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById } from "@/db/queries";
 import { getWeekStart } from "@/memory/scheduler";
 import { fetchModels, getClient } from "@/llm/client";
 import { CollapsibleSection } from "@/components/CollapsibleSection";
@@ -71,7 +71,8 @@ interface ConfigField {
 }
 
 const THRESHOLD_FIELDS: ConfigField[] = [
-  { key: "consolidation_window_turns", label: "上下文轮数上限", type: "number", description: "发送给 AI 和巩固的上下文轮数，同时控制触发频率" },
+  { key: "consolidation_window_turns", label: "巩固触发轮数", type: "number", description: "累计多少轮对话后触发一次记忆提取（仅控制触发频率）" },
+  { key: "context_history_rounds", label: "上下文轮数上限", type: "number", description: "发送给 AI 的历史对话轮数（与巩固触发频率互不影响）" },
   { key: "context_active_events_limit", label: "记忆区事件上限", type: "number", description: "上下文中加载的高权重事件数量" },
 ];
 
@@ -101,7 +102,6 @@ const PROMPT_GROUPS: PromptGroup[] = [
     title: "后台任务",
     fields: [
       { key: "extraction_prompt", label: "记忆提取指令", type: "multiline", description: "每10轮对话触发一次，从对话中提取用户信息和记忆片段。" },
-      { key: "dream_consolidation_prompt", label: "做梦折叠指令", type: "multiline", description: "闲置时自动触发，将琐碎记忆事件折叠为概括性事件。" },
     ],
   },
   {
@@ -148,7 +148,6 @@ export default function SettingsScreen() {
     system_prompt: COMMON_VARIABLES,
     cold_start_template: COMMON_VARIABLES,
     extraction_prompt: COMMON_VARIABLES,
-    dream_consolidation_prompt: COMMON_VARIABLES,
     state_injection_template: [
       ...COMMON_VARIABLES,
       { label: "昵称", value: "{{nickname}}" },
@@ -269,10 +268,8 @@ export default function SettingsScreen() {
   };
 
   const handleSaveNickname = async () => {
+    // 称呼的唯一写入口（写入 user_info 画像）
     await saveUserNickname(inputNickname);
-    if (inputNickname.trim()) {
-      updateBasicIdentityNickname(inputNickname.trim());
-    }
     setShowNicknameModal(false);
   };
 
@@ -286,7 +283,7 @@ export default function SettingsScreen() {
     const weight = parseInt(newEventWeight) || 50;
     const priority = parseInt(newEventPriority) || 5;
     if (!text) return;
-    insertEvent(text, Math.min(100, Math.max(1, weight)), events.length, Math.min(9, Math.max(1, priority)));
+    insertEvent(text, Math.min(100, Math.max(1, weight)), Math.min(9, Math.max(1, priority)));
     setEvents(getTopActive(999));
     setEventCount(getActiveCount());
     setShowNewEventModal(false);
@@ -337,7 +334,7 @@ export default function SettingsScreen() {
 
   // 是否为提示词类型（可预览）
   const isPreviewable = (key: string) => {
-    return ["system_prompt", "state_injection_template", "memory_injection_template", "memory_event_template", "extraction_prompt", "cold_start_template", "dream_consolidation_prompt"].includes(key);
+    return ["system_prompt", "state_injection_template", "memory_injection_template", "memory_event_template", "extraction_prompt", "cold_start_template"].includes(key);
   };
 
   // 渲染状态区模板（用 editorValue 替换 {{}}），空字段整行移除
@@ -518,21 +515,6 @@ export default function SettingsScreen() {
         lines.push("[用户] （示例：你好）");
         lines.push("[助手] （示例：你好呀～最近怎么样？）");
         lines.push("", '请严格输出 JSON，格式：{"updated_user_info": {...}, "new_fragment": {"summary": "...", "emotion": "...", "target_event_index": 数字或-1, "new_event_text": ""}}');
-        return lines.join("\n");
-      }
-
-      // ===== 做梦指令 =====
-      case "dream_consolidation_prompt": {
-        const events = getTopActive(50).slice(-10);
-        const lines = [editorValue, "", "## 待折叠的琐碎事件"];
-        if (events.length === 0) {
-          lines.push("（暂无事件）");
-        } else {
-          for (let i = 0; i < events.length; i++) {
-            lines.push(`${i + 1}. ${events[i].event_text}`);
-          }
-        }
-        lines.push("", '请输出 JSON：{"folded_events": ["概括事件1", "概括事件2"]}');
         return lines.join("\n");
       }
 
@@ -916,7 +898,7 @@ ${text}
         <View style={[styles.modelRow, { borderBottomColor: colors.border }]}>
           <View style={styles.modelInfo}>
             <Text style={[styles.label, { color: colors.text }]}>后台提取模型</Text>
-            <Text style={[styles.rowDesc, { color: colors.textMuted }]}>巩固/做梦用，建议低成本模型</Text>
+            <Text style={[styles.rowDesc, { color: colors.textMuted }]}>巩固用，建议低成本模型</Text>
           </View>
           <View style={styles.modelActions}>
             <Text style={[styles.modelValue, { color: colors.accent }]}>{bgRouting.model}</Text>

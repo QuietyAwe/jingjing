@@ -15,12 +15,11 @@ import {
   updateEventPriority,
   getDefaultEventId,
   getEventById,
-  getFragmentsByEventId,
+  getFragmentsByEventIds,
 } from "@/db/queries";
 import { extractConsolidation } from "@/llm/background";
 import { getThresholds } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
-import { useSettingsStore } from "@/store/settingsStore";
 import { useMetaStore } from "@/store/metaStore";
 import type { UserInfo } from "@/types/schema";
 import dayjs from "dayjs";
@@ -95,16 +94,14 @@ export async function runConsolidation(
       }
     }
 
-    // 4b. 每个事件取最近 3 条片段摘要（让 LLM 知道已提取过什么）
+    // 4b. 每个事件取最近 3 条片段摘要（一次 IN 查询，让 LLM 知道已提取过什么）
+    const fragmentMap = getFragmentsByEventIds(existingEvents.map((e) => e.id));
     const eventFragments = new Map<number, string[]>();
-    for (const evt of existingEvents) {
-      const frags = getFragmentsByEventId(evt.id);
-      if (frags.length > 0) {
-        eventFragments.set(
-          evt.id,
-          frags.slice(-3).map((f) => f.summary),
-        );
-      }
+    for (const [eventId, frags] of fragmentMap) {
+      eventFragments.set(
+        eventId,
+        frags.slice(-3).map((f) => f.summary),
+      );
     }
 
     // 窗口外没有新消息，跳过提取
@@ -130,13 +127,8 @@ export async function runConsolidation(
     const db = getDB();
     await db.withExclusiveTransactionAsync(async () => {
       // 6a. Merge user_info（增量模式，new_info 只含新发现的字段）
+      // nickname 的真相源即此处的 user_info.basic_identity，无需额外写入 AsyncStorage
       mergeUserInfo(result.new_info);
-
-      // 同步昵称到设置 store
-      const newNickname = result.new_info.basic_identity?.nickname;
-      if (newNickname) {
-        useSettingsStore.getState().saveUserNickname(newNickname);
-      }
 
       // 6b. 确定挂靠事件
       let targetEventId: number;
@@ -148,7 +140,7 @@ export async function runConsolidation(
         targetEventId = frag.target_event_index;
       } else if (frag.new_event_text?.trim()) {
         // LLM 认为需要新建事件
-        targetEventId = insertEvent(frag.new_event_text.trim(), 100, 0, priority);
+        targetEventId = insertEvent(frag.new_event_text.trim(), 100, priority);
       } else {
         // 兜底：挂靠默认事件"日常闲聊"
         const defaultId = getDefaultEventId();
@@ -156,7 +148,7 @@ export async function runConsolidation(
           targetEventId = defaultId;
         } else {
           // 默认事件不存在时，创建占位事件
-          targetEventId = insertEvent("日常闲聊", 50, 0, 1);
+          targetEventId = insertEvent("日常闲聊", 50, 1);
         }
       }
 

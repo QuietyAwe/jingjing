@@ -5,10 +5,12 @@
 import { create } from "zustand";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { setApiKey, setBaseUrl, hasApiKey } from "@/llm/client";
+import { getUserInfo, updateBasicIdentityNickname } from "@/db/queries";
 
 const API_KEY_STORAGE = "openai_api_key";
 const BASE_URL_STORAGE = "openai_base_url";
-const NICKNAME_STORAGE = "user_nickname";
+/** 已废弃：昵称真相源统一为 user_info.basic_identity.nickname，此 key 仅用于旧数据迁移 */
+const LEGACY_NICKNAME_STORAGE = "user_nickname";
 const AI_NAME_STORAGE = "ai_name";
 const STREAM_OUTPUT_STORAGE = "stream_output";
 const THINKING_MODE_STORAGE = "thinking_mode";
@@ -32,6 +34,7 @@ export interface CustomBubbleColors {
 interface SettingsState {
   apiKey: string;
   baseUrl: string;
+  /** 用户称呼（数据库 user_info.basic_identity.nickname 的内存镜像） */
   user_nickname: string;
   ai_name: string;
   stream_output: boolean;
@@ -50,6 +53,8 @@ interface SettingsState {
   saveUserNickname: (name: string) => Promise<void>;
   /** 保存 AI 名字 */
   saveAiName: (name: string) => Promise<void>;
+  /** 从数据库同步用户称呼到内存 */
+  syncNicknameFromDB: () => void;
   /** 保存流式输出开关 */
   saveStreamOutput: (enabled: boolean) => Promise<void>;
   /** 保存思考模式开关 */
@@ -71,10 +76,10 @@ export const useSettingsStore = create<SettingsState>((set) => ({
 
   loadApiKey: async () => {
     try {
-      const [key, url, nickname, aiName, stream, thinking, lightJson, darkJson] = await Promise.all([
+      const [key, url, legacyNickname, aiName, stream, thinking, lightJson, darkJson] = await Promise.all([
         AsyncStorage.getItem(API_KEY_STORAGE),
         AsyncStorage.getItem(BASE_URL_STORAGE),
-        AsyncStorage.getItem(NICKNAME_STORAGE),
+        AsyncStorage.getItem(LEGACY_NICKNAME_STORAGE),
         AsyncStorage.getItem(AI_NAME_STORAGE),
         AsyncStorage.getItem(STREAM_OUTPUT_STORAGE),
         AsyncStorage.getItem(THINKING_MODE_STORAGE),
@@ -96,10 +101,18 @@ export const useSettingsStore = create<SettingsState>((set) => ({
         try { customColorsDark = JSON.parse(darkJson); } catch {}
       }
 
+      // 昵称真相源统一到 user_info 表：旧 AsyncStorage 值迁移一次后即弃用
+      let nickname = getUserInfo()?.basic_identity?.nickname ?? "";
+      if (!nickname && legacyNickname) {
+        nickname = legacyNickname.trim();
+        if (nickname) updateBasicIdentityNickname(nickname);
+        await AsyncStorage.removeItem(LEGACY_NICKNAME_STORAGE);
+      }
+
       set({
         apiKey: key || "",
         baseUrl: resolvedUrl,
-        user_nickname: nickname || "",
+        user_nickname: nickname,
         ai_name: aiName || "",
         stream_output: stream === "true",
         thinking_mode: thinking === "true",
@@ -125,9 +138,10 @@ export const useSettingsStore = create<SettingsState>((set) => ({
     set({ baseUrl: trimmed });
   },
 
+  /** 用户称呼的唯一写入口：写 user_info 表，AsyncStorage 不再保存副本 */
   saveUserNickname: async (name: string) => {
     const trimmed = name.trim();
-    await AsyncStorage.setItem(NICKNAME_STORAGE, trimmed);
+    updateBasicIdentityNickname(trimmed);
     set({ user_nickname: trimmed });
   },
 
@@ -135,6 +149,10 @@ export const useSettingsStore = create<SettingsState>((set) => ({
     const trimmed = name.trim();
     await AsyncStorage.setItem(AI_NAME_STORAGE, trimmed);
     set({ ai_name: trimmed });
+  },
+
+  syncNicknameFromDB: () => {
+    set({ user_nickname: getUserInfo()?.basic_identity?.nickname ?? "" });
   },
 
   saveStreamOutput: async (enabled: boolean) => {

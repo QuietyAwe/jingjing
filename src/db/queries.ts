@@ -1,4 +1,5 @@
 import { getDB } from "./connection";
+import { EVENT_COLUMNS } from "./schema";
 import type {
   SystemMetadata,
   UserInfo,
@@ -216,7 +217,6 @@ function mergeUserInfoDelta(existing: UserInfo, patch: ConsolidationResponse["ne
 export function insertEvent(
   eventText: string,
   activeWeight: number,
-  index: number,
   priority: number = 5
 ): number {
   if (activeWeight < 1 || activeWeight > 100) {
@@ -228,8 +228,7 @@ export function insertEvent(
   const db = getDB();
   const now = dayjs().toISOString();
   const result = db.runSync(
-    'INSERT INTO memory_events ("index", event_text, timestamp, active_weight, last_accessed, is_archived, priority) VALUES (?, ?, ?, ?, ?, 0, ?)',
-    index,
+    "INSERT INTO memory_events (event_text, timestamp, active_weight, last_accessed, priority) VALUES (?, ?, ?, ?, ?)",
     eventText,
     now,
     activeWeight,
@@ -239,12 +238,11 @@ export function insertEvent(
   return Number(result.lastInsertRowId);
 }
 
-/** 获取 Top N 高权重活跃事件（实时衰减后排序） */
 /** 根据 ID 获取单个事件 */
 export function getEventById(eventId: number): MemoryEvent | null {
   const db = getDB();
   return db.getFirstSync<MemoryEvent>(
-    "SELECT * FROM memory_events WHERE id = ?",
+    `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE id = ?`,
     eventId
   );
 }
@@ -255,7 +253,7 @@ export function getTopActive(limit: number): MemoryEvent[] {
   const defaultEventId = getDefaultEventId();
   const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
   return db.getAllSync<MemoryEvent>(
-    `SELECT * FROM memory_events WHERE is_archived = 0 ${excludeDefault} ORDER BY active_weight DESC, last_accessed DESC LIMIT ?`,
+    `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE 1 = 1 ${excludeDefault} ORDER BY active_weight DESC, last_accessed DESC LIMIT ?`,
     limit
   );
 }
@@ -266,7 +264,7 @@ export function getAllActive(): MemoryEvent[] {
   const defaultEventId = getDefaultEventId();
   const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
   return db.getAllSync<MemoryEvent>(
-    `SELECT * FROM memory_events WHERE is_archived = 0 ${excludeDefault}`
+    `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE 1 = 1 ${excludeDefault}`
   );
 }
 
@@ -281,12 +279,12 @@ export function getEpiphanyRandom(excludeIds: number[] = []): MemoryEvent | null
   const allExcludeIds = defaultEventId ? [...excludeIds, defaultEventId] : excludeIds;
   if (allExcludeIds.length === 0) {
     return db.getFirstSync<MemoryEvent>(
-      "SELECT * FROM memory_events WHERE is_archived = 0 AND active_weight < 40 ORDER BY RANDOM() LIMIT 1"
+      `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE active_weight < 40 ORDER BY RANDOM() LIMIT 1`
     );
   }
   const placeholders = allExcludeIds.map(() => "?").join(",");
   return db.getFirstSync<MemoryEvent>(
-    `SELECT * FROM memory_events WHERE is_archived = 0 AND active_weight < 40 AND id NOT IN (${placeholders}) ORDER BY RANDOM() LIMIT 1`,
+    `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE active_weight < 40 AND id NOT IN (${placeholders}) ORDER BY RANDOM() LIMIT 1`,
     ...allExcludeIds
   );
 }
@@ -313,49 +311,15 @@ export function updateEventPriority(eventId: number, priority: number): void {
   );
 }
 
-/** 软归档事件 */
-export function softArchive(eventId: number): void {
-  const db = getDB();
-  db.runSync(
-    "UPDATE memory_events SET is_archived = 1 WHERE id = ?",
-    eventId
-  );
-}
-
-/** 获取所有活跃事件数量 */
 /** 获取活跃事件数量（排除默认事件） */
 export function getActiveCount(): number {
   const db = getDB();
   const defaultEventId = getDefaultEventId();
   const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
   const row = db.getFirstSync<{ cnt: number }>(
-    `SELECT COUNT(*) as cnt FROM memory_events WHERE is_archived = 0 ${excludeDefault}`
+    `SELECT COUNT(*) as cnt FROM memory_events WHERE 1 = 1 ${excludeDefault}`
   );
   return row?.cnt ?? 0;
-}
-
-/** 获取权重最低的 N 条冷事件（做梦流用） */
-/** 获取权重最低的 N 条冷事件（做梦流用，排除默认事件） */
-export function getColdestEvents(limit: number): MemoryEvent[] {
-  const db = getDB();
-  const defaultEventId = getDefaultEventId();
-  const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
-  return db.getAllSync<MemoryEvent>(
-    `SELECT * FROM memory_events WHERE is_archived = 0 ${excludeDefault} ORDER BY active_weight ASC, last_accessed ASC LIMIT ?`,
-    limit
-  );
-}
-
-/** 批量软归档（同时删除关联片段，避免孤儿数据） */
-export function softArchiveBatch(eventIds: number[]): void {
-  const db = getDB();
-  for (const id of eventIds) {
-    db.runSync('DELETE FROM memory_fragments WHERE "index" = ?', id);
-    db.runSync(
-      "UPDATE memory_events SET is_archived = 1 WHERE id = ?",
-      id
-    );
-  }
 }
 
 /** 更新事件文本 */
@@ -406,9 +370,31 @@ export function insertFragment(
 export function getFragmentsByEventId(eventId: number): MemoryFragment[] {
   const db = getDB();
   return db.getAllSync<MemoryFragment>(
-    'SELECT * FROM memory_fragments WHERE "index" = ? ORDER BY timestamp ASC',
+    'SELECT id, "index", timestamp, summary, emotion, priority FROM memory_fragments WHERE "index" = ? ORDER BY timestamp ASC',
     eventId
   );
+}
+
+/**
+ * 批量查询多个事件的记忆片段（一次 IN 查询，避免 N+1）
+ * @returns eventId → 该事件的片段列表（按时间升序）
+ */
+export function getFragmentsByEventIds(eventIds: number[]): Map<number, MemoryFragment[]> {
+  const result = new Map<number, MemoryFragment[]>();
+  if (eventIds.length === 0) return result;
+
+  const db = getDB();
+  const placeholders = eventIds.map(() => "?").join(",");
+  const rows = db.getAllSync<MemoryFragment>(
+    `SELECT id, "index", timestamp, summary, emotion, priority FROM memory_fragments WHERE "index" IN (${placeholders}) ORDER BY timestamp ASC`,
+    ...eventIds
+  );
+  for (const row of rows) {
+    const list = result.get(row.index);
+    if (list) list.push(row);
+    else result.set(row.index, [row]);
+  }
+  return result;
 }
 
 /** 删除单条记忆片段 */
@@ -438,7 +424,7 @@ export function clearAllData(): void {
   // 重新初始化默认事件"日常闲聊"
   const now = dayjs().toISOString();
   const result = db.runSync(
-    'INSERT INTO memory_events ("index", event_text, timestamp, active_weight, last_accessed, is_archived, priority) VALUES (0, ?, ?, 50, ?, 0, 1)',
+    "INSERT INTO memory_events (event_text, timestamp, active_weight, last_accessed, priority) VALUES (?, ?, 50, ?, 1)",
     "日常闲聊",
     now,
     now

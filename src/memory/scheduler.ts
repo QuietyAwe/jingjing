@@ -15,6 +15,7 @@ import {
 import { generateSchedule } from "@/llm/background";
 import { getPrompts } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
+import { useSettingsStore } from "@/store/settingsStore";
 
 /** 时段定义 */
 const TIME_SLOTS = [
@@ -39,6 +40,11 @@ export function getCurrentTimeSlot(hour: number): number {
   if (hour < 15) return 2;  // 午(12-15点)
   if (hour < 18) return 3;  // 下午(15-18点)
   return 4;                 // 晚(18-23点)
+}
+
+/** AI 名称（用于状态文案，明确这是 AI 的作息而非用户的） */
+function getAiName(): string {
+  return useSettingsStore.getState().ai_name || "我";
 }
 
 /** 深夜活动（0-6点） */
@@ -101,8 +107,12 @@ export async function checkAndGenerateSchedule(): Promise<void> {
 }
 
 /**
- * 获取当前状态描述
- * 用于注入到 Prompt 的状态区
+ * 获取当前状态描述 — AI 自己的作息状态
+ * 用于注入到 Prompt 状态区的 {{current_status}}
+ *
+ * 语义说明：behavior_schedule 描述的是 AI 角色（如「私藏」）一周的作息，
+ * 不是用户的行为。用途是让 AI 在深夜/午休等场景下表现出符合自身作息的状态感，
+ * 例如「我已经睡了，被你叫醒了」，而不是去推测用户正在做什么。
  */
 // 缓存深夜状态，避免每次调用都随机变化
 let cachedLateNightStatus: string | null = null;
@@ -119,7 +129,7 @@ export function getCurrentStatus(): string | null {
     const currentHour = now.hour();
     if (cachedLateNightHour !== currentHour || !cachedLateNightStatus) {
       const randomActivity = LATE_NIGHT_ACTIVITIES[Math.floor(Math.random() * LATE_NIGHT_ACTIVITIES.length)];
-      cachedLateNightStatus = `当前：${randomActivity}`;
+      cachedLateNightStatus = `（${getAiName()}的作息）当前：${randomActivity}`;
       cachedLateNightHour = currentHour;
     }
     return cachedLateNightStatus;
@@ -135,10 +145,10 @@ export function getCurrentStatus(): string | null {
   const endedActivities = getEndedActivities(dayOfWeek, timeSlot, weekStart);
 
   const parts: string[] = [];
-  parts.push(`当前：${currentActivity}`);
+  parts.push(`（${getAiName()}的作息）当前：${currentActivity}`);
 
   if (endedActivities.length > 0) {
-    parts.push(`今天已完成：${endedActivities.join("、")}`);
+    parts.push(`${getAiName()}今天已完成：${endedActivities.join("、")}`);
   }
 
   return parts.join("\n");

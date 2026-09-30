@@ -6,7 +6,7 @@
 // 超限时按权重从低到高剔除记忆区事件
 // ============================================================
 
-import { getFragmentsByEventId } from "@/db/queries";
+import { getFragmentsByEventIds, getUserInfo } from "@/db/queries";
 import type {
   UserInfo,
   MemoryEvent,
@@ -18,7 +18,36 @@ import { getPrompts, getPlaceholders } from "./config";
 import { useSettingsStore } from "@/store/settingsStore";
 import dayjs from "dayjs";
 
-const DEFAULT_TOKEN_BUDGET = 8000; // 字符数作为 token 近似
+const DEFAULT_TOKEN_BUDGET = 8000; // token 近似值（见 estimateTokens）
+
+/**
+ * Token 估算：中日韩字符约 1 token/字，其余按 4 字符 ≈ 1 token
+ * 比直接用字符数更接近真实计费，尤其是中文为主的场景
+ */
+export function estimateTokens(text: string): number {
+  if (!text) return 0;
+  let cjk = 0;
+  for (const ch of text) {
+    // 中日韩统一表意文字 + 假名 + 谚文 + 全角标点
+    if (/[\u3400-\u4DBF\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF\uF900-\uFAFF\u3000-\u303F\uFF00-\uFFEF]/.test(ch)) {
+      cjk += 1;
+    }
+  }
+  const rest = Math.max(0, text.length - cjk);
+  return cjk + Math.ceil(rest / 4);
+}
+
+/**
+ * 用户称呼的唯一来源：user_info.basic_identity.nickname
+ * 优先使用已加载的画像，冷启动无画像时再查库
+ */
+function getUserNickname(userInfo?: UserInfo | null): string {
+  return (
+    userInfo?.basic_identity?.nickname ||
+    getUserInfo()?.basic_identity?.nickname ||
+    "用户"
+  );
+}
 
 export interface AssembledPrompt {
   /** 稳定部分：系统人设（不常变化，高缓存命中） */
@@ -47,7 +76,7 @@ export function assemblePrompt(
   tokenBudget: number = DEFAULT_TOKEN_BUDGET
 ): AssembledPrompt {
   const prompts = getPrompts();
-  const nickname = useSettingsStore.getState().user_nickname || "用户";
+  const nickname = getUserNickname(userInfo);
   const now = dayjs(); // 预计算当前时间，复用
 
   // 1. 稳定部分：系统人设（替换 [user]）
@@ -57,11 +86,8 @@ export function assemblePrompt(
   const stateText = buildStateSection(userInfo, currentStatus, now);
   const memoryText = buildMemorySection(userInfo, topEvents, epiphany, hitFragments);
 
-  // 3. 截断：若超预算，按权重从低到高剔除记忆事件
-  const truncatedMemory = truncateToFit(memoryText, topEvents, epiphany, chatHistory, userInfo, tokenBudget);
-
-  // 4. 转换历史为 API 格式（最后两条用户消息带时间戳，让 AI 感知时间流动）
-  const messages = chatHistory.map((m, i) => {
+  // 3. 转换历史为 API 格式（最后两条用户消息带时间戳，让 AI 感知时间流动）
+  const messages = chatHistory.map((m) => {
     // 用户消息：最后两条带时间；AI 消息：不带时间（避免影响输出风格）
     const isUser = m.role === "user";
     const lastTwoUsers = chatHistory.filter((x) => x.role === "user").slice(-2);
@@ -75,7 +101,24 @@ export function assemblePrompt(
     };
   });
 
-  return { system: systemPromptText, state: stateText, memory: truncatedMemory, messages };
+  // 4. 截断：预算覆盖全部四段，先按权重削记忆，再丢最旧历史
+  const fitted = truncateToFit({
+    system: systemPromptText,
+    state: stateText,
+    memory: memoryText,
+    messages,
+    topEvents,
+    epiphany,
+    userInfo,
+    budget: tokenBudget,
+  });
+
+  return {
+    system: systemPromptText,
+    state: stateText,
+    memory: fitted.memory,
+    messages: fitted.messages,
+  };
 }
 
 /**
@@ -254,6 +297,12 @@ function buildMemorySection(
   const eventTpl = prompts.memory_event_template;
   const now = dayjs(); // 预计算当前时间，复用
 
+  // 一次取回所有缺失片段，避免逐事件查询（N+1）
+  const missingIds = topEvents
+    .filter((e) => (hitFragments?.get(e.id)?.length ?? 0) === 0)
+    .map((e) => e.id);
+  const fallbackFragments = getFragmentsByEventIds(missingIds);
+
   // 渲染每条事件
   const eventLines: string[] = [];
   for (const event of topEvents) {
@@ -271,9 +320,9 @@ function buildMemorySection(
         eventLines.push(`  · ${fragText}`);
       }
     } else {
-      // 活跃事件：获取最新一条片段摘要
-      const eventFragments = getFragmentsByEventId(event.id);
-      if (eventFragments.length > 0) {
+      // 活跃事件：显示最新一条片段摘要
+      const eventFragments = fallbackFragments.get(event.id);
+      if (eventFragments && eventFragments.length > 0) {
         const latest = eventFragments[eventFragments.length - 1];
         const fragText = replacePlaceholders(latest.summary, latest.timestamp, userInfo, now);
         eventLines.push(`  · ${fragText}`);
@@ -374,62 +423,133 @@ function replacePlaceholders(
  * 截断策略：按权重从低到高依次剔除记忆区事件
  * 优先保护：系统人设 > 状态区 > 最近 15 轮对话 > 灵光一闪 > Top N 事件
  */
-function truncateToFit(
-  memoryText: string,
-  topEvents: (MemoryEvent & { live_weight: number })[],
-  epiphany: MemoryEvent | null,
-  chatHistory: ChatMessage[],
-  userInfo: UserInfo | null,
-  budget: number
-): string {
-  const historyChars = chatHistory.reduce((sum, m) => sum + m.content.length, 0);
-  const totalChars = memoryText.length + historyChars;
+interface MemoryBlock {
+  start: number;
+  end: number;
+  text: string;
+  isEpiphany: boolean;
+  /** 匹配到的事件实时权重，未匹配或未染色时为 0 */
+  weight: number;
+}
 
-  if (totalChars <= budget) return memoryText;
+/**
+ * 将记忆区按 "- 事件行 + 其下的   片段行" 切块
+ * 删除时整块移除，避免留下孤儿片段行
+ */
+function splitMemoryBlocks(lines: string[]): MemoryBlock[] {
+  const blocks: MemoryBlock[] = [];
+  let current: MemoryBlock | null = null;
 
-  const excess = totalChars - budget;
-
-  // 按权重从低到高排序记忆事件
-  const sortedEvents = [...topEvents].sort((a, b) => a.live_weight - b.live_weight);
-
-  // 构建事件行映射（行文本 → 长度）
-  const lines = memoryText.split("\n");
-  const eventLineMap = new Map<string, number>();
-  for (const line of lines) {
-    if (line.startsWith("- ") && !line.startsWith("- [灵光一闪")) {
-      eventLineMap.set(line, line.length);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("- ")) {
+      if (current) blocks.push(current);
+      current = {
+        start: i,
+        end: i,
+        text: line,
+        isEpiphany: line.startsWith("- [灵光一闪"),
+        weight: 0,
+      };
+    } else if (current && line.startsWith("  ")) {
+      // 归属于上一个事件块的片段行
+      current.end = i;
+      current.text += `\n${line}`;
     }
   }
+  if (current) blocks.push(current);
+  return blocks;
+}
 
-  // 先尝试删除灵光一闪（如果存在且不是唯一记忆）
-  let removed = 0;
-  const removedLines = new Set<string>();
-  if (epiphany && eventLineMap.size > 1) {
-    for (const [line, len] of eventLineMap) {
-      if (line.startsWith("- [灵光一闪")) {
-        removedLines.add(line);
-        removed += len;
+/**
+ * 截断策略：预算覆盖「系统人设 + 状态区 + 记忆区 + 历史」
+ * 顺序：优先删除灵光一闪 → 按实时权重从低到高删除记忆块 → 仍超则从最旧的历史开始丢弃
+ */
+function truncateToFit(params: {
+  system: string;
+  state: string;
+  memory: string;
+  messages: { role: "user" | "assistant"; content: string }[];
+  topEvents: (MemoryEvent & { live_weight: number })[];
+  epiphany: MemoryEvent | null;
+  userInfo: UserInfo | null;
+  budget: number;
+}): { memory: string; messages: { role: "user" | "assistant"; content: string }[] } {
+  const { system, state, memory, messages, topEvents, epiphany, userInfo, budget } = params;
+
+  const systemTokens = estimateTokens(system);
+  const stateTokens = estimateTokens(state);
+  let keptMessages = messages;
+
+  const measure = (memText: string, msgs: typeof messages) =>
+    systemTokens +
+    stateTokens +
+    estimateTokens(memText) +
+    msgs.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+
+  let total = measure(memory, keptMessages);
+  if (total <= budget) return { memory, messages: keptMessages };
+
+  // --- 第一步：按块删除记忆 ---
+  const lines = memory.split("\n");
+  const blocks = splitMemoryBlocks(lines);
+
+  // 建立事件块到权重的映射：用渲染后的事件文本匹配 topEvents
+  const weightByLine = new Map<string, number>();
+  for (const event of topEvents) {
+    const rendered = replacePlaceholders(event.event_text, event.timestamp, userInfo);
+    weightByLine.set(rendered, event.live_weight);
+  }
+  for (const block of blocks) {
+    if (block.isEpiphany) continue;
+    const firstLine = block.text.split("\n")[0];
+    for (const [rendered, weight] of weightByLine) {
+      if (firstLine.includes(rendered)) {
+        block.weight = weight;
         break;
       }
     }
   }
 
-  // 按权重从低到高逐个删除事件行（通过事件文本匹配）
-  for (const event of sortedEvents) {
-    if (removed >= excess) break;
-    const eventText = replacePlaceholders(event.event_text, event.timestamp, userInfo);
-    for (const [line, len] of eventLineMap) {
-      if (line.includes(eventText) && !removedLines.has(line)) {
-        removedLines.add(line);
-        removed += len;
-        break;
-      }
+  const removedLines = new Set<number>();
+  const dropBlock = (block: MemoryBlock) => {
+    if (removedLines.has(block.start)) return false;
+    for (let i = block.start; i <= block.end; i++) removedLines.add(i);
+    return true;
+  };
+
+  const remainingMemory = () =>
+    lines.filter((_, i) => !removedLines.has(i)).join("\n");
+
+  // 灵光一闪优先删除（存在其它记忆时）
+  if (epiphany && blocks.length > 1) {
+    const epiphanyBlock = blocks.find((b) => b.isEpiphany);
+    if (epiphanyBlock) {
+      dropBlock(epiphanyBlock);
+      total = measure(remainingMemory(), keptMessages);
     }
   }
 
-  // 过滤掉被删除的行
-  const result = lines.filter((line) => !removedLines.has(line)).join("\n");
-  return result;
+  // 按权重从低到高删除事件块
+  const eventBlocks = blocks
+    .filter((b) => !b.isEpiphany)
+    .sort((a, b) => a.weight - b.weight);
+
+  for (const block of eventBlocks) {
+    if (total <= budget) break;
+    if (!dropBlock(block)) continue;
+    total = measure(remainingMemory(), keptMessages);
+  }
+
+  // --- 第二步：记忆削完仍超预算，丢弃最旧的历史（至少保留最后一轮） ---
+  if (total > budget) {
+    while (keptMessages.length > 2 && total > budget) {
+      keptMessages = keptMessages.slice(1);
+      total = measure(remainingMemory(), keptMessages);
+    }
+  }
+
+  return { memory: remainingMemory(), messages: keptMessages };
 }
 
 /**
@@ -438,7 +558,7 @@ function truncateToFit(
  */
 export function buildColdStartPrompt(): { system: string; context: string } {
   const prompts = getPrompts();
-  const nickname = useSettingsStore.getState().user_nickname || "用户";
+  const nickname = getUserNickname();
   const systemPromptText = [
     prompts.system_prompt,
     prompts.cold_start_template,

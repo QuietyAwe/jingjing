@@ -2,7 +2,6 @@ import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { initSchema } from "@/db/schema";
 import { useMetaStore } from "@/store/metaStore";
-import { startDreaming } from "@/memory/dreaming";
 import { loadConfigOverrides } from "@/prompt/config";
 import { useThemeStore, getThemeColors } from "@/theme/useTheme";
 
@@ -15,9 +14,6 @@ useMetaStore.getState().setLocked(false);
 
 // 加载自定义配置覆盖
 loadConfigOverrides();
-
-// 启动做梦流闲置监听
-startDreaming();
 
 export default function RootLayout() {
   const { themeMode } = useThemeStore();

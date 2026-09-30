@@ -31,7 +31,11 @@ function getOverride(key: string, defaultValue: number | string): number | strin
   if (!cacheLoaded) return defaultValue;
   const val = overrides[key];
   if (val === undefined) return defaultValue;
-  if (typeof defaultValue === "number") return parseFloat(val) || defaultValue;
+  if (typeof defaultValue === "number") {
+    // 允许显式设为 0，只有非法值才回退默认
+    const num = parseFloat(val);
+    return Number.isNaN(num) ? defaultValue : num;
+  }
   return val;
 }
 
@@ -62,6 +66,7 @@ export function getConfigDefault(key: string): string {
 
   const defaults: Record<string, string> = {
     consolidation_window_turns: String(thresholds.consolidation_window_turns),
+    context_history_rounds: String(thresholds.context_history_rounds),
     context_active_events_limit: String(thresholds.context_active_events_limit),
     ebbinghaus_decay_rate: String(decay.ebbinghaus_decay_rate),
     epiphany_trigger_probability: String(decay.epiphany_trigger_probability),
@@ -71,7 +76,6 @@ export function getConfigDefault(key: string): string {
     foreground_temperature: String(fg.temperature),
     extraction_prompt: config.prompts.extraction_prompt,
     state_injection_template: config.prompts.state_injection_template,
-    dream_consolidation_prompt: config.prompts.dream_consolidation_prompt,
     cold_start_template: config.prompts.cold_start_template,
     schedule_generation_prompt: config.prompts.schedule_generation_prompt,
     promise_injection_template: config.prompts.promise_injection_template,
@@ -109,7 +113,6 @@ export function getPrompts() {
     system_prompt: getOverride("system_prompt", config.prompts.system_prompt),
     extraction_prompt: getOverride("extraction_prompt", config.prompts.extraction_prompt),
     state_injection_template: getOverride("state_injection_template", config.prompts.state_injection_template),
-    dream_consolidation_prompt: getOverride("dream_consolidation_prompt", config.prompts.dream_consolidation_prompt),
     cold_start_template: getOverride("cold_start_template", config.prompts.cold_start_template),
     memory_injection_template: getOverride("memory_injection_template", config.prompts.memory_injection_template),
     memory_event_template: getOverride("memory_event_template", config.prompts.memory_event_template),
@@ -137,6 +140,7 @@ export function getModelRouting() {
 export function getThresholds() {
   return {
     consolidation_window_turns: getOverride("consolidation_window_turns", config.thresholds.consolidation_window_turns),
+    context_history_rounds: getOverride("context_history_rounds", config.thresholds.context_history_rounds),
     context_active_events_limit: getOverride("context_active_events_limit", config.thresholds.context_active_events_limit),
   };
 }
