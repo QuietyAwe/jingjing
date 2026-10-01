@@ -9,31 +9,36 @@ import { useTheme, useCurrentCustomColors } from "@/theme/useTheme";
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useSettingsStore } from "@/store/settingsStore";
 
-/** 模拟真人聊天风格：按句末标点分割 + 去句号 + 长句逗号再拆 */
+/** 模拟真人聊天风格：按换行分段 + 按句末标点分割 + 去句号 + 长句逗号再拆 */
 function splitForChat(text: string): string[] {
   const LONG_THRESHOLD = 20;
   const result: string[] = [];
 
-  // 1. 按换行或句末标点（。？！～…）分割，保留问号感叹号等
-  const segments = text.split(/(?<=[。？！～…])\s*/);
+  // 1. 先按换行切（连续空行合并，避免产生空白气泡）
+  const lines = text
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
 
-  for (const seg of segments) {
-    let s = seg.trim();
-    if (!s) continue;
+  for (const line of lines) {
+    // 2. 行内按句末标点（。？！～…）再分割，保留问号感叹号等
+    for (const seg of line.split(/(?<=[。？！～…])\s*/)) {
+      let s = seg.trim();
+      if (!s) continue;
 
-    // 2. 去末尾句号（只删句号，保留？！～…）
-    s = s.replace(/。+$/, "").trim();
-    if (!s) continue;
+      // 3. 去末尾句号（只删句号，保留？！～…）
+      s = s.replace(/。+$/, "").trim();
+      if (!s) continue;
 
-    // 3. 超过阈值且有逗号 → 按逗号再拆
-    if (s.length > LONG_THRESHOLD && s.includes("，")) {
-      const parts = s.split("，");
-      for (const part of parts) {
-        const p = part.trim();
-        if (p) result.push(p);
+      // 4. 超过阈值且有逗号 → 按逗号再拆
+      if (s.length > LONG_THRESHOLD && s.includes("，")) {
+        for (const part of s.split("，")) {
+          const p = part.trim();
+          if (p) result.push(p);
+        }
+      } else {
+        result.push(s);
       }
-    } else {
-      result.push(s);
     }
   }
 
@@ -121,6 +126,13 @@ export default function ChatBubble({ message, onLongPress, shouldAnimate, onBubb
               isUser
                 ? { backgroundColor: colors.bubbleUser }
                 : { backgroundColor: colors.bubbleAi, borderWidth: 1, borderColor: colors.border },
+              // 连续气泡做视觉分组：相邻两边用小圆角，看起来像一叠卡片而不是散落的块
+              index < visibleCount - 1 && (isUser
+                ? { borderBottomRightRadius: 6 }
+                : { borderBottomLeftRadius: 6 }),
+              index > 0 && (isUser
+                ? { borderTopRightRadius: 6 }
+                : { borderTopLeftRadius: 6 }),
               pressed && { opacity: 0.7 },
             ]}
           >
@@ -165,15 +177,15 @@ export function StreamingBubble({ text }: { text: string }) {
 }
 
 const streamStyles = StyleSheet.create({
-  row: { marginVertical: 4, paddingHorizontal: 16 },
+  row: { marginVertical: 2, paddingHorizontal: 16 },
   rowLeft: { alignItems: "flex-start" },
-  bubble: { maxWidth: "78%", paddingHorizontal: 14, paddingVertical: 10, borderRadius: 18 },
-  text: { fontSize: 15, lineHeight: 22 },
+  bubble: { maxWidth: "84%", paddingHorizontal: 13, paddingVertical: 8, borderRadius: 18 },
+  text: { fontSize: 15, lineHeight: 21 },
 });
 
 const styles = StyleSheet.create({
   row: {
-    marginVertical: 4,
+    marginVertical: 2,
     paddingHorizontal: 16,
   },
   rowLeft: {
@@ -183,14 +195,14 @@ const styles = StyleSheet.create({
     alignItems: "flex-end",
   },
   bubble: {
-    maxWidth: "78%",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    maxWidth: "84%",
+    paddingHorizontal: 13,
+    paddingVertical: 8,
     borderRadius: 18,
   },
   text: {
     fontSize: 15,
-    lineHeight: 22,
+    lineHeight: 21,
   },
   timestamp: {
     fontSize: 11,
