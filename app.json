@@ -30,6 +30,12 @@
       "expo-sqlite",
       "expo-router"
     ],
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/3e6ff5eb-b793-4460-9145-0735cd7aa2a7"
+    },
     "extra": {
       "router": {},
       "eas": {
