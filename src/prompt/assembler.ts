@@ -15,6 +15,7 @@ import type {
   DefaultPlaceholders,
 } from "@/types/schema";
 import { getPrompts, getPlaceholders } from "./config";
+import { DETAIL_VISIBLE_WEIGHT } from "@/memory/decay";
 import { useSettingsStore } from "@/store/settingsStore";
 import dayjs from "dayjs";
 
@@ -325,11 +326,14 @@ function buildMemorySection(
       }
     } else {
       // 活跃事件：显示最新一条片段摘要
-      const eventFragments = fallbackFragments.get(event.id);
-      if (eventFragments && eventFragments.length > 0) {
-        const latest = eventFragments[eventFragments.length - 1];
-        const fragText = replacePlaceholders(latest.summary, latest.timestamp, userInfo, now);
-        eventLines.push(`  · ${fragText}`);
+      // 权重低于阈值时不再展开细节——模拟「记得发生过，但细节已模糊」
+      if (event.live_weight >= DETAIL_VISIBLE_WEIGHT) {
+        const eventFragments = fallbackFragments.get(event.id);
+        if (eventFragments && eventFragments.length > 0) {
+          const latest = eventFragments[eventFragments.length - 1];
+          const fragText = replacePlaceholders(latest.summary, latest.timestamp, userInfo, now);
+          eventLines.push(`  · ${fragText}`);
+        }
       }
     }
   }

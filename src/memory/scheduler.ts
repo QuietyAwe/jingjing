@@ -105,18 +105,21 @@ export async function checkAndGenerateSchedule(): Promise<void> {
 }
 
 /**
- * 获取当前状态描述 — AI 自己的作息状态
- * 用于注入到 Prompt 状态区的 {{current_status}}
- *
- * 语义说明：behavior_schedule 描述的是 AI 角色（如「私藏」）一周的作息，
- * 不是用户的行为。用途是让 AI 在深夜/午休等场景下表现出符合自身作息的状态感，
- * 例如「我已经睡了，被你叫醒了」，而不是去推测用户正在做什么。
+ * AI 当前的情境（自己的作息，不是用户的）
+ * 用途：让 AI 在深夜/午休等场景下表现出符合自身作息的状态感
  */
+export interface AIScene {
+  /** 当前活动短语，例如「在窗边看书」「准备睡觉了」 */
+  activity: string;
+  /** 今天已完成的活动，例如 ['晨跑','看书'] */
+  done: string[];
+}
+
 // 缓存深夜状态，避免每次调用都随机变化
-let cachedLateNightStatus: string | null = null;
+let cachedLateNightActivity: string | null = null;
 let cachedLateNightHour: number = -1;
 
-export function getCurrentStatus(): string | null {
+export function getCurrentScene(): AIScene | null {
   const weekStart = getWeekStart();
   const now = dayjs();
   const dayOfWeek = getCurrentDayOfWeek();
@@ -125,31 +128,46 @@ export function getCurrentStatus(): string | null {
   // 深夜时段（0-6点）使用缓存，同一小时内保持一致
   if (timeSlot === -1) {
     const currentHour = now.hour();
-    if (cachedLateNightHour !== currentHour || !cachedLateNightStatus) {
-      const randomActivity = LATE_NIGHT_ACTIVITIES[Math.floor(Math.random() * LATE_NIGHT_ACTIVITIES.length)];
-      cachedLateNightStatus = `你现在${randomActivity}`;
+    if (cachedLateNightHour !== currentHour || !cachedLateNightActivity) {
+      cachedLateNightActivity = LATE_NIGHT_ACTIVITIES[Math.floor(Math.random() * LATE_NIGHT_ACTIVITIES.length)];
       cachedLateNightHour = currentHour;
     }
-    return cachedLateNightStatus;
+    return { activity: cachedLateNightActivity, done: [] };
   }
 
   // 非深夜时段清除缓存
-  cachedLateNightStatus = null;
+  cachedLateNightActivity = null;
   cachedLateNightHour = -1;
 
   const currentActivity = getCurrentActivity(dayOfWeek, timeSlot, weekStart);
   if (!currentActivity) return null;
 
-  const endedActivities = getEndedActivities(dayOfWeek, timeSlot, weekStart);
+  return {
+    activity: currentActivity,
+    done: getEndedActivities(dayOfWeek, timeSlot, weekStart),
+  };
+}
 
-  const parts: string[] = [];
-  parts.push(`你现在${currentActivity}`);
+/** 自然的时段感（不报精确时间，避免与消息时间戳重复） */
+function timeOfDay(hour: number): string {
+  if (hour < 6) return "深夜";
+  if (hour < 9) return "清晨";
+  if (hour < 12) return "上午";
+  if (hour < 14) return "中午";
+  if (hour < 18) return "下午";
+  return "晚上";
+}
 
-  if (endedActivities.length > 0) {
-    parts.push(`你刚才${endedActivities.join("、")}`);
-  }
-
-  return parts.join("\n");
+/**
+ * 把 AI 当前情境拼成一句自然的话，注入到 Prompt 的 [你] 段落
+ * 例如「下午，你刚看完书；今天已经晨跑、看书」
+ *
+ * 刻意不报精确时间——精确时间由消息时间戳持续提供，
+ * 这里只给「深夜/下午」这样的时段感，用来配合作息判断。
+ */
+export function formatScene(scene: AIScene, now: dayjs.Dayjs = dayjs()): string {
+  const done = scene.done.length > 0 ? `；今天已经${scene.done.join("、")}` : "";
+  return `${timeOfDay(now.hour())}，你${scene.activity}${done}`;
 }
 
 /** 默认时间表（LLM 生成失败时的兜底） */
