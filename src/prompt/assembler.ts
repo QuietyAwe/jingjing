@@ -139,6 +139,10 @@ function buildStateSection(
   // 如果模板存在且包含 {{}} 占位符，使用模板渲染
   if (template && template.includes("{{")) {
     let result = renderStateTemplate(template, userInfo, currentStatus);
+    // 替换通用变量 [user]（状态区里指代用户，例如「被[user]叫醒了」）
+    if (result.includes("[user]")) {
+      result = result.replace(/\[user\]/g, getUserNickname(userInfo));
+    }
     // 替换通用变量 [now]
     if (result.includes("[now]")) {
       const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
