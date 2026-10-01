@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   FlatList,
@@ -28,7 +28,12 @@ import { shouldConsolidate, runConsolidation } from "@/memory/consolidation";
 import { checkDuePromises, markPromiseReminded } from "@/memory/promiseChecker";
 import { checkAndGenerateSchedule } from "@/memory/scheduler";
 import { useTheme } from "@/theme/useTheme";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 import type { ChatMessage } from "@/types/schema";
+
+/** 首屏渲染的消息条数（更早的消息滑到顶部时再加载） */
+const PAGE_SIZE = 30;
 
 export default function ChatScreen() {
   const {
@@ -56,6 +61,8 @@ export default function ChatScreen() {
     useSettingsStore();
 
   const colors = useTheme();
+  const insets = useSafeAreaInsets();
+  const router = useRouter();
 
   const [showKeyInput, setShowKeyInput] = useState(false);
   const [keyInput, setKeyInput] = useState("");
@@ -76,6 +83,66 @@ export default function ChatScreen() {
   const [animatingMsgId, setAnimatingMsgId] = useState<string | null>(null);
   // 编辑/删除操作时不自动滚底
   const skipScrollRef = useRef(false);
+  // 用户是否贴在底部：只有贴底时才自动滚动，避免上翻历史时被强行拽回底部
+  const atBottomRef = useRef(true);
+  /**
+   * 首屏只渲染最后 PAGE_SIZE 条并全部渲染：
+   * FlatList 懒渲染时未渲染项的高度是估算值，contentSize 不准会导致定位偏移，
+   * 因此限定一个较小的窗口，让首屏高度是真实值
+   */
+  const [renderCount, setRenderCount] = useState(PAGE_SIZE);
+  const visibleMessages = useMemo(
+    () => (messages.length > renderCount ? messages.slice(-renderCount) : messages),
+    [messages, renderCount]
+  );
+  const hasMore = messages.length > renderCount;
+
+  /** 贴底时才滚到底部 */
+  const scrollToBottomIfNeeded = useCallback((animated = true) => {
+    if (!atBottomRef.current) return false;
+    if (skipScrollRef.current) return false;
+    // scrollToOffset 超出范围会自动 clamp 到末尾，比 scrollToEnd 更可靠
+    flatListRef.current?.scrollToOffset({ offset: 9_999_999, animated });
+    return true;
+  }, []);
+
+  /** 无条件对齐底部（打开 App 时的初始定位） */
+  const scrollToBottomHard = useCallback(() => {
+    requestAnimationFrame(() => {
+      flatListRef.current?.scrollToOffset({ offset: 9_999_999, animated: false });
+    });
+  }, []);
+
+  /**
+   * 布局阶段同步定位：onLayout / onContentSizeChange 都早于绘制，
+   * 在这里滚动可以让「第一帧」就画在底部，消除可见的跳动。
+   * 仅在打开后的初始窗口内生效，之后不再干预，避免打扰上翻历史
+   */
+  const initialWindowRef = useRef(true);
+  const scrollOnLayout = useCallback(() => {
+    if (!initialWindowRef.current) return;
+    flatListRef.current?.scrollToOffset({ offset: 9_999_999, animated: false });
+  }, []);
+
+  // 初始窗口结束：之后完全交给 atBottomRef 控制
+  useEffect(() => {
+    const t = setTimeout(() => {
+      initialWindowRef.current = false;
+    }, 1000);
+    return () => clearTimeout(t);
+  }, []);
+
+  /**
+   * 打开 App 时定位到最新消息
+   * 只做「尽早 + 补一次」两次，且都在渲染后极短时间内完成，肉眼看不到跳变
+   */
+  useEffect(() => {
+    if (messages.length === 0) return;
+    if (!initialWindowRef.current) return;
+    scrollToBottomHard();
+    const t = setTimeout(scrollToBottomHard, 120);
+    return () => clearTimeout(t);
+  }, [messages.length, scrollToBottomHard]);
 
   // 初始化
   useEffect(() => {
@@ -138,16 +205,16 @@ export default function ChatScreen() {
     }
   }, [isReady]);
 
-  // 流式输出时滚动到底部（编辑/删除操作时不跳转）
+  // 流式输出时滚动到底部（仅在用户贴底时，上翻历史不打扰）
   useEffect(() => {
     if (skipScrollRef.current) {
       skipScrollRef.current = false;
       return;
     }
     if (streamingText) {
-      flatListRef.current?.scrollToEnd({ animated: true });
+      scrollToBottomIfNeeded(true);
     }
-  }, [streamingText]);
+  }, [streamingText, scrollToBottomIfNeeded]);
 
   // 打字动画
   useEffect(() => {
@@ -164,7 +231,8 @@ export default function ChatScreen() {
   // 键盘弹出时滚动到底部
   useEffect(() => {
     const sub = Keyboard.addListener("keyboardDidShow", () => {
-      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+      // 上翻历史时键盘弹出不打断阅读
+      setTimeout(() => scrollToBottomIfNeeded(true), 100);
     });
     return () => sub.remove();
   }, []);
@@ -336,6 +404,9 @@ export default function ChatScreen() {
   };
 
   const handleSend = async (text: string) => {
+    // 用户主动发言，视为回到对话底部，后续新气泡可自动滚底
+    atBottomRef.current = true;
+
     // 上一轮完成（最后一条是 AI 回复）才计数
     const currentHistory = getHistory();
     const lastRole = currentHistory.length > 0 ? currentHistory[currentHistory.length - 1].role : "none";
@@ -476,12 +547,28 @@ export default function ChatScreen() {
       behavior="padding"
       keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
     >
-      {/* 标题栏 */}
-      <View style={[styles.header, { backgroundColor: colors.sectionBg, borderBottomColor: colors.border }]}>
+      {/* 标题栏（紧凑：按安全区适配，右侧提供设置入口） */}
+      <View
+        style={[
+          styles.header,
+          {
+            paddingTop: insets.top + 6,
+            backgroundColor: colors.sectionBg,
+            borderBottomColor: colors.border,
+          },
+        ]}
+      >
         <TouchableOpacity onLongPress={() => setShowDebug(true)} delayLongPress={800}>
           <Text style={[styles.headerTitle, { color: colors.text }]}>
             {isLoading ? `正在输入中${".".repeat(dotsCount)}` : (ai_name || "私藏")}
           </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => router.push("/settings")}
+          style={styles.headerAction}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
+          <Text style={[styles.headerActionText, { color: colors.textMuted }]}>设置</Text>
         </TouchableOpacity>
       </View>
 
@@ -493,21 +580,42 @@ export default function ChatScreen() {
 
       <FlatList
         ref={flatListRef}
-        data={messages}
+        data={visibleMessages}
         keyExtractor={(item) => item.id}
-        initialScrollIndex={messages.length > 0 ? messages.length - 1 : undefined}
-        onScrollToIndexFailed={() => {
-          setTimeout(() => flatListRef.current?.scrollToEnd({ animated: false }), 200);
+        // 首屏窗口内全部渲染，保证 contentSize 是真实值
+        initialNumToRender={visibleMessages.length}
+        // 滑到顶部时加载更早的消息
+        onStartReached={() => {
+          if (hasMore) {
+            setRenderCount((c) => Math.min(c + PAGE_SIZE, messages.length));
+          }
         }}
+        onStartReachedThreshold={0.2}
+        // 顶部插入更早消息时保持当前可见位置，不跳动
+        maintainVisibleContentPosition={{ minIndexForVisible: 1 }}
+        // 布局阶段即对齐底部（早于绘制，避免看到从顶部跳到底部）
+        onLayout={scrollOnLayout}
+        onContentSizeChange={scrollOnLayout}
+        // 用户一旦开始滑动就结束初始窗口，彻底交还控制权
+        onScrollBeginDrag={() => {
+          initialWindowRef.current = false;
+        }}
+        // 追踪是否贴底：距底部 80pt 内视为贴底
+        onScroll={(e) => {
+          const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
+          const distanceFromBottom =
+            contentSize.height - layoutMeasurement.height - contentOffset.y;
+          atBottomRef.current = distanceFromBottom < 80;
+        }}
+        scrollEventThrottle={16}
         renderItem={({ item }) => (
           <ChatBubble
             message={item}
             shouldAnimate={item.id === animatingMsgId}
             onBubbleAppear={() => {
-              // 新气泡出现属于正常消息流，允许自动滚底
+              // 新气泡出现属于正常消息流，但仅在贴底时才滚
               skipScrollRef.current = false;
-              // 等布局更新后再滚
-              setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 50);
+              setTimeout(() => scrollToBottomIfNeeded(true), 50);
             }}
             onLongPress={() => {
               setActionTarget(item);
@@ -536,7 +644,10 @@ export default function ChatScreen() {
         style={styles.list}
       />
 
-      <InputBar onSend={handleSend} disabled={isLoading} />
+      {/* 底栏隐藏后需自行避让系统手势区 */}
+      <View style={{ paddingBottom: insets.bottom }}>
+        <InputBar onSend={handleSend} disabled={isLoading} />
+      </View>
 
       {/* 长按操作菜单 */}
       <Modal visible={showActionMenu} transparent animationType="fade" onRequestClose={() => setShowActionMenu(false)}>
@@ -669,10 +780,15 @@ const styles = StyleSheet.create({
   list: { flex: 1 },
   listContent: { paddingTop: 16, paddingBottom: 8 },
   header: {
-    paddingTop: 56, paddingBottom: 12, paddingHorizontal: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingTop: 6, paddingBottom: 6, paddingHorizontal: 18,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  headerTitle: { fontSize: 20, fontWeight: "700", letterSpacing: 2 },
+  headerTitle: { fontSize: 16, fontWeight: "600", letterSpacing: 1 },
+  headerAction: { paddingVertical: 4, paddingLeft: 12 },
+  headerActionText: { fontSize: 13 },
   welcomeContainer: { alignItems: "center", justifyContent: "center", paddingTop: 80, paddingBottom: 40 },
   welcomeHint: { fontSize: 15, marginTop: 12 },
   loadingBubble: {

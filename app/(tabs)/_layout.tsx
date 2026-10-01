@@ -22,6 +22,8 @@ export default function TabLayout() {
         options={{
           title: "私藏",
           headerShown: false,
+          // 聊天页隐藏底部导航，沉浸式显示更多内容（进设置走顶部入口）
+          tabBarStyle: { display: "none" },
         }}
       />
       <Tabs.Screen
