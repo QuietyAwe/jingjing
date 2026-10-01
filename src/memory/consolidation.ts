@@ -47,7 +47,7 @@ export function shouldConsolidate(): boolean {
  * @returns 是否成功写入
  */
 export async function runConsolidation(
-  recentMessages: Array<{ role: string; content: string }>,
+  recentMessages: Array<{ role: string; content: string; game_id?: number }>,
 ): Promise<boolean> {
   const counterBefore = parseInt(getMeta("turn_counter") ?? "0", 10);
   logDebug("巩固开始", `turn_counter=${counterBefore}, 消息数=${recentMessages.length}`);
@@ -81,8 +81,13 @@ export async function runConsolidation(
     const lastConsolidated = parseInt(getMeta("last_consolidated_index") ?? "0", 10);
     const windowStart = Math.max(0, recentMessages.length - windowSize);
     // 提取范围：上次巩固结束 → 当前窗口开始
-    const snapshot = recentMessages.slice(lastConsolidated, windowStart);
-    logDebug("巩固范围", `lastConsolidated=${lastConsolidated}, windowStart=${windowStart}, 提取${snapshot.length}条`);
+    // 游戏回合由游戏自己的巩固写入记忆，这里跳过，避免重复记账
+    const windowMessages = recentMessages.slice(lastConsolidated, windowStart);
+    const snapshot = windowMessages.filter((m) => !m.game_id);
+    logDebug(
+      "巩固范围",
+      `lastConsolidated=${lastConsolidated}, windowStart=${windowStart}, 窗口${windowMessages.length}条，剔除游戏回合后提取${snapshot.length}条`
+    );
 
     // 4. 取已有索引事件（供 LLM 判断挂靠，包含默认事件）
     const existingEvents = getTopActive(20);

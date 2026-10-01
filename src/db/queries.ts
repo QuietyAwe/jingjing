@@ -6,6 +6,12 @@ import type {
   MemoryEvent,
   MemoryFragment,
   ConsolidationResponse,
+  MemoryKind,
+  GameSession,
+  GameTurn,
+  GameStatus,
+  GameMode,
+  GameType,
 } from "@/types/schema";
 import dayjs from "dayjs";
 
@@ -217,7 +223,8 @@ function mergeUserInfoDelta(existing: UserInfo, patch: ConsolidationResponse["ne
 export function insertEvent(
   eventText: string,
   activeWeight: number,
-  priority: number = 5
+  priority: number = 5,
+  kind: MemoryKind = "daily"
 ): number {
   if (activeWeight < 1 || activeWeight > 100) {
     throw new Error("active_weight must be between 1 and 100");
@@ -228,14 +235,82 @@ export function insertEvent(
   const db = getDB();
   const now = dayjs().toISOString();
   const result = db.runSync(
-    "INSERT INTO memory_events (event_text, timestamp, active_weight, last_accessed, priority) VALUES (?, ?, ?, ?, ?)",
+    "INSERT INTO memory_events (event_text, timestamp, active_weight, last_accessed, priority, memory_kind) VALUES (?, ?, ?, ?, ?, ?)",
     eventText,
     now,
     activeWeight,
     now,
-    priority
+    priority,
+    kind
   );
   return Number(result.lastInsertRowId);
+}
+
+/**
+ * 写入一条共同经历（episode）记忆
+ *
+ * 同名事件只建一次，之后追加片段——「一起玩20问」是一个事件，
+ * 每次对局是它下面的一个片段，这与真人记忆一致（记得玩过很多次，每次是不同片段）。
+ */
+export function insertEpisode(
+  eventText: string,
+  summary: string,
+  emotion: string,
+  priority: number = 7
+): number {
+  const clamped = Math.min(9, Math.max(1, priority));
+  const existing = findEpisodeEvent(eventText);
+  if (existing) {
+    insertFragment(existing.id, summary, emotion, clamped);
+    // 刷新为最近一次，回到清晰状态
+    updateWeight(existing.id, 100);
+    return existing.id;
+  }
+  const eventId = insertEvent(eventText, 100, clamped, "episode");
+  insertFragment(eventId, summary, emotion, clamped);
+  return eventId;
+}
+
+/** 按文本查找 episode 事件 */
+function findEpisodeEvent(eventText: string): MemoryEvent | null {
+  const db = getDB();
+  return (
+    db.getFirstSync<MemoryEvent>(
+      `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE memory_kind = 'episode' AND event_text = ? ORDER BY id ASC LIMIT 1`,
+      eventText
+    ) ?? null
+  );
+}
+
+/**
+ * 合并同名 episode 事件（自愈历史数据）
+ * 用于早期版本每次对局新建事件留下的重复项，幂等。
+ */
+export function mergeEpisodeDuplicates(): void {
+  const db = getDB();
+  const dupes = db.getAllSync<{ event_text: string; ids: string }>(
+    `SELECT event_text, GROUP_CONCAT(id) AS ids
+     FROM memory_events WHERE memory_kind = 'episode'
+     GROUP BY event_text HAVING COUNT(*) > 1`
+  );
+  if (dupes.length === 0) return;
+
+  const now = dayjs().toISOString();
+  for (const row of dupes) {
+    const ids = row.ids.split(",").map((s) => parseInt(s, 10)).filter((n) => Number.isFinite(n));
+    if (ids.length < 2) continue;
+    const keep = Math.min(...ids);
+    for (const id of ids) {
+      if (id === keep) continue;
+      db.runSync('UPDATE memory_fragments SET "index" = ? WHERE "index" = ?', keep, id);
+      db.runSync("DELETE FROM memory_events WHERE id = ?", id);
+    }
+    db.runSync(
+      "UPDATE memory_events SET active_weight = 100, last_accessed = ? WHERE id = ?",
+      now,
+      keep
+    );
+  }
 }
 
 /** 根据 ID 获取单个事件 */
@@ -435,6 +510,128 @@ export function clearAllData(): void {
     "default_event_id",
     String(eventId)
   );
+}
+
+// ============================================================
+// 游戏会话 CRUD
+// ============================================================
+
+/** 创建新对局，返回会话 ID */
+export function createGameSession(params: {
+  gameType: GameType;
+  mode: GameMode;
+  secret: string;
+  secretSource: "memory" | "public";
+}): number {
+  const db = getDB();
+  const now = dayjs().toISOString();
+  const result = db.runSync(
+    `INSERT INTO game_sessions (game_type, mode, status, secret, secret_source, question_count, turns, started_at)
+     VALUES (?, ?, 'playing', ?, ?, 0, '[]', ?)`,
+    params.gameType,
+    params.mode,
+    params.secret,
+    params.secretSource,
+    now
+  );
+  return Number(result.lastInsertRowId);
+}
+
+/** 取当前进行中的对局 */
+export function getActiveGameSession(): GameSession | null {
+  const db = getDB();
+  return (
+    db.getFirstSync<GameSession>(
+      "SELECT * FROM game_sessions WHERE status = 'playing' ORDER BY id DESC LIMIT 1"
+    ) ?? null
+  );
+}
+
+/** 取最近一局（用于题材去重） */
+export function getRecentSecrets(limit: number = 20): string[] {
+  const db = getDB();
+  const rows = db.getAllSync<{ secret: string }>(
+    "SELECT secret FROM game_sessions WHERE secret != '' ORDER BY id DESC LIMIT ?",
+    limit
+  );
+  return rows.map((r) => r.secret).filter(Boolean);
+}
+
+/** 追加一回合流水；传入 countDelta 表示是否计一次提问 */
+export function appendGameTurn(
+  sessionId: number,
+  turn: GameTurn,
+  countDelta: number
+): GameSession | null {
+  const db = getDB();
+  const session = db.getFirstSync<GameSession>(
+    "SELECT * FROM game_sessions WHERE id = ?",
+    sessionId
+  );
+  if (!session) return null;
+
+  let turns: GameTurn[] = [];
+  try {
+    turns = JSON.parse(session.turns) as GameTurn[];
+  } catch {
+    turns = [];
+  }
+  turns.push(turn);
+
+  db.runSync(
+    "UPDATE game_sessions SET turns = ?, question_count = question_count + ? WHERE id = ?",
+    JSON.stringify(turns),
+    countDelta,
+    sessionId
+  );
+  return getGameSessionById(sessionId);
+}
+
+export function getGameSessionById(sessionId: number): GameSession | null {
+  const db = getDB();
+  return (
+    db.getFirstSync<GameSession>(
+      "SELECT * FROM game_sessions WHERE id = ?",
+      sessionId
+    ) ?? null
+  );
+}
+
+/** 结束对局 */
+export function finishGameSession(
+  sessionId: number,
+  status: GameStatus,
+  resultNote: string
+): void {
+  const db = getDB();
+  db.runSync(
+    "UPDATE game_sessions SET status = ?, ended_at = ?, result_note = ? WHERE id = ?",
+    status,
+    dayjs().toISOString(),
+    resultNote,
+    sessionId
+  );
+}
+
+/**
+ * 覆盖式更新流水（快艇这类状态整体存储的对局用）
+ */
+export function updateGameTurns(sessionId: number, turnsJson: string): void {
+  const db = getDB();
+  db.runSync(
+    "UPDATE game_sessions SET turns = ? WHERE id = ?",
+    turnsJson,
+    sessionId
+  );
+}
+
+/** 解析流水 JSON */
+export function parseGameTurns(session: GameSession): GameTurn[] {
+  try {
+    return JSON.parse(session.turns) as GameTurn[];
+  } catch {
+    return [];
+  }
 }
 
 // ============================================================

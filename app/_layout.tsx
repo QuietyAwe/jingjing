@@ -1,12 +1,16 @@
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { initSchema } from "@/db/schema";
+import { mergeEpisodeDuplicates } from "@/db/queries";
 import { useMetaStore } from "@/store/metaStore";
 import { loadConfigOverrides } from "@/prompt/config";
 import { useThemeStore, getThemeColors } from "@/theme/useTheme";
 
 // App 启动时初始化数据库表结构
 initSchema();
+
+// 自愈历史数据：同名 episode 事件合并（早期版本每次对局都新建事件）
+mergeEpisodeDuplicates();
 
 // 冷启动重置锁 — 对齐 PRD 3.2 节持久化死锁兜底
 useMetaStore.getState().load();

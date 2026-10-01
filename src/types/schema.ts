@@ -19,6 +19,13 @@ export interface MemoryFragment {
   priority: number;
 }
 
+/** 记忆类型：决定衰减速度，模拟真实记忆的分层 */
+export type MemoryKind =
+  /** 日常琐事：按小时衰减，几天内淡忘 */
+  | "daily"
+  /** 共同经历（游戏、深度对话等）：按天衰减且有下限，数月甚至数年后仍可被想起 */
+  | "episode";
+
 /** 记忆事件表 (memory_events) */
 export interface MemoryEvent {
   id: number;
@@ -29,6 +36,57 @@ export interface MemoryEvent {
   last_accessed: string;
   /** 重要性权重 1-9（1-3琐事，4-6中等，7-9重大） */
   priority: number;
+  /** 记忆类型，影响衰减模型（旧数据默认 daily） */
+  memory_kind: MemoryKind;
+}
+
+// --- 游戏会话 ---
+
+export type GameType = "twenty_questions" | "yacht" | "bomb";
+/** user_asks：AI 出题、用户提问；ai_asks：用户出题、AI 提问 */
+export type GameMode = "user_asks" | "ai_asks";
+export type GameStatus = "playing" | "won" | "lost" | "abandoned";
+/** 用户单句在游戏语境下的意图 */
+export type GameIntent =
+  | "question"
+  | "guess"
+  | "chitchat"
+  | "give_up"
+  | "rule_query";
+
+/** 一回合问答流水 */
+export interface GameTurn {
+  /** 用户原话 */
+  text: string;
+  intent: GameIntent;
+  /** 判定结果（仅 question） */
+  answer?: "yes" | "no" | "unknown";
+  /** 判定依据（仅 question） */
+  reason?: string;
+  /** 用户猜的内容（仅 guess） */
+  guess?: string;
+  /** 猜中与否（仅 guess） */
+  correct?: boolean;
+  at: string;
+}
+
+/** 游戏会话表 (game_sessions) */
+export interface GameSession {
+  id: number;
+  game_type: GameType;
+  mode: GameMode;
+  status: GameStatus;
+  /** 谜底（user_asks 模式下为 AI 所想，对 UI 可见但对用户需保密） */
+  secret: string;
+  /** 题材来源：memory=取自共同记忆，public=公共知名题材 */
+  secret_source: "memory" | "public";
+  /** 已用的提问数（chitchat 不计） */
+  question_count: number;
+  /** JSON 序列化的 GameTurn[] */
+  turns: string;
+  started_at: string;
+  ended_at: string | null;
+  result_note: string | null;
 }
 
 /** 系统元数据表 (system_metadata) */
@@ -181,4 +239,6 @@ export interface ChatMessage {
   timestamp: string;
   /** 思考内容（思考模式开启时） */
   thinking?: string;
+  /** 属于哪一局游戏（有值则普通巩固流跳过，由游戏自己的巩固写入记忆） */
+  game_id?: number;
 }

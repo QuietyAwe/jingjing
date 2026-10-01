@@ -3,7 +3,7 @@ import dayjs from "dayjs";
 
 /** memory_events 的标准列（不含历史遗留的 "index" 与已废弃的 is_archived） */
 export const EVENT_COLUMNS =
-  "id, event_text, timestamp, active_weight, last_accessed, priority";
+  "id, event_text, timestamp, active_weight, last_accessed, priority, memory_kind";
 
 /**
  * 初始化数据库表结构 — 对齐 PRD 4.1 节
@@ -30,7 +30,23 @@ export function initSchema(): void {
       timestamp TEXT NOT NULL,
       active_weight INTEGER NOT NULL CHECK(active_weight BETWEEN 1 AND 100),
       last_accessed TEXT NOT NULL,
-      priority INTEGER NOT NULL DEFAULT 5
+      priority INTEGER NOT NULL DEFAULT 5,
+      memory_kind TEXT NOT NULL DEFAULT 'daily'
+    );
+
+    -- 游戏会话表
+    CREATE TABLE IF NOT EXISTS game_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      game_type TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      status TEXT NOT NULL,
+      secret TEXT NOT NULL DEFAULT '',
+      secret_source TEXT NOT NULL DEFAULT 'public',
+      question_count INTEGER NOT NULL DEFAULT 0,
+      turns TEXT NOT NULL DEFAULT '[]',
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      result_note TEXT
     );
 
     -- 系统元数据表
@@ -87,6 +103,9 @@ function migrateLegacyColumns(db: ReturnType<typeof getDB>): void {
   try {
     db.execSync(`ALTER TABLE memory_events ADD COLUMN priority INTEGER NOT NULL DEFAULT 5`);
   } catch {}
+  try {
+    db.execSync(`ALTER TABLE memory_events ADD COLUMN memory_kind TEXT NOT NULL DEFAULT 'daily'`);
+  } catch {}
 
   const eventCols = getColumns(db, "memory_events");
 
@@ -125,7 +144,7 @@ function initDefaultEvent(db: ReturnType<typeof getDB>): void {
   // 创建默认事件
   const now = dayjs().toISOString();
   const result = db.runSync(
-    "INSERT INTO memory_events (event_text, timestamp, active_weight, last_accessed, priority) VALUES (?, ?, 50, ?, 1)",
+    "INSERT INTO memory_events (event_text, timestamp, active_weight, last_accessed, priority, memory_kind) VALUES (?, ?, 50, ?, 1, 'daily')",
     "日常闲聊",
     now,
     now
