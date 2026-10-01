@@ -12,9 +12,13 @@ import { useTheme } from "@/theme/useTheme";
 interface Props {
   onSend: (text: string) => void;
   disabled?: boolean;
+  /** 点击右侧 + 按钮（开始游戏等） */
+  onPlus?: () => void;
+  /** 游戏进行中时隐藏 +，避免重复开局 */
+  hidePlus?: boolean;
 }
 
-export function InputBar({ onSend, disabled }: Props) {
+export function InputBar({ onSend, disabled, onPlus, hidePlus }: Props) {
   const [text, setText] = useState("");
   const colors = useTheme();
 
@@ -40,6 +44,15 @@ export function InputBar({ onSend, disabled }: Props) {
         onSubmitEditing={handleSend}
         returnKeyType="send"
       />
+      {onPlus && !hidePlus ? (
+        <TouchableOpacity
+          style={[styles.plusButton, { borderColor: colors.border }]}
+          onPress={onPlus}
+          disabled={disabled}
+        >
+          <Text style={[styles.plusText, { color: colors.textMuted }]}>+</Text>
+        </TouchableOpacity>
+      ) : null}
       <TouchableOpacity
         style={[
           styles.button,
@@ -82,5 +95,18 @@ const styles = StyleSheet.create({
   buttonText: {
     fontSize: 15,
     fontWeight: "600",
+  },
+  plusButton: {
+    marginLeft: 10,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  plusText: {
+    fontSize: 22,
+    lineHeight: 24,
   },
 });

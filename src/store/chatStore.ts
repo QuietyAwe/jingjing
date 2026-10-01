@@ -118,7 +118,8 @@ export const useChatStore = create<ChatState>()(
         // 最后一条是 user（刚发送，AI 尚未回复）时，多取 1 条确保第一条是 user
         const lastRole = msgs[msgs.length - 1]?.role;
         const len = lastRole === "user" ? window + 1 : window;
-        return msgs.slice(-len);
+        // system 消息（游戏提示等）只用于 UI 展示，不进入模型上下文
+        return msgs.slice(-len).filter((m) => m.role !== "system");
       },
 
       /** 从 AsyncStorage 重新加载消息（导入备份后调用） */

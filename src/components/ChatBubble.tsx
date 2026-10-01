@@ -61,6 +61,15 @@ export default function ChatBubble({ message, onLongPress, shouldAnimate, onBubb
   const [pressed, setPressed] = useState(false);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
 
+  // 系统提示：居中小字，不参与交互
+  if (message.role === "system") {
+    return (
+      <View style={styles.systemRow}>
+        <Text style={[styles.systemText, { color: colors.textMuted }]}>{message.content}</Text>
+      </View>
+    );
+  }
+
   // AI 消息按段落分割成多个气泡（模拟真人聊天风格）
   const paragraphs = useMemo(
     () => isUser ? [message.content] : splitForChat(message.content),
@@ -184,6 +193,16 @@ const streamStyles = StyleSheet.create({
 });
 
 const styles = StyleSheet.create({
+  // 系统提示（游戏开始/结束等，不参与交互）
+  systemRow: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    alignItems: "center",
+  },
+  systemText: {
+    fontSize: 12,
+    textAlign: "center",
+  },
   row: {
     marginVertical: 2,
     paddingHorizontal: 16,
