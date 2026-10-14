@@ -8,6 +8,8 @@ export interface ColorPalette {
   sectionBg: string;
   editorBg: string;
   overlayBg: string;
+  /** 灰底小胶囊（如消息日期分隔条） */
+  chipBg: string;
 
   // 文字
   text: string;
@@ -44,6 +46,7 @@ export const lightColors: ColorPalette = {
   sectionBg: "#FFFFFF",
   editorBg: "#FFFFFF",
   overlayBg: "rgba(0,0,0,0.4)",
+  chipBg: "#EDEDED",
 
   text: "#37352F",
   textSecondary: "#555450",
@@ -74,6 +77,7 @@ export const darkColors: ColorPalette = {
   sectionBg: "#0A0A0A",
   editorBg: "#0A0A0A",
   overlayBg: "rgba(0,0,0,0.8)",
+  chipBg: "#242426",
 
   text: "#E8E7E4",
   textSecondary: "#B0AFAF",

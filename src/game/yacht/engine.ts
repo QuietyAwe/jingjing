@@ -36,7 +36,8 @@ export function createYachtState(): YachtState {
     round: 1,
     // 先后手随机
     currentPlayer: Math.random() < 0.5 ? "user" : "ai",
-    rolls: 0,
+    // 回合起始骰面即第 1 掷（每回合最多掷 3 次，双方对齐）
+    rolls: 1,
     dice: Array.from({ length: DICE_COUNT }, randomDie),
     kept: Array.from({ length: DICE_COUNT }, () => false),
     scores: { user: {}, ai: {} },
@@ -71,6 +72,9 @@ export function applyKeep(state: YachtState, keepIndices: number[]): YachtState 
 
 /** 填分：记录得分、切换玩家、推进轮次 */
 export function score(state: YachtState, slot: YachtSlot): YachtState {
+  // 已终局或该槽位已填：拒绝写入，防止覆盖旧分、轮次计数错乱
+  if (state.finished) return state;
+  if (state.scores[state.currentPlayer][slot] !== undefined) return state;
   const player = state.currentPlayer;
   const value = calculateScore(state.dice, slot);
   const scores = {
@@ -78,11 +82,12 @@ export function score(state: YachtState, slot: YachtSlot): YachtState {
     [player]: { ...state.scores[player], [slot]: value },
   };
 
-  // AI 先手的话判断轮次是否结束
+  // 双方各填一次才算打完一轮（兼容任一先手顺序），两边都填满 13 格才终局
   const nextPlayer: YachtPlayer = player === "user" ? "ai" : "user";
-  const roundAdvanced = player === "ai";
-  const round = roundAdvanced ? state.round + 1 : state.round;
-  const finished = round > TOTAL_ROUNDS;
+  const userFilled = Object.keys(scores.user).length;
+  const aiFilled = Object.keys(scores.ai).length;
+  const round = userFilled === aiFilled ? state.round + 1 : state.round;
+  const finished = userFilled >= TOTAL_ROUNDS && aiFilled >= TOTAL_ROUNDS;
 
   const winner = finished
     ? totalScore(scores.user) > totalScore(scores.ai)
@@ -97,7 +102,8 @@ export function score(state: YachtState, slot: YachtSlot): YachtState {
     scores,
     currentPlayer: nextPlayer,
     round: finished ? TOTAL_ROUNDS : round,
-    rolls: 0,
+    // 换手后的起始骰面即下一回合第 1 掷
+    rolls: 1,
     dice: Array.from({ length: DICE_COUNT }, randomDie),
     kept: Array.from({ length: DICE_COUNT }, () => false),
     finished,

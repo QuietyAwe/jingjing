@@ -8,13 +8,17 @@
 
 import { getClient } from "@/llm/client";
 import { getModelRouting } from "@/prompt/config";
+import { stripIdentityKeywords } from "@/memory/identity";
+import { ensureTimePlaceholder } from "@/utils/text";
 import { logDebug } from "@/store/chatStore";
 import type { ConsolidationResponse, GameSession, GameTurn } from "@/types/schema";
 import { stripFence } from "./judge";
 
 export interface GameMemoryExtraction {
+  gist: string;
   summary: string;
-  emotion: string;
+  /** 检索用关键词（含同义说法） */
+  keywords?: string[];
   priority: number;
   /** 闲聊中透露的新用户信息（增量，可为空对象） */
   new_info?: ConsolidationResponse["new_info"];
@@ -23,15 +27,16 @@ export interface GameMemoryExtraction {
 const EXTRACT_SYSTEM = `你要把一局「20问」游戏写成一条记忆。
 
 要求：
-1. summary：50 字以内，必须包含 [user] 和 [time] 占位符，概括这局游戏（谜底、第几次猜中或没猜中）以及过程中闲聊提到的值得一提的内容
-2. emotion：描述用户当时的情绪，以及你（AI）想怎么回应，用 [ai] 指代自己
-3. priority：这是共同经历，给 7-9（玩得尽兴/猜中给 8-9，平淡给 7）
-4. new_info：仅当闲聊中明确透露了新的用户信息时才填（如新增的喜好、人际关系、近况），否则留空对象 {}
+1. gist：20 字以内的一句话概要，必须包含 [user]，只留最核心的印象
+2. summary：80~120 字，必须包含 [user] 和 [time] 占位符。概括这局游戏（谜底、第几次猜中或没猜中）、过程中闲聊提到的值得一提的内容，以及 [user] 当时的情绪与反应；提到自己时用 [ai] 指代
+3. keywords: 2~6 个检索用关键词，覆盖关键实体（他人姓名、地名、事物、概念），同时写出同义说法；不要写用户或你自己的名字/称呼（每条记忆都有，检索无区分度）
+4. priority：这是共同经历，给 7-9（玩得尽兴/猜中给 8-9，平淡给 7）
+5. new_info：仅当闲聊中明确透露了新的用户信息时才填，否则留空对象 {}
    - 不要把游戏问答本身（"是/不是"）当成用户信息
-   - 结构与既有画像一致：basic_identity / preferences / social_graph / psycho_state / life_quests
+   - 结构与既有画像一致（属性/状态/事件 三桶）：basic_identity / social_graph / traits(永久属性) / states(有时效的近况，文本带[time]) / events({text, due_time}，有明确时间的约定)
 
 严格输出 JSON：
-{"summary":"...","emotion":"...","priority":7,"new_info":{}}`;
+{"gist":"...","summary":"...","keywords":["..."],"priority":7,"new_info":{}}`;
 
 /**
  * 从一局游戏里提取记忆内容
@@ -85,8 +90,12 @@ export async function extractGameMemory(
 
     const priority = Number(parsed.priority);
     return {
-      summary: parsed.summary,
-      emotion: parsed.emotion || "[user]玩得挺开心，[ai]想再和他来一局",
+      // 事发时间写死具体日期的记忆过几天就错了，兜底换回 [time] 占位符
+      gist: ensureTimePlaceholder(parsed.gist?.trim() || "") || parsed.summary.slice(0, 24),
+      summary: ensureTimePlaceholder(parsed.summary),
+      keywords: stripIdentityKeywords(
+        (parsed.keywords ?? []).map((k) => String(k).trim()).filter(Boolean)
+      ).slice(0, 8),
       priority: Number.isFinite(priority) ? Math.min(9, Math.max(7, priority)) : 7,
       new_info: parsed.new_info,
     };

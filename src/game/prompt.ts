@@ -12,15 +12,16 @@ import { MAX_QUESTIONS } from "./twentyQuestions";
 
 /**
  * 游戏区（稳定段）：只在一局内保持不变的内容
+ * @param ended 本回合已终局时传 true，标题不再写「进行中」，与结束提示保持一致
  */
-export function buildGameSection(session: GameSession): string {
+export function buildGameSection(session: GameSession, ended = false): string {
   const askedList = parseGameTurns(session)
     .filter((t) => t.intent === "question" || t.intent === "guess")
     .map((t) => `Q：${t.text} → ${t.answer ?? (t.correct ? "猜中" : "没猜中")}`)
     .join("\n");
 
   return [
-    `## 游戏：20问（进行中）`,
+    ended ? `## 游戏：20问（已结束）` : `## 游戏：20问（进行中）`,
     `你心里想好了一个谜底，玩家要通过只能回答是/否的问题在 ${MAX_QUESTIONS} 次提问内猜出它。`,
     ``,
     `【谜底（绝不能直接说出口）】${session.secret}`,
@@ -84,7 +85,7 @@ export function buildGameProgressHint(session: GameSession, latest?: GameTurn): 
 export function buildGameStartHint(session: GameSession): string {
   return [
     `玩家刚刚发起了这局 20问，你心里已经想好谜底：「${session.secret}」。`,
-    `系统已经把规则告诉玩家了，你不要重复规则。`,
+    `规则玩家已经看到了，你不要重复规则。`,
     `只说一两句简短的话：宣布你想好了，可以顺带提示一下类别范围（比如"是个人物""是个地方"）以降低开局难度，`,
     `然后邀请他问第一个问题。不要说出谜底本身。`,
   ].join("\n");

@@ -17,6 +17,7 @@ import {
   insertEpisode,
   getGameSessionById,
   mergeUserInfo,
+  updateGameResultNote,
 } from "@/db/queries";
 import { extractGameMemory } from "./memory";
 import { logDebug } from "@/store/chatStore";
@@ -38,7 +39,8 @@ export function isOutOfQuestions(session: GameSession): boolean {
  */
 export async function startGame(): Promise<GameSession | null> {
   const existing = getActiveGameSession();
-  if (existing) return existing;
+  // 有进行中的对局时不再另开：同类型直接续用，异类型拒绝，防止双对局互相覆盖
+  if (existing) return existing.game_type === GAME_TYPE ? existing : null;
 
   const subject = await pickSubject();
   if (!subject) return null;
@@ -77,7 +79,8 @@ export async function handlePlayerInput(
     answer: intent === "question" ? judged?.answer ?? "unknown" : undefined,
     reason: judged?.reason,
     guess: intent === "guess" ? judged?.guess ?? userText : undefined,
-    correct: intent === "guess" ? Boolean(judged?.correct) : undefined,
+    // 严格 === true：LLM 可能返回 "false" 等字符串，Boolean("false") 会把猜错判成猜中
+    correct: intent === "guess" ? judged?.correct === true : undefined,
     at: dayjs().toISOString(),
   };
 
@@ -98,7 +101,11 @@ export async function handlePlayerInput(
 
   if (endStatus) {
     finishGameSession(updated.id, endStatus, summarize(updated, endStatus));
-    await writeGameMemory(updated, endStatus);
+    // 记忆提取含后台 LLM 调用，放后台跑不阻塞前台揭晓；
+    // result_note 已由 finishGameSession 写入兜底小结，提取成功后会被更好的摘要覆盖
+    writeGameMemory(updated, endStatus).catch((err) =>
+      console.error("[20问] 游戏记忆写入异常:", err)
+    );
     updated = getGameSessionById(updated.id) ?? updated;
     ended = true;
   }
@@ -130,19 +137,22 @@ async function writeGameMemory(
 
   const extracted = await extractGameMemory(session, turns, status);
 
+  // 情绪与细节一并写进 summary，不再单存 emotion 字段
   const summary =
     extracted?.summary ??
     (status === "won"
-      ? `[user] [time]和我玩20问，谜底是「${session.secret}」，问到第 ${asked} 次就猜中了`
-      : `[user] [time]和我玩20问，谜底是「${session.secret}」，问了 ${asked} 次也没猜出来`);
-  const emotion =
-    extracted?.emotion ??
-    (status === "won"
-      ? "[user]玩得挺得意，[ai]想再和他来一局"
-      : "[user]有点不甘心，[ai]觉得过程很好玩");
+      ? `[user] [time]和我玩20问，谜底是「${session.secret}」，问到第 ${asked} 次就猜中了，挺得意，还想再来一局`
+      : `[user] [time]和我玩20问，谜底是「${session.secret}」，问了 ${asked} 次也没猜出来，有点不甘心`);
   const priority = extracted?.priority ?? (status === "won" ? 8 : 7);
+  const gist =
+    extracted?.gist ??
+    (status === "won"
+      ? `[user]猜中了「${session.secret}」`
+      : `[user]没猜出「${session.secret}」`);
 
-  insertEpisode(eventText, summary, emotion, priority);
+  insertEpisode(eventText, gist, summary, priority, (extracted?.keywords ?? []).join(","));
+  // 把摘要存到对局小结，供上下文合并使用（避免游戏问答污染上下文）
+  updateGameResultNote(session.id, summary);
 
   // 闲聊里透露的新信息增量合并进画像（游戏问答本身不算）
   if (extracted?.new_info && Object.keys(extracted.new_info).length > 0) {

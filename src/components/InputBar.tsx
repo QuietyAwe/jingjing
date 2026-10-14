@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState, type RefObject } from "react";
 import {
   View,
   TextInput,
@@ -16,23 +16,34 @@ interface Props {
   onPlus?: () => void;
   /** 游戏进行中时隐藏 +，避免重复开局 */
   hidePlus?: boolean;
+  /** 外部聚焦输入框用（AI 回复完成后自动弹起键盘） */
+  inputRef?: RefObject<TextInput | null>;
 }
 
-export function InputBar({ onSend, disabled, onPlus, hidePlus }: Props) {
+export function InputBar({ onSend, disabled, onPlus, hidePlus, inputRef }: Props) {
   const [text, setText] = useState("");
   const colors = useTheme();
 
+  // 同帧双击防抖：disabled 由父级 isLoading 异步生效，发送瞬间要自己挡住一次
+  const sendingRef = useRef(false);
+
   const handleSend = () => {
     const trimmed = text.trim();
-    if (!trimmed || disabled) return;
+    if (!trimmed || disabled || sendingRef.current) return;
+    sendingRef.current = true;
     onSend(trimmed);
     setText("");
     Keyboard.dismiss();
+    // 兜底释放：覆盖父级 loading 尚未置位的短窗口；之后由 disabled 接管
+    setTimeout(() => {
+      sendingRef.current = false;
+    }, 300);
   };
 
   return (
     <View style={[styles.container, { borderTopColor: colors.border, backgroundColor: colors.sectionBg }]}>
       <TextInput
+        ref={inputRef}
         style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text }]}
         value={text}
         onChangeText={setText}
@@ -40,7 +51,8 @@ export function InputBar({ onSend, disabled, onPlus, hidePlus }: Props) {
         placeholderTextColor={colors.placeholder}
         multiline
         maxLength={2000}
-        editable={!disabled}
+        // AI 回复期间也允许打字（可预输入），只禁发送按钮
+        editable
         onSubmitEditing={handleSend}
         returnKeyType="send"
       />

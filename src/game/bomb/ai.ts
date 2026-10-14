@@ -13,6 +13,16 @@ import { currentRange, alreadyGuessed } from "./engine";
  * AI 猜一个数
  * 策略：80% 二分（逼近炸弹），20% 在区间内随机（让它像人，不是算得太准）
  */
+/** 在 [low, high] 内挑一个没猜过的数（中点优先），全都猜过才回退中点 */
+function pickUntried(state: BombState, low: number, high: number): number {
+  const mid = Math.floor((low + high) / 2);
+  if (!alreadyGuessed(state, mid)) return mid;
+  for (let v = low; v <= high; v++) {
+    if (!alreadyGuessed(state, v)) return v;
+  }
+  return mid;
+}
+
 export function aiGuess(state: BombState): number {
   const { low, high } = currentRange(state);
   if (low >= high) return Math.max(1, low);
@@ -24,12 +34,8 @@ export function aiGuess(state: BombState): number {
       const r = Math.floor(Math.random() * (high - low + 1)) + low;
       if (!alreadyGuessed(state, r)) return r;
     }
-    return mid;
   }
 
-  // 中点如果已经猜过，稍微偏移
-  if (alreadyGuessed(state, mid)) {
-    return mid + 1 <= high ? mid + 1 : mid - 1;
-  }
-  return mid;
+  // 中点已经猜过就顺延找下一个没猜过的（旧偏移 mid±1 也可能撞上已猜过的数，白费一轮）
+  return pickUntried(state, low, high);
 }

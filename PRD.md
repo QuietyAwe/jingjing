@@ -338,3 +338,80 @@ $$W_{now} = \max\left(1, \left\lfloor W_{last} \cdot e^{-d \cdot t_{\Delta}} \ri
 
 2. 自动应用解耦配置中的 `cold_start_template`。对于未定义的字段，拼装层使用 `default_placeholders`（如“未知地方”）进行防崩替换。
 3. 前台模型接收到引导性的 System Prompt，并以一种引导性、探索性的人设态度进行安全的首轮回复。
+
+---
+
+## 6. 心情动态模块（v1.2 新增，2026-10-08）
+
+### 6.1 功能定义
+
+用户与 AI 双方均可发布心情动态（类似朋友圈），在彼此动态下评论互动；动态双向沉淀为记忆事件，AI 随时间保持「记得你的心情、有自己的生活」的陪伴感。
+
+### 6.2 产品规则
+
+**发帖**
+
+* 用户手写发帖：正文（纯文字、可含 emoji）+ 心情标签单选（开心 / 平静 / 低落 / 烦躁 / 期待）。v1 不含图片（多模态在 MVP 范围外）。
+* AI 发帖按「真人感三层」节奏，杜绝机械感：
+  1. **计划层**：发帖计划随每周作息表在同一次 LLM 请求中生成（输出 `{schedule, post_plan}`），每天 0~2 条、允许整天不发，主题（`theme_hint`）只给方向不给正文；
+  2. **执行层**：`useMomentsEngine` 挂根布局 60s 轮询，命中当前时段的待办后在时段内随机时刻触发，并有小概率「临场放弃」（`moment_post_skip_probability`）；
+  3. **放弃层**：错过时段不补发（计划置 `skipped`）；LLM 生成失败保留 `pending` 下轮重试，时段结束仍未成功即 `skipped`。
+
+**评论互通（无点赞，点赞列入后续迭代）**
+
+* 用户评论 AI 动态 → AI 约 3~15s 随机延迟回评。
+* AI 以概率 `moment_ai_comment_probability`（默认 0.6）主动评论用户动态，延迟约 30s~3min。
+* 文案口语化、真人感（短句、可调侃、少 emoji）；生成失败静默放弃，不重试不打扰。
+
+**记忆联动（双向进记忆，不等巩固流）**
+
+* 用户发帖即写记忆事件「[user]的心情动态」——AI 之后记得用户的心情（即使本次没有互动）。
+* 互动闭环（AI 评论/回评落库）后追加片段：用户动态 →「[user]的心情动态」，AI 动态下互动 →「和[user]在动态下的互动」。
+* AI 自身动态写入「我的心情动态」，供检索时自我引用。
+* 遵守记忆片段规范（gist ≤20 字 / summary 80~120 字含 [time] 与情绪 / keywords 含同义说法），`insertEpisode` 同名事件只建一次、之后挂片段。
+
+**导航（微信式两层）**
+
+* 底部三 Tab：「私藏（会话列表）/ 动态 / 设置」。
+* 一级会话列表：AI 会话条（头像、名字、最后消息预览、时间戳），结构预留多联系人扩展位；点入二级聊天页（`router.push("/chat")`）。
+* 二级聊天页：左上「返回」回一级页；原右上「设置」入口移除（设置走底部 Tab）；聊天/游戏/滚动定位逻辑保持不变。
+
+### 6.3 数据表（v1.2 新增）
+
+```sql
+CREATE TABLE IF NOT EXISTS moments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    author TEXT NOT NULL CHECK(author IN ('user','ai')),
+    content TEXT NOT NULL,
+    mood TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS moment_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    moment_id INTEGER NOT NULL,
+    author TEXT NOT NULL CHECK(author IN ('user','ai')),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS post_plan (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    week_start TEXT NOT NULL,
+    day_of_week INTEGER NOT NULL,   -- 0=周一 … 6=周日
+    time_slot INTEGER NOT NULL,     -- 0=早(6-9) … 4=晚(18-23)
+    theme_hint TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','posted','skipped')),
+    created_at TEXT NOT NULL
+);
+```
+
+### 6.4 配置项（defaultConfig.json）
+
+* prompts 新增：`moment_generation_prompt`（发帖文案）、`moment_comment_prompt`（评论/回评文案）；`schedule_generation_prompt` 扩展输出 `post_plan` 段。
+* thresholds 新增：`moment_ai_comment_probability`（0.6）、`moment_ai_reply_delay_ms`（8000，随机延迟基准）、`moment_post_skip_probability`（0.15）。
+
+### 6.5 验收标准 (AC)
+
+* **AC 1 发帖节奏**：本周作息表生成后 `post_plan` 同步落库；同一天可为 0 条；到时段后随机时刻发出（非整点）；手动把设备时间拨过时段后，pending 计划变 `skipped` 而不补发。
+* **AC 2 评论互通**：用户评论 AI 动态后数秒~十几秒出现 AI 回评（带「正在输入」动效）；用户动态收到 AI 评论为概率事件；关掉 API Key 时不产生任何 AI 评论。
+* **AC 3 记忆联动**：用户发帖后 `memory_events` 出现「[user]的心情动态」事件及片段（gist/summary/keywords 齐全）；AI 发帖后出现「我的心情动态」；互动闭环后片段包含评论内容。
+* **AC 4 导航**：会话列表点 AI 会话条进入聊天页，左上返回回列表；底部三 Tab 可达会话列表/动态/设置；聊天页无右上设置入口。

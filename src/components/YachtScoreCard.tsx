@@ -19,7 +19,7 @@ interface Props {
   /** 轮到用户填分时可点击 */
   selectable?: boolean;
   onSelect?: (slot: YachtSlot) => void;
-  /** AI 的名字（如「静静」），默认 "AI" */
+  /** 对方的名字（如「静静」），默认 "对方" */
   aiName?: string;
   /** 当前骰子在各项的预计得分（selectable 时展示，方便决定填哪项） */
   preview?: Partial<Record<YachtSlot, number>>;
@@ -36,7 +36,7 @@ export function YachtScoreCard({
   rows,
   selectable,
   onSelect,
-  aiName = "AI",
+  aiName = "对方",
   preview,
   upperUser,
   bonusUser,

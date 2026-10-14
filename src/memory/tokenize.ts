@@ -40,30 +40,94 @@ const STOP_WORDS = new Set([
   "上", "下", "里", "中", "内", "外", "前", "后", "左", "右",
   "大", "小", "多", "少", "好", "坏", "新", "旧",
   "起来", "出来", "过来", "下去", "上去",
+  // 占位符残片：记忆文本里存的是 [user] [ai] [time] [now] 原文，
+  // 输入里的这些英文词会把几乎所有记忆都误命中
+  "user", "ai", "time", "now",
 ]);
 
 /**
- * 纯 JS 中文分词
- * 策略：正则提取中文词片段（2-6 字）+ 英文单词，过滤停用词，去重后取前 N 个
+ * 2 字滑窗枚举（bigram）
+ *
+ * 不猜词边界，把所有相邻两字都列出来：任意 ≥2 字的真词必然包含至少一个 bigram，
+ * 所以不会漏召回；跨词边界的噪音 bigram 在库里匹配不到，自然淘汰。
  */
-export function tokenize(text: string, maxKeywords: number = 3): string[] {
-  // 1. 提取中文词片段（连续汉字 2-6 字）和英文单词
-  const cjkChunks = text.match(/[一-鿿]{2,6}/g) || [];
-  const engWords = text.match(/[a-zA-Z]{2,}/g) || [];
+export function bigrams(run: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i + 2 <= run.length; i++) out.push(run.slice(i, i + 2));
+  return out;
+}
 
-  const candidates = [...cjkChunks, ...engWords.map((w) => w.toLowerCase())];
+/**
+ * 中文检索词提取（纯 JS，无原生依赖）
+ *
+ * ## 为什么用 bigram（2 字滑窗）而不是「切词」
+ * 中文没有空格，靠规则切不出词。之前的实现是贪婪取 2~6 字连续片段
+ * （`/[一-鿿]{2,6}/g`），长句会被切成毫无语义的碎片：
+ *   「你还记得我妈妈吗」→「你还记得我妈」+「妈吗」
+ * 这种碎片去 LIKE 几乎永远命中不了，检索形同虚设。
+ *
+ * bigram 的思路是**不猜词边界，而是把 2 字组合全枚举出来**：
+ *   「你还记得我妈妈吗」→ 你还/还记/记得/得我/我妈/妈妈/妈吗
+ * 真实词「妈妈」必然以某个 bigram 的形式出现，所以不会漏召回；
+ * 跨词边界产生的噪音（你还/还记/得我）在库里几乎匹配不到，自然被淘汰。
+ * 这就是「宁可多召回、靠打分排序」，而不是「赌一个切对了」。
+ *
+ * @param maxKeywords 关键词上限（bigram 数量随句长增长，需要截断控制 SQL 的 OR 数量）
+ * @param isStop 额外停词谓词（如身份词过滤，见 identity.ts）
+ */
+export function tokenize(
+  text: string,
+  maxKeywords: number = 16,
+  isStop?: (gram: string) => boolean
+): string[] {
+  // 1. 拆出连续汉字片段与英文单词
+  const cjkRuns = text.match(/[一-鿿]+/g) || [];
+  const engWords = (text.match(/[a-zA-Z]{2,}/g) || []).map((w) => w.toLowerCase());
 
-  // 2. 过滤停用词 + 去重
-  const seen = new Set<string>();
-  const keywords: string[] = [];
+  const grams: string[] = [...engWords];
 
-  for (const word of candidates) {
-    if (STOP_WORDS.has(word)) continue;
-    if (seen.has(word)) continue;
-    seen.add(word);
-    keywords.push(word);
+  for (const run of cjkRuns) {
+    if (run.length < 2) continue; // 单字无区分度，丢弃
+    if (run.length <= 3) {
+      // 短片段（如「火锅」「吃什么」）整体就是一个词，整体比拆开更精确
+      grams.push(run);
+    }
+    // 2 字滑窗：覆盖所有可能的词内部片段
+    grams.push(...bigrams(run));
   }
 
-  // 3. 截断到 maxKeywords
-  return keywords.slice(0, maxKeywords);
+  // 2. 过滤停用词 + 去重（顺序保持：先出现的先保留，截断时不会丢句首信息）
+  const seen = new Set<string>();
+  const keywords: string[] = [];
+  for (const gram of grams) {
+    if (STOP_WORDS.has(gram) || isStop?.(gram)) continue;
+    if (seen.has(gram)) continue;
+    seen.add(gram);
+    keywords.push(gram);
+  }
+
+  // 超长输入：均匀抽样而不是只留句首，否则句子后半段提到的东西完全检索不到
+  if (keywords.length <= maxKeywords) return keywords;
+  const step = keywords.length / maxKeywords;
+  const picked: string[] = [];
+  for (let i = 0; i < maxKeywords; i++) {
+    picked.push(keywords[Math.floor(i * step)]);
+  }
+  return picked;
+}
+
+/**
+ * 关键词重合度打分：文本里命中了几个不同的关键词
+ *
+ * bigram 会带进噪音，所以不能「命中即算数」，要用命中的**数量**排序：
+ * 真正相关的记忆会同时命中多个相邻 bigram（如「妈妈」+「妈吗」），
+ * 误命中的通常只中一个。
+ */
+export function scoreOverlap(text: string, keywords: string[]): number {
+  if (!text) return 0;
+  let score = 0;
+  for (const k of keywords) {
+    if (text.includes(k)) score += 1;
+  }
+  return score;
 }

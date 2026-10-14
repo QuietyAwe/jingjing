@@ -11,7 +11,15 @@ import dayjs from "dayjs";
 import { getWeightDecay } from "@/prompt/config";
 import type { MemoryKind } from "@/types/schema";
 
-const DEFAULT_BASE_RATE = 0.06;
+/**
+ * 日常记忆衰减的基准系数（**按小时**）。
+ *
+ * 取 0.02/小时：priority 5 的片段约 1 天跌到 DETAIL_VISIBLE_WEIGHT（60）以下
+ * 开始只剩一句话、约 1.9 天跌到冷记忆线（40），
+ * 与真人「昨天聊过的事今天还记得清清楚楚」一致。此前取 0.06/小时，
+ * 15 小时就只剩一句话，记忆几乎立刻变淡，体感就是「什么都记不住」。
+ */
+const DEFAULT_BASE_RATE = 0.02;
 
 /** episode 记忆：每天衰减系数（约 0.06/天，一个月后权重落到下限附近） */
 const EPISODE_DECAY_PER_DAY = 0.06;
@@ -85,5 +93,18 @@ export function calculateWeights<
   }));
 }
 
-/** 细节可见阈值：权重低于此值时只记得"发生过"，细节已模糊 */
-export const DETAIL_VISIBLE_WEIGHT = 40;
+/**
+ * 细节可见阈值（详细/简略切换的默认值，可在设置「记忆流转阈值」覆盖）：
+ * 权重低于此值时只注入一句话 gist，细节已模糊。
+ *
+ * 取 60：priority 5 约 1 天跌到该线以下开始「只剩一句话」，
+ * 记忆区不再全是大段 summary；此前取 40 时约 1.9 天才降级，
+ * 几乎所有记忆都停留在完整详情档。
+ */
+export const DETAIL_VISIBLE_WEIGHT = 60;
+
+/**
+ * 冷记忆上限：权重低于此值才算「冷」，可被灵光一闪随机唤起。
+ * 与详细/简略阈值解耦（那边调高不会把温记忆也抽成灵光一闪），保持 40 的冷记忆池语义。
+ */
+export const COLD_MEMORY_MAX_WEIGHT = 40;

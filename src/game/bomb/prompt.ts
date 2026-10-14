@@ -7,11 +7,11 @@ import type { BombState, BombGuess } from "./engine";
 import { currentRange } from "./engine";
 
 /** 游戏区（稳定段） */
-export function buildBombSection(state: BombState): string {
+export function buildBombSection(state: BombState, ended = false): string {
   const { low, high } = currentRange(state);
   return [
-    `## 游戏：数字炸弹（进行中）`,
-    `系统随机想了一个 1~100 的数字，你和玩家轮流猜数来缩小范围。`,
+    ended ? `## 游戏：数字炸弹（已结束）` : `## 游戏：数字炸弹（进行中）`,
+    `1~100 之间已经埋了一个数字，你和玩家轮流猜数来缩小范围。`,
     `谁猜中这个数字（炸弹）谁就输。`,
     ``,
     `【当前已知范围】${low} ~ ${high}（炸弹就在里面）`,
@@ -43,7 +43,7 @@ export function buildBombActionHint(state: BombState, lastGuess: BombGuess): str
 /** 开场提示 */
 export function buildBombStartHint(firstPlayer: "user" | "ai"): string {
   return [
-    `你刚和玩家开始了一局数字炸弹（系统随机 1~100 的数字，猜中炸弹的输）。`,
+    `你刚和玩家开始了一局数字炸弹（1~100 之间埋了一个数字，猜中炸弹的输）。`,
     firstPlayer === "user"
       ? `由玩家先猜。用一两句话说说准备好了，可以给个小提示（比如"我猜数字偏小"），然后等玩家猜。`
       : `由你先猜。用一两句话说说准备好了，然后直接说出你猜的数字。`,
@@ -55,4 +55,13 @@ export function buildBombEndHint(state: BombState, aiWon: boolean): string {
   return aiWon
     ? `对局结束，你赢了（玩家踩到炸弹）。用你自己的语气宣布胜利，可以小小得意一下，然后接回日常聊天。`
     : `对局结束，你输了（你踩到炸弹）。用你自己的语气认输，可以有点懊恼或开玩笑，然后接回日常聊天。`;
+}
+
+/** 中途退出提示：收尾告别 */
+export function buildBombQuitHint(state: BombState): string {
+  const { low, high } = currentRange(state);
+  return [
+    `玩家中途退出了这局数字炸弹（当时范围 ${low} ~ ${high}，炸弹还没被踩到）。`,
+    `用你的语气说一两句收尾告别的话（比如下次再玩），不要揭晓炸弹数字，然后自然地接回日常聊天。`,
+  ].join("\n");
 }

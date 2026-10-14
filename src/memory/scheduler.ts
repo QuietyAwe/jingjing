@@ -10,11 +10,13 @@ import {
   getCurrentActivity,
   getEndedActivities,
   insertSchedule,
+  insertPostPlan,
   type ScheduleItem,
 } from "@/db/queries";
 import { generateSchedule } from "@/llm/background";
 import { getPrompts } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
+import type { PostPlanDraft } from "@/types/schema";
 
 /** 时段定义 */
 const TIME_SLOTS = [
@@ -60,15 +62,27 @@ export function getCurrentDayOfWeek(): number {
   return day === 0 ? 6 : day - 1;
 }
 
+/** 生成中的调用（in-flight 护栏）：聊天页与动态引擎可能并发触发，避免重复生成落库两份 */
+let generatingSchedule: Promise<void> | null = null;
+
 /**
- * 检查并生成本周时间表
- * 首次对话时调用，如本周无时间表则生成
+ * 检查并生成本周时间表（含发帖计划）
+ * 幂等：本周已有则跳过；并发调用合并为同一次生成
  */
-export async function checkAndGenerateSchedule(): Promise<void> {
+export function checkAndGenerateSchedule(): Promise<void> {
+  if (generatingSchedule) return generatingSchedule;
+  generatingSchedule = doCheckAndGenerateSchedule().finally(() => {
+    generatingSchedule = null;
+  });
+  return generatingSchedule;
+}
+
+async function doCheckAndGenerateSchedule(): Promise<void> {
   const weekStart = getWeekStart();
 
   if (hasScheduleForWeek(weekStart)) {
-    logDebug("时间表", `本周(${weekStart})已有时间表，跳过生成`);
+    // 静默跳过：动态引擎每 60s 轮询一次都会走到这里，打日志会无限刷屏；
+    // 只有真正触发生成/失败才记日志
     return;
   }
 
@@ -88,19 +102,24 @@ export async function checkAndGenerateSchedule(): Promise<void> {
     : [];
 
   try {
-    const schedule = await generateSchedule(system_prompt, lastWeekSchedule);
-    if (schedule && schedule.length > 0) {
-      insertSchedule(weekStart, schedule);
-      logDebug("时间表", `生成完成，共 ${schedule.length} 条`);
+    const result = await generateSchedule(system_prompt, lastWeekSchedule);
+    if (result && result.schedule.length > 0) {
+      insertSchedule(weekStart, result.schedule);
+      // 发帖计划随作息表一并落库；LLM 没给（旧提示词覆盖层）就用兜底计划
+      const plan = result.post_plan.length > 0 ? result.post_plan : getDefaultPostPlan();
+      insertPostPlan(weekStart, plan);
+      logDebug("时间表", `生成完成，作息 ${result.schedule.length} 条，发帖计划 ${plan.length} 条`);
     } else {
       logDebug("时间表", "LLM 返回空，使用默认时间表");
       insertSchedule(weekStart, getDefaultSchedule());
+      insertPostPlan(weekStart, getDefaultPostPlan());
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logDebug("时间表生成失败", errMsg);
-    // 失败时使用默认时间表
+    // 失败时使用默认时间表 + 默认发帖计划
     insertSchedule(weekStart, getDefaultSchedule());
+    insertPostPlan(weekStart, getDefaultPostPlan());
   }
 }
 
@@ -192,4 +211,27 @@ function getDefaultSchedule(): ScheduleItem[] {
     }
   }
   return items;
+}
+
+/** 兜底发帖主题（LLM 生成失败时随机取用） */
+const DEFAULT_POST_THEMES = [
+  "犯困碎碎念",
+  "吐槽一下日常",
+  "吃到好吃的了",
+  "天气不错",
+  "随便感慨两句",
+  "今天发生的小事",
+  "想摆烂的一天",
+];
+
+/** 兜底发帖计划：随机 2~4 天、随机白天/晚间时段，每次生成都不同（模仿真人节奏） */
+function getDefaultPostPlan(): PostPlanDraft[] {
+  const days = [0, 1, 2, 3, 4, 5, 6].sort(() => Math.random() - 0.5).slice(0, 2 + Math.floor(Math.random() * 3));
+  const themes = [...DEFAULT_POST_THEMES].sort(() => Math.random() - 0.5);
+  return days.map((day, i) => ({
+    day_of_week: day,
+    // 1=上午 2=午 3=下午 4=晚（早间与深夜不发）
+    time_slot: 1 + Math.floor(Math.random() * 4),
+    theme_hint: themes[i % themes.length],
+  }));
 }

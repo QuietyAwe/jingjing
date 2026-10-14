@@ -6,44 +6,10 @@
 import { View, Text, StyleSheet, Pressable } from "react-native";
 import type { ChatMessage } from "@/types/schema";
 import { useTheme, useCurrentCustomColors } from "@/theme/useTheme";
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useSettingsStore } from "@/store/settingsStore";
 
-/** 模拟真人聊天风格：按换行分段 + 按句末标点分割 + 去句号 + 长句逗号再拆 */
-function splitForChat(text: string): string[] {
-  const LONG_THRESHOLD = 20;
-  const result: string[] = [];
-
-  // 1. 先按换行切（连续空行合并，避免产生空白气泡）
-  const lines = text
-    .split(/\r?\n+/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  for (const line of lines) {
-    // 2. 行内按句末标点（。？！～…）再分割，保留问号感叹号等
-    for (const seg of line.split(/(?<=[。？！～…])\s*/)) {
-      let s = seg.trim();
-      if (!s) continue;
-
-      // 3. 去末尾句号（只删句号，保留？！～…）
-      s = s.replace(/。+$/, "").trim();
-      if (!s) continue;
-
-      // 4. 超过阈值且有逗号 → 按逗号再拆
-      if (s.length > LONG_THRESHOLD && s.includes("，")) {
-        for (const part of s.split("，")) {
-          const p = part.trim();
-          if (p) result.push(p);
-        }
-      } else {
-        result.push(s);
-      }
-    }
-  }
-
-  return result;
-}
+import { splitForChat, revealStepMs } from "@/utils/text";
 
 interface Props {
   message: ChatMessage;
@@ -53,6 +19,13 @@ interface Props {
   /** 每显示一条新气泡时回调（用于自动滚底） */
   onBubbleAppear?: () => void;
 }
+
+/**
+ * 已播过「逐条出现」动画的消息 id：同一条消息只播一次。
+ * 列表窗口滚动、游戏卡折叠/展开都会让气泡重挂载，重播会看到
+ * 「闪现全文 → 突然消失 → 再逐条出现」的跳变，所以重挂载直接显示全文。
+ */
+const revealedMsgIds = new Set<string>();
 
 export default function ChatBubble({ message, onLongPress, shouldAnimate, onBubbleAppear }: Props) {
   const isUser = message.role === "user";
@@ -76,17 +49,25 @@ export default function ChatBubble({ message, onLongPress, shouldAnimate, onBubb
     [isUser, message.content]
   );
 
-  // 非流式模式：按字数逐条延迟显示，首次出现时锁定决策
-  const animateRef = useRef(!isUser && shouldAnimate && paragraphs.length > 1);
-  const shouldDelay = animateRef.current;
+  // 非流式模式：按字数逐条延迟显示。首帧即锁定决策——
+  // 要播就从第 1 段开始生长，绝不先渲染全文再回退（那是用户看到的「闪现」）
+  const shouldDelay =
+    !isUser && !!shouldAnimate && paragraphs.length > 1 && !revealedMsgIds.has(message.id);
   const [visibleCount, setVisibleCount] = useState(shouldDelay ? 1 : paragraphs.length);
   useEffect(() => {
-    if (!shouldDelay) return;
+    // 挂载即标记已播过：之后重挂载（窗口滚动/卡片展开）直接显示全文，不重播
+    revealedMsgIds.add(message.id);
+    if (!shouldDelay) {
+      // 非动画模式也要通知列表（否则 AI 发消息后不会滚到底）
+      onBubbleAppear?.();
+      return;
+    }
     const timers: ReturnType<typeof setTimeout>[] = [];
     let acc = 0;
     for (let i = 1; i < paragraphs.length; i++) {
-      // 按字数计算延迟：每字 50ms，范围 500ms ~ 3000ms
-      const delay = Math.min(3000, Math.max(500, paragraphs[i - 1].length * 50));
+      // 按字数计算延迟：每字 50ms，范围 500ms ~ 3000ms（与 revealStepMs 同口径，
+      // 自动聚焦要等这段动画播完，两处节奏不能漂移）
+      const delay = revealStepMs(paragraphs[i - 1]);
       acc += delay;
       timers.push(setTimeout(() => {
         setVisibleCount(i + 1);
@@ -94,6 +75,7 @@ export default function ChatBubble({ message, onLongPress, shouldAnimate, onBubb
       }, acc));
     }
     return () => timers.forEach(clearTimeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [message.id]);
 
   const bubbleContent = (
@@ -156,15 +138,6 @@ export default function ChatBubble({ message, onLongPress, shouldAnimate, onBubb
               {para.trim()}
             </Text>
           </View>
-          {/* 时间戳只显示在最后一个气泡 */}
-          {index === visibleCount - 1 && (
-            <Text style={[styles.timestamp, { color: colors.textMuted }]}>
-              {new Date(message.timestamp).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              })}
-            </Text>
-          )}
         </Pressable>
       ))}
     </>
@@ -222,11 +195,6 @@ const styles = StyleSheet.create({
   text: {
     fontSize: 15,
     lineHeight: 21,
-  },
-  timestamp: {
-    fontSize: 11,
-    marginTop: 4,
-    marginHorizontal: 4,
   },
   // 思考过程样式
   thinkingRow: {

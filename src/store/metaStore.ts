@@ -20,17 +20,23 @@ interface MetaState {
   setLocked: (locked: boolean) => void;
 }
 
+// 进程内只强制清锁一次（防上次崩溃死锁）。load 会在聊天页每次挂载时执行，
+// 无条件清锁会把进行中的巩固的锁误释放，导致并发巩固互相覆盖游标与计数
+let startupLockCleared = false;
+
 export const useMetaStore = create<MetaState>((set, get) => ({
   turnCounter: 0,
   isLocked: false,
 
   load: () => {
     const counter = getMeta("turn_counter");
-    // 启动时强制清理锁，防止上次崩溃导致死锁
-    setMeta("is_locked", "false");
+    if (!startupLockCleared) {
+      startupLockCleared = true;
+      setMeta("is_locked", "false");
+    }
     set({
       turnCounter: counter ? parseInt(counter, 10) : 0,
-      isLocked: false,
+      isLocked: getMeta("is_locked") === "true",
     });
   },
 

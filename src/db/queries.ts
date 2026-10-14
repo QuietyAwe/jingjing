@@ -1,8 +1,11 @@
 import { getDB } from "./connection";
 import { EVENT_COLUMNS } from "./schema";
+import { bigrams } from "@/memory/tokenize";
 import type {
   SystemMetadata,
   UserInfo,
+  StateItem,
+  EventItem,
   MemoryEvent,
   MemoryFragment,
   ConsolidationResponse,
@@ -12,6 +15,12 @@ import type {
   GameStatus,
   GameMode,
   GameType,
+  Moment,
+  MomentAuthor,
+  MomentComment,
+  PostPlanItem,
+  PostPlanDraft,
+  PostPlanStatus,
 } from "@/types/schema";
 import dayjs from "dayjs";
 
@@ -49,8 +58,36 @@ export function getDefaultEventId(): number | null {
 }
 
 // ============================================================
-// P2-2: user_info 读写与增量 Merge
+// P2-2: user_info 读写与增量 Merge（属性/状态/事件 三桶）
 // ============================================================
+
+/** 状态注入有效期：超过这么多天未再被提及即停止注入（数据保留） */
+export const STATE_EXPIRE_DAYS = 7;
+
+/** 事件关心里：过期后注入关心提示的窗口（小时），满窗自动归档 */
+export const EVENT_CARE_WINDOW_HOURS = 48;
+
+/** 空画像骨架 */
+function emptyProfile(): UserInfo {
+  return {
+    basic_identity: { nickname: "", gender: "", birthday: "", occupation: "", location: "" },
+    social_graph: [],
+    traits: [],
+    states: [],
+    events: [],
+  };
+}
+
+/** 仍注入状态区的活跃状态（超 STATE_EXPIRE_DAYS 未提及的不注入，数据保留） */
+export function activeStates(userInfo: UserInfo, now?: dayjs.Dayjs): StateItem[] {
+  const cutoff = (now ?? dayjs()).subtract(STATE_EXPIRE_DAYS, "day");
+  return userInfo.states.filter((s) => dayjs(s.created_at).isAfter(cutoff));
+}
+
+/** 未归档事件（upcoming + caring） */
+export function activeEvents(userInfo: UserInfo): EventItem[] {
+  return userInfo.events.filter((e) => e.status !== "archived");
+}
 
 /**
  * 读取用户信息
@@ -76,25 +113,75 @@ export function getUserInfo(): UserInfo | null {
     }
   };
 
-  return {
-    basic_identity: safeParse("basic_identity", {
-      nickname: "",
-      gender: "",
-      birthday: "",
-      occupation: "",
-      location: "",
-    }),
-    preferences: safeParse("preferences", { likes: [], dislikes: [] }),
-    social_graph: safeParse("social_graph", []),
-    psycho_state: safeParse("psycho_state", {
-      personality_traits: [],
-      current_stressors: [],
+  // 旧版（五块）画像一次性迁移成三桶：preferences/psycho_state/life_quests 拆进 traits/states/events。
+  // 存量状态打迁移时刻的时间戳（按 7 天规则自然过期）；
+  // 存量带 due_time 的任务进事件桶，已过期的直接进 48h 关心流程。
+  const legacyKeys = ["preferences", "psycho_state", "life_quests"].filter((k) => map.has(k));
+  if (legacyKeys.length > 0 && !map.has("traits")) {
+    const traits: string[] = [];
+    const states: StateItem[] = [];
+    const events: EventItem[] = [];
+    const nowIso = dayjs().toISOString();
+
+    const prefs = safeParse("preferences", { likes: [] as string[], dislikes: [] as string[] });
+    for (const x of prefs.likes) if (x?.trim()) traits.push(`喜欢${x.trim()}`);
+    for (const x of prefs.dislikes) if (x?.trim()) traits.push(`讨厌${x.trim()}`);
+
+    const ps = safeParse("psycho_state", {
+      personality_traits: [] as string[],
+      current_stressors: [] as string[],
       comm_preference: "",
-    }),
-    life_quests: safeParse("life_quests", {
-      long_term_goals: [],
-      ongoing_tasks: [],
-    }),
+    });
+    for (const x of ps.personality_traits) if (x?.trim()) traits.push(x.trim());
+    if (ps.comm_preference?.trim()) traits.push(`沟通偏好：${ps.comm_preference.trim()}`);
+    for (const x of ps.current_stressors) if (x?.trim()) states.push({ text: x.trim(), created_at: nowIso });
+
+    const lq = safeParse("life_quests", {
+      long_term_goals: [] as string[],
+      ongoing_tasks: [] as Array<{ task_name: string; due_time?: string }>,
+    });
+    for (const x of lq.long_term_goals) if (x?.trim()) traits.push(`长期目标：${x.trim()}`);
+    for (const t of lq.ongoing_tasks) {
+      const text = t.task_name?.trim();
+      if (!text) continue;
+      if (t.due_time) {
+        const due = dayjs(t.due_time);
+        const valid = due.isValid();
+        const past = !valid || !due.isAfter(dayjs());
+        events.push({
+          text,
+          due_time: valid ? due.toISOString() : nowIso,
+          created_at: nowIso,
+          status: past ? "caring" : "upcoming",
+          ...(past ? { expired_at: nowIso } : {}),
+        });
+      } else {
+        states.push({ text, created_at: nowIso });
+      }
+    }
+
+    for (const [k, v] of [["traits", traits], ["states", states], ["events", events]] as const) {
+      const value = JSON.stringify(v);
+      db.runSync(
+        'INSERT INTO user_info (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        k,
+        value
+      );
+      map.set(k, value);
+    }
+  }
+  // 旧键残留直接删（恢复旧备份会再带进来，上面的迁移分支会重新处理）
+  for (const k of legacyKeys) {
+    db.runSync("DELETE FROM user_info WHERE key = ?", k);
+    map.delete(k);
+  }
+
+  return {
+    basic_identity: safeParse("basic_identity", emptyProfile().basic_identity),
+    social_graph: safeParse("social_graph", []),
+    traits: safeParse("traits", []),
+    states: safeParse("states", []),
+    events: safeParse("events", []),
   };
 }
 
@@ -111,13 +198,9 @@ export function updateBasicIdentityNickname(nickname: string): void {
     );
   } else {
     // 首次：创建完整 user_info 骨架
-    setUserInfo({
-      basic_identity: { nickname, gender: "", birthday: "", occupation: "", location: "" },
-      preferences: { likes: [], dislikes: [] },
-      social_graph: [],
-      psycho_state: { personality_traits: [], current_stressors: [], comm_preference: "" },
-      life_quests: { long_term_goals: [], ongoing_tasks: [] },
-    });
+    const profile = emptyProfile();
+    profile.basic_identity.nickname = nickname;
+    setUserInfo(profile);
   }
 }
 
@@ -126,10 +209,10 @@ export function setUserInfo(info: UserInfo): void {
   const db = getDB();
   const entries: [string, string][] = [
     ["basic_identity", JSON.stringify(info.basic_identity)],
-    ["preferences", JSON.stringify(info.preferences)],
     ["social_graph", JSON.stringify(info.social_graph)],
-    ["psycho_state", JSON.stringify(info.psycho_state)],
-    ["life_quests", JSON.stringify(info.life_quests)],
+    ["traits", JSON.stringify(info.traits)],
+    ["states", JSON.stringify(info.states)],
+    ["events", JSON.stringify(info.events)],
   ];
   for (const [key, value] of entries) {
     db.runSync(
@@ -144,72 +227,101 @@ export function setUserInfo(info: UserInfo): void {
  * 增量 Merge 用户信息 — 对齐 PRD 2.2 节第 4 步
  * 对数组字段执行值去重追加，非数组字段直接覆盖
  * patch 可以是 Partial，缺失字段保持原值
+ * @param asOf 本次信息实际发生的时刻（补巩固沿用历史对话时间）；缺省为当前时间
  */
-export function mergeUserInfo(patch: ConsolidationResponse["new_info"]): void {
-  const existing = getUserInfo();
-  if (!existing) {
-    // 首次：用 patch 填充，缺失字段用空值
-    const empty: UserInfo = {
-      basic_identity: { nickname: "", gender: "", birthday: "", occupation: "", location: "" },
-      preferences: { likes: [], dislikes: [] },
-      social_graph: [],
-      psycho_state: { personality_traits: [], current_stressors: [], comm_preference: "" },
-      life_quests: { long_term_goals: [], ongoing_tasks: [] },
-    };
-    setUserInfo(mergeUserInfoDelta(empty, patch));
-    return;
-  }
-  setUserInfo(mergeUserInfoDelta(existing, patch));
+export function mergeUserInfo(patch: ConsolidationResponse["new_info"], asOf?: string): void {
+  const nowIso = asOf ?? dayjs().toISOString();
+  const existing = getUserInfo() ?? emptyProfile();
+  setUserInfo(mergeUserInfoDelta(existing, patch, nowIso));
 }
 
 /** 合并 delta 到 existing（纯函数，不写 DB） */
-function mergeUserInfoDelta(existing: UserInfo, patch: ConsolidationResponse["new_info"]): UserInfo {
-  const mergeArray = (a: string[], b?: string[]) => {
-    if (!b || b.length === 0) return a;
+function mergeUserInfoDelta(
+  existing: UserInfo,
+  patch: ConsolidationResponse["new_info"],
+  nowIso: string
+): UserInfo {
+  /**
+   * 数组合并 + 去重 + 上限。
+   *
+   * 上限是必要的：这些数组只增不减（合并是「Set 追加」），
+   * 不设上限会无限膨胀。截取策略是「保留最新追加的 N 条」。
+   *
+   * 注意：Set.add / Map.set 对已存在的键**不改变插入位置**，
+   * 直接写会让「刚被重提刷新」的旧条目留在队首、被 slice(-cap) 当最旧裁掉。
+   * 所以重提前一律先 delete 再写，把条目挪到队尾。
+   */
+  const mergeArray = (a: string[], b: string[] | undefined, cap: number) => {
     const set = new Set(a);
-    for (const item of b) set.add(item);
-    return Array.from(set);
+    for (const item of b ?? []) {
+      const t = item?.trim();
+      if (!t) continue;
+      set.delete(t);
+      set.add(t);
+    }
+    const merged = Array.from(set);
+    return merged.length > cap ? merged.slice(-cap) : merged;
   };
 
   const mergeSocialGraph = (a: UserInfo["social_graph"], b?: UserInfo["social_graph"]) => {
     if (!b || b.length === 0) return a;
     const map = new Map(a.map((e) => [e.name, e]));
-    for (const entry of b) map.set(entry.name, entry);
-    return Array.from(map.values());
+    for (const entry of b) {
+      map.delete(entry.name);
+      map.set(entry.name, entry);
+    }
+    return Array.from(map.values()).slice(-30);
   };
 
-  const mergeTasks = (
-    a: UserInfo["life_quests"]["ongoing_tasks"],
-    b?: UserInfo["life_quests"]["ongoing_tasks"],
-  ) => {
+  // 状态：同一文本再次提及 = 刷新时效（回到活跃区）
+  const mergeStates = (a: StateItem[], b: string[] | undefined): StateItem[] => {
     if (!b || b.length === 0) return a;
-    const map = new Map(a.map((t) => [t.task_name, t]));
-    for (const t of b) {
-      if (t.status === "cancelled" || t.status === "completed") {
-        map.delete(t.task_name);
-      } else {
-        map.set(t.task_name, t);
-      }
+    const map = new Map(a.map((s) => [s.text, s]));
+    for (const raw of b) {
+      const text = raw?.trim();
+      if (!text) continue;
+      map.delete(text);
+      map.set(text, { text, created_at: nowIso });
     }
-    return Array.from(map.values());
+    return Array.from(map.values()).slice(-20);
+  };
+
+  // 事件：同一文本更新到期时间；已归档的事件重新提起 → 复活为 upcoming
+  const mergeEvents = (
+    a: EventItem[],
+    b?: Array<{ text: string; due_time: string }>
+  ): EventItem[] => {
+    if (!b || b.length === 0) return a;
+    const map = new Map(a.map((e) => [e.text, e]));
+    for (const raw of b) {
+      const text = raw?.text?.trim();
+      const due = dayjs(raw?.due_time);
+      if (!text || !due.isValid()) continue;
+      const prev = map.get(text);
+      const stillOverdue = !due.isAfter(nowIso);
+      map.delete(text);
+      map.set(text, {
+        text,
+        due_time: due.toISOString(),
+        created_at: prev?.created_at ?? nowIso,
+        // 改期到未来 = 事情还没发生：必须回到 upcoming——残留 caring 会让
+        // buildEventNudges 对未到期事件持续注入「已经过去了」的错误关心；
+        // 仍在过去才保留 caring 与 expired_at（48h 关心窗口从 expired_at 起算）
+        status: prev?.status === "caring" && stillOverdue ? "caring" : "upcoming",
+        ...(prev?.status === "caring" && stillOverdue && prev.expired_at
+          ? { expired_at: prev.expired_at }
+          : {}),
+      });
+    }
+    return Array.from(map.values()).slice(-20);
   };
 
   const merged: UserInfo = {
     basic_identity: { ...existing.basic_identity, ...patch.basic_identity },
-    preferences: {
-      likes: mergeArray(existing.preferences.likes, patch.preferences?.likes),
-      dislikes: mergeArray(existing.preferences.dislikes, patch.preferences?.dislikes),
-    },
     social_graph: mergeSocialGraph(existing.social_graph, patch.social_graph),
-    psycho_state: {
-      personality_traits: mergeArray(existing.psycho_state.personality_traits, patch.psycho_state?.personality_traits),
-      current_stressors: mergeArray(existing.psycho_state.current_stressors, patch.psycho_state?.current_stressors),
-      comm_preference: patch.psycho_state?.comm_preference || existing.psycho_state.comm_preference,
-    },
-    life_quests: {
-      long_term_goals: mergeArray(existing.life_quests.long_term_goals, patch.life_quests?.long_term_goals),
-      ongoing_tasks: mergeTasks(existing.life_quests.ongoing_tasks, patch.life_quests?.ongoing_tasks),
-    },
+    traits: mergeArray(existing.traits, patch.traits, 30),
+    states: mergeStates(existing.states, patch.states),
+    events: mergeEvents(existing.events, patch.events),
   };
 
   return merged;
@@ -219,12 +331,17 @@ function mergeUserInfoDelta(existing: UserInfo, patch: ConsolidationResponse["ne
 // P2-3: memory_events CRUD
 // ============================================================
 
-/** 插入记忆事件，返回自增 ID */
+/**
+ * 插入记忆事件，返回自增 ID
+ * @param timestamp 事件实际发生时间（补巩固沿用历史对话时间）；缺省为当前时间。
+ *                 只影响 [time] 渲染与排序，last_accessed 仍写创建时刻——衰减从「记下时」起算，行为不变
+ */
 export function insertEvent(
   eventText: string,
   activeWeight: number,
   priority: number = 5,
-  kind: MemoryKind = "daily"
+  kind: MemoryKind = "daily",
+  timestamp?: string
 ): number {
   if (activeWeight < 1 || activeWeight > 100) {
     throw new Error("active_weight must be between 1 and 100");
@@ -234,10 +351,11 @@ export function insertEvent(
   }
   const db = getDB();
   const now = dayjs().toISOString();
+  const ts = timestamp ?? now;
   const result = db.runSync(
     "INSERT INTO memory_events (event_text, timestamp, active_weight, last_accessed, priority, memory_kind) VALUES (?, ?, ?, ?, ?, ?)",
     eventText,
-    now,
+    ts,
     activeWeight,
     now,
     priority,
@@ -254,20 +372,21 @@ export function insertEvent(
  */
 export function insertEpisode(
   eventText: string,
+  gist: string,
   summary: string,
-  emotion: string,
-  priority: number = 7
+  priority: number = 7,
+  keywords: string = ""
 ): number {
   const clamped = Math.min(9, Math.max(1, priority));
   const existing = findEpisodeEvent(eventText);
   if (existing) {
-    insertFragment(existing.id, summary, emotion, clamped);
+    insertFragment(existing.id, gist, summary, clamped, keywords);
     // 刷新为最近一次，回到清晰状态
     updateWeight(existing.id, 100);
     return existing.id;
   }
   const eventId = insertEvent(eventText, 100, clamped, "episode");
-  insertFragment(eventId, summary, emotion, clamped);
+  insertFragment(eventId, gist, summary, clamped, keywords);
   return eventId;
 }
 
@@ -280,6 +399,50 @@ function findEpisodeEvent(eventText: string): MemoryEvent | null {
       eventText
     ) ?? null
   );
+}
+
+/**
+ * 找语义重复的已有事件（B10）
+ *
+ * 靠 bigram 重合度判断「一起玩游戏」和「玩游戏」是不是同一件事，
+ * 避免 LLM 每次换个说法就新建一个事件、事件表持续膨胀
+ * （而事件表一膨胀，检索候选和记忆区 Top N 的质量都会下降）。
+ *
+ * @param text 候选事件标题
+ * @param excludeId 排除的事件 ID（合并时排除自己）
+ * @returns 最相似的已有事件；相似度不足返回 null
+ */
+export function findSimilarEvent(text: string, excludeId?: number): MemoryEvent | null {
+  const norm = (s: string) => s.replace(/[\s\p{P}\p{S}]/gu, "");
+  const target = norm(text);
+  if (target.length < 2) return null;
+
+  const db = getDB();
+  const rows = db.getAllSync<MemoryEvent>(
+    `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE memory_kind != 'daily'`
+  );
+  const targetBigrams = new Set(bigrams(target));
+
+  let best: { event: MemoryEvent; score: number } | null = null;
+  for (const row of rows) {
+    if (excludeId !== undefined && row.id === excludeId) continue;
+    const candidate = norm(row.event_text);
+    if (candidate.length < 2) continue;
+
+    // 互相包含（短的那个是长的的子串）= 同一件事，直接判最高分
+    let score: number;
+    if (target.includes(candidate) || candidate.includes(target)) {
+      score = 1;
+    } else {
+      const setB = new Set(bigrams(candidate));
+      let common = 0;
+      for (const g of targetBigrams) if (setB.has(g)) common++;
+      // 用较小集合的覆盖率做归一化，短标题之间也能量化相似度
+      score = common / Math.min(targetBigrams.size, setB.size);
+    }
+    if (score >= 0.5 && (!best || score > best.score)) best = { event: row, score };
+  }
+  return best?.event ?? null;
 }
 
 /**
@@ -343,27 +506,6 @@ export function getAllActive(): MemoryEvent[] {
   );
 }
 
-/**
- * 随机抽取 1 条低权重冷记忆（灵光一闪） — 对齐 PRD 2.1 节第 5 步
- * @param excludeIds 排除的事件 ID（避免与 Top 10 重复）
- */
-export function getEpiphanyRandom(excludeIds: number[] = []): MemoryEvent | null {
-  const db = getDB();
-  const defaultEventId = getDefaultEventId();
-  // 默认事件也加入排除列表
-  const allExcludeIds = defaultEventId ? [...excludeIds, defaultEventId] : excludeIds;
-  if (allExcludeIds.length === 0) {
-    return db.getFirstSync<MemoryEvent>(
-      `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE active_weight < 40 ORDER BY RANDOM() LIMIT 1`
-    );
-  }
-  const placeholders = allExcludeIds.map(() => "?").join(",");
-  return db.getFirstSync<MemoryEvent>(
-    `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE active_weight < 40 AND id NOT IN (${placeholders}) ORDER BY RANDOM() LIMIT 1`,
-    ...allExcludeIds
-  );
-}
-
 /** 更新事件权重与访问时间 */
 export function updateWeight(eventId: number, weight: number): void {
   const db = getDB();
@@ -418,24 +560,30 @@ export function deleteEvent(eventId: number): void {
 // P2-4: memory_fragments CRUD
 // ============================================================
 
-/** 插入记忆片段 */
+/**
+ * 插入记忆片段
+ * @param timestamp 片段实际发生时间（补巩固沿用历史对话时间）；缺省为当前时间
+ */
 export function insertFragment(
   eventIndex: number,
+  gist: string,
   summary: string,
-  emotion: string,
-  priority: number = 5
+  priority: number = 5,
+  keywords: string = "",
+  timestamp?: string
 ): number {
   if (priority < 1 || priority > 9) {
     throw new Error("priority must be between 1 and 9");
   }
   const db = getDB();
-  const now = dayjs().toISOString();
+  const ts = timestamp ?? dayjs().toISOString();
   const result = db.runSync(
-    'INSERT INTO memory_fragments ("index", timestamp, summary, emotion, priority) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO memory_fragments ("index", timestamp, gist, summary, keywords, priority) VALUES (?, ?, ?, ?, ?, ?)',
     eventIndex,
-    now,
+    ts,
+    gist,
     summary,
-    emotion,
+    keywords,
     priority
   );
   return Number(result.lastInsertRowId);
@@ -445,7 +593,7 @@ export function insertFragment(
 export function getFragmentsByEventId(eventId: number): MemoryFragment[] {
   const db = getDB();
   return db.getAllSync<MemoryFragment>(
-    'SELECT id, "index", timestamp, summary, emotion, priority FROM memory_fragments WHERE "index" = ? ORDER BY timestamp ASC',
+    'SELECT id, "index", timestamp, gist, summary, keywords, priority FROM memory_fragments WHERE "index" = ? ORDER BY timestamp ASC',
     eventId
   );
 }
@@ -461,7 +609,7 @@ export function getFragmentsByEventIds(eventIds: number[]): Map<number, MemoryFr
   const db = getDB();
   const placeholders = eventIds.map(() => "?").join(",");
   const rows = db.getAllSync<MemoryFragment>(
-    `SELECT id, "index", timestamp, summary, emotion, priority FROM memory_fragments WHERE "index" IN (${placeholders}) ORDER BY timestamp ASC`,
+    `SELECT id, "index", timestamp, gist, summary, keywords, priority FROM memory_fragments WHERE "index" IN (${placeholders}) ORDER BY timestamp ASC`,
     ...eventIds
   );
   for (const row of rows) {
@@ -478,23 +626,18 @@ export function deleteFragment(fragmentId: number): void {
   db.runSync("DELETE FROM memory_fragments WHERE id = ?", fragmentId);
 }
 
-/** 获取最新一条记忆片段的 emotion（用于状态区注入） */
-export function getLatestEmotion(): string | null {
-  const db = getDB();
-  const row = db.getFirstSync<MemoryFragment>(
-    "SELECT emotion FROM memory_fragments ORDER BY timestamp DESC LIMIT 1"
-  );
-  return row?.emotion ?? null;
-}
-
-/** 清除所有数据（四张表），用于设置页重置 */
+/** 清除所有数据（含心情动态三表），用于设置页重置 */
 export function clearAllData(): void {
   const db = getDB();
   db.runSync("DELETE FROM memory_fragments");
   db.runSync("DELETE FROM memory_events");
+  db.runSync("DELETE FROM game_sessions");
   db.runSync("DELETE FROM user_info");
   db.runSync("DELETE FROM system_metadata");
   db.runSync("DELETE FROM behavior_schedule");
+  db.runSync("DELETE FROM moment_comments");
+  db.runSync("DELETE FROM moments");
+  db.runSync("DELETE FROM post_plan");
 
   // 重新初始化默认事件"日常闲聊"
   const now = dayjs().toISOString();
@@ -547,11 +690,11 @@ export function getActiveGameSession(): GameSession | null {
   );
 }
 
-/** 取最近一局（用于题材去重） */
+/** 取最近一局（用于题材去重）。只取 20问的谜底——数字炸弹的 secret 是炸弹数字，混进来会污染去重列表 */
 export function getRecentSecrets(limit: number = 20): string[] {
   const db = getDB();
   const rows = db.getAllSync<{ secret: string }>(
-    "SELECT secret FROM game_sessions WHERE secret != '' ORDER BY id DESC LIMIT ?",
+    "SELECT secret FROM game_sessions WHERE game_type = 'twenty_questions' AND secret != '' ORDER BY id DESC LIMIT ?",
     limit
   );
   return rows.map((r) => r.secret).filter(Boolean);
@@ -570,9 +713,13 @@ export function appendGameTurn(
   );
   if (!session) return null;
 
-  let turns: GameTurn[] = [];
+  let turns: GameTurn[];
   try {
-    turns = JSON.parse(session.turns) as GameTurn[];
+    const parsed = JSON.parse(session.turns);
+    // turns 只应是 20问的 GameTurn[] 流水；其他游戏类型在此存的是状态对象，
+    // 误路由进来时必须拒绝写入，否则 push 抛 TypeError 或覆盖掉对局状态
+    if (!Array.isArray(parsed)) return null;
+    turns = parsed as GameTurn[];
   } catch {
     turns = [];
   }
@@ -597,6 +744,25 @@ export function getGameSessionById(sessionId: number): GameSession | null {
   );
 }
 
+/**
+ * 更新对局小结（游戏结束后用于上下文摘要，
+ * 复用记忆提取的内容，避免游戏对话污染上下文）
+ */
+export function updateGameResultNote(sessionId: number, note: string): void {
+  const db = getDB();
+  db.runSync(
+    "UPDATE game_sessions SET result_note = ? WHERE id = ?",
+    note,
+    sessionId
+  );
+}
+
+/** 整局删除：移除对局记录（配合删除该局全部聊天消息） */
+export function deleteGameSession(sessionId: number): void {
+  const db = getDB();
+  db.runSync("DELETE FROM game_sessions WHERE id = ?", sessionId);
+}
+
 /** 结束对局 */
 export function finishGameSession(
   sessionId: number,
@@ -609,6 +775,21 @@ export function finishGameSession(
     status,
     dayjs().toISOString(),
     resultNote,
+    sessionId
+  );
+}
+
+/**
+ * 标记对局已结束（只更新状态，不动 result_note）。
+ * 用于「写好 result_note 后才补记状态」的场景（如快艇 writeYachtMemory 已写 note）。
+ * 状态一旦不是 playing，getHistory 就会把该局合并成一条游戏回顾摘要。
+ */
+export function markGameEnded(sessionId: number, status: GameStatus): void {
+  const db = getDB();
+  db.runSync(
+    "UPDATE game_sessions SET status = ?, ended_at = ? WHERE id = ?",
+    status,
+    dayjs().toISOString(),
     sessionId
   );
 }
@@ -707,4 +888,197 @@ export function insertSchedule(weekStart: string, items: ScheduleItem[]): void {
       now
     );
   }
+}
+
+// ============================================================
+// 心情动态 CRUD（moments / moment_comments / post_plan）
+// ============================================================
+
+/** 发布一条动态，返回自增 ID */
+export function insertMoment(author: MomentAuthor, content: string, mood: string): number {
+  const db = getDB();
+  const result = db.runSync(
+    "INSERT INTO moments (author, content, mood, created_at) VALUES (?, ?, ?, ?)",
+    author,
+    content,
+    mood,
+    dayjs().toISOString()
+  );
+  return Number(result.lastInsertRowId);
+}
+
+/**
+ * 分页获取动态（时间倒序）
+ * @param limit 每页条数
+ * @param beforeId 只取该 ID 之前的更早动态（游标分页，不含自身）
+ */
+export function getMoments(limit: number, beforeId?: number): Moment[] {
+  const db = getDB();
+  if (beforeId !== undefined) {
+    return db.getAllSync<Moment>(
+      "SELECT id, author, content, mood, created_at FROM moments WHERE id < ? ORDER BY id DESC LIMIT ?",
+      beforeId,
+      limit
+    );
+  }
+  return db.getAllSync<Moment>(
+    "SELECT id, author, content, mood, created_at FROM moments ORDER BY id DESC LIMIT ?",
+    limit
+  );
+}
+
+/** 按 ID 获取单条动态 */
+export function getMomentById(momentId: number): Moment | null {
+  const db = getDB();
+  return (
+    db.getFirstSync<Moment>(
+      "SELECT id, author, content, mood, created_at FROM moments WHERE id = ?",
+      momentId
+    ) ?? null
+  );
+}
+
+/** 追加一条评论，返回自增 ID */
+export function insertMomentComment(
+  momentId: number,
+  author: MomentAuthor,
+  content: string
+): number {
+  const db = getDB();
+  const result = db.runSync(
+    "INSERT INTO moment_comments (moment_id, author, content, created_at) VALUES (?, ?, ?, ?)",
+    momentId,
+    author,
+    content,
+    dayjs().toISOString()
+  );
+  return Number(result.lastInsertRowId);
+}
+
+/** 按动态 ID 查询评论（时间升序） */
+export function getMomentComments(momentId: number): MomentComment[] {
+  const db = getDB();
+  return db.getAllSync<MomentComment>(
+    "SELECT id, moment_id, author, content, created_at FROM moment_comments WHERE moment_id = ? ORDER BY id ASC",
+    momentId
+  );
+}
+
+/** 批量查询多条动态的评论（一次 IN 查询，避免 N+1） */
+export function getCommentsByMomentIds(momentIds: number[]): Map<number, MomentComment[]> {
+  const result = new Map<number, MomentComment[]>();
+  if (momentIds.length === 0) return result;
+
+  const db = getDB();
+  const placeholders = momentIds.map(() => "?").join(",");
+  const rows = db.getAllSync<MomentComment>(
+    `SELECT id, moment_id, author, content, created_at FROM moment_comments WHERE moment_id IN (${placeholders}) ORDER BY id ASC`,
+    ...momentIds
+  );
+  for (const row of rows) {
+    const list = result.get(row.moment_id);
+    if (list) list.push(row);
+    else result.set(row.moment_id, [row]);
+  }
+  return result;
+}
+
+/** 获取某条动态的最新一条 AI 评论（用于判断互动是否已闭环） */
+export function getLatestAiComment(momentId: number): MomentComment | null {
+  const db = getDB();
+  return (
+    db.getFirstSync<MomentComment>(
+      "SELECT id, moment_id, author, content, created_at FROM moment_comments WHERE moment_id = ? AND author = 'ai' ORDER BY id DESC LIMIT 1",
+      momentId
+    ) ?? null
+  );
+}
+
+/** 删除动态及其评论 */
+export function deleteMoment(momentId: number): void {
+  const db = getDB();
+  db.runSync("DELETE FROM moment_comments WHERE moment_id = ?", momentId);
+  db.runSync("DELETE FROM moments WHERE id = ?", momentId);
+}
+
+// --- 周发帖计划 ---
+
+/** 删除指定周的发帖计划 */
+export function deletePostPlanForWeek(weekStart: string): void {
+  const db = getDB();
+  db.runSync("DELETE FROM post_plan WHERE week_start = ?", weekStart);
+}
+
+/** 检查本周是否已有发帖计划 */
+export function hasPostPlanForWeek(weekStart: string): boolean {
+  const db = getDB();
+  const row = db.getFirstSync<{ cnt: number }>(
+    "SELECT COUNT(*) as cnt FROM post_plan WHERE week_start = ?",
+    weekStart
+  );
+  return (row?.cnt ?? 0) > 0;
+}
+
+/** 批量插入发帖计划（status 一律 pending） */
+export function insertPostPlan(weekStart: string, items: PostPlanDraft[]): void {
+  const db = getDB();
+  const now = dayjs().toISOString();
+  for (const item of items) {
+    db.runSync(
+      "INSERT INTO post_plan (week_start, day_of_week, time_slot, theme_hint, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+      weekStart,
+      item.day_of_week,
+      item.time_slot,
+      item.theme_hint,
+      now
+    );
+  }
+}
+
+/** 获取指定周的全部发帖计划 */
+export function getPostPlanForWeek(weekStart: string): PostPlanItem[] {
+  const db = getDB();
+  return db.getAllSync<PostPlanItem>(
+    "SELECT id, week_start, day_of_week, time_slot, theme_hint, status FROM post_plan WHERE week_start = ? ORDER BY day_of_week, time_slot",
+    weekStart
+  );
+}
+
+/** 获取某天某时段待执行的发帖计划 */
+export function getPendingPlanForSlot(
+  weekStart: string,
+  dayOfWeek: number,
+  timeSlot: number
+): PostPlanItem[] {
+  const db = getDB();
+  return db.getAllSync<PostPlanItem>(
+    "SELECT id, week_start, day_of_week, time_slot, theme_hint, status FROM post_plan WHERE week_start = ? AND day_of_week = ? AND time_slot = ? AND status = 'pending'",
+    weekStart,
+    dayOfWeek,
+    timeSlot
+  );
+}
+
+/**
+ * 跳过已错过时段的待执行计划（不补发，模仿真人）。
+ * 只处理「今天更早的时段」与「本周更早的日子」，返回被跳过的行数。
+ */
+export function skipMissedPostPlans(weekStart: string, dayOfWeek: number, timeSlot: number): number {
+  const db = getDB();
+  const result = db.runSync(
+    `UPDATE post_plan SET status = 'skipped'
+     WHERE week_start = ? AND status = 'pending'
+       AND (day_of_week < ? OR (day_of_week = ? AND time_slot < ?))`,
+    weekStart,
+    dayOfWeek,
+    dayOfWeek,
+    timeSlot
+  );
+  return result.changes;
+}
+
+/** 更新发帖计划状态（pending|posted|skipped） */
+export function updatePostPlanStatus(planId: number, status: PostPlanStatus): void {
+  const db = getDB();
+  db.runSync("UPDATE post_plan SET status = ? WHERE id = ?", status, planId);
 }

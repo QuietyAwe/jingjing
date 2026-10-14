@@ -40,11 +40,8 @@ export async function pickSubject(): Promise<PickedSubject | null> {
     if (userInfo.social_graph.length > 0) {
       memoryLines.push(`认识的人：${userInfo.social_graph.map((s) => s.name).join("、")}`);
     }
-    if (userInfo.preferences.likes.length > 0) {
-      memoryLines.push(`喜欢：${userInfo.preferences.likes.join("、")}`);
-    }
-    if (userInfo.life_quests.long_term_goals.length > 0) {
-      memoryLines.push(`愿望：${userInfo.life_quests.long_term_goals.join("、")}`);
+    if (userInfo.traits.length > 0) {
+      memoryLines.push(`属性：${userInfo.traits.join("、")}`);
     }
   }
   const eventTexts = events.map((e) => e.event_text).filter(Boolean);

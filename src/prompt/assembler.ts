@@ -6,7 +6,7 @@
 // 超限时按权重从低到高剔除记忆区事件
 // ============================================================
 
-import { getFragmentsByEventIds, getUserInfo } from "@/db/queries";
+import { getFragmentsByEventIds, getUserInfo, activeStates, activeEvents } from "@/db/queries";
 import type {
   UserInfo,
   MemoryEvent,
@@ -14,9 +14,10 @@ import type {
   ChatMessage,
   DefaultPlaceholders,
 } from "@/types/schema";
-import { getPrompts, getPlaceholders } from "./config";
-import { DETAIL_VISIBLE_WEIGHT } from "@/memory/decay";
+import { getPrompts, getPlaceholders, getThresholds } from "./config";
+import { DETAIL_VISIBLE_WEIGHT, calculateWeight } from "@/memory/decay";
 import { useSettingsStore } from "@/store/settingsStore";
+import { WEEKDAYS, formatNow, formatTodayLine } from "@/utils/holidays";
 import dayjs from "dayjs";
 
 const DEFAULT_TOKEN_BUDGET = 8000; // token 近似值（见 estimateTokens）
@@ -70,11 +71,12 @@ export interface AssembledPrompt {
 export function assemblePrompt(
   userInfo: UserInfo | null,
   topEvents: (MemoryEvent & { live_weight: number })[],
-  epiphany: MemoryEvent | null,
+  epiphany: (MemoryEvent & { gist: string }) | null,
   chatHistory: ChatMessage[],
   currentStatus?: string,
   hitFragments?: Map<number, MemoryFragment[]>,
-  tokenBudget: number = DEFAULT_TOKEN_BUDGET
+  tokenBudget: number = DEFAULT_TOKEN_BUDGET,
+  cuedFragmentIds?: Set<number>
 ): AssembledPrompt {
   const prompts = getPrompts();
   const nickname = getUserNickname(userInfo);
@@ -85,7 +87,7 @@ export function assemblePrompt(
 
   // 2. 易变部分：状态区 + 记忆区（分开返回，便于缓存优化排列）
   const stateText = buildStateSection(userInfo, currentStatus, now);
-  const memoryText = buildMemorySection(userInfo, topEvents, epiphany, hitFragments);
+  const memoryBlocks = buildMemorySection(userInfo, topEvents, epiphany, hitFragments, cuedFragmentIds);
 
   // 3. 转换历史为 API 格式（最后两条用户消息带时间戳，让 AI 感知时间流动）
   const messages = chatHistory.map((m) => {
@@ -93,24 +95,26 @@ export function assemblePrompt(
     const isUser = m.role === "user";
     const lastTwoUsers = chatHistory.filter((x) => x.role === "user").slice(-2);
     const showTime = isUser && m.timestamp && lastTwoUsers.some((x) => x.id === m.id);
-    const timePrefix = showTime
-      ? `[${dayjs(m.timestamp).format("M/D HH:mm")}] `
+    // 带周几（「10/7 周三 15:30」）：让 AI 知道这条消息发生在工作日还是周末
+    const stamp = showTime ? dayjs(m.timestamp) : null;
+    const timePrefix = stamp
+      ? `[${stamp.format("M/D")} ${WEEKDAYS[stamp.day()]} ${stamp.format("HH:mm")}] `
       : "";
     return {
-      role: m.role as "user" | "assistant",
+      // getHistory 会把已结束对局合并成一条 role:"system" 的 [游戏回顾] 摘要；
+      // 若原样发出去，system 消息会卡在历史中段，部分 OpenAI 兼容端点会拒整请求。
+      // 这里转成 user 注记（内容已带 [游戏回顾] 前缀），角色合法且语义清晰。
+      role: (m.role === "system" ? "user" : m.role) as "user" | "assistant",
       content: timePrefix + m.content,
     };
   });
 
-  // 4. 截断：预算覆盖全部四段，先按权重削记忆，再丢最旧历史
+  // 4. 截断：预算覆盖全部四段，先降级/削记忆块，再丢最旧历史
   const fitted = truncateToFit({
     system: systemPromptText,
     state: stateText,
-    memory: memoryText,
+    memoryBlocks,
     messages,
-    topEvents,
-    epiphany,
-    userInfo,
     budget: tokenBudget,
   });
 
@@ -139,15 +143,17 @@ function buildStateSection(
 
   // 如果模板存在且包含 {{}} 占位符，使用模板渲染
   if (template && template.includes("{{")) {
-    let result = renderStateTemplate(template, userInfo, currentStatus);
+    let result = renderStateTemplate(template, userInfo, currentStatus, currentTime);
     // 替换通用变量 [user]（状态区里指代用户，例如「被[user]叫醒了」）
     if (result.includes("[user]")) {
       result = result.replace(/\[user\]/g, getUserNickname(userInfo));
     }
-    // 替换通用变量 [now]
+    // 替换通用变量 [now] / [today]
     if (result.includes("[now]")) {
-      const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-      result = result.replace(/\[now\]/g, `${currentTime.format("M/D")}(${WEEKDAYS[currentTime.day()]}) ${currentTime.format("HH:mm")}`);
+      result = result.replace(/\[now\]/g, formatNow(currentTime));
+    }
+    if (result.includes("[today]")) {
+      result = result.replace(/\[today\]/g, formatTodayLine(currentTime));
     }
     return result;
   }
@@ -160,33 +166,32 @@ function buildStateSection(
   const parts: string[] = [];
   parts.push(`基础信息：${bi.nickname || p.nickname}，${bi.gender ? bi.gender + "，" : ""}${bi.birthday ? "出生于" + bi.birthday + "，" : ""}${bi.occupation || p.occupation}，所在地${bi.location || p.location}`);
 
-  if (userInfo.preferences.likes.length > 0) {
-    parts.push(`喜欢：${userInfo.preferences.likes.join("、")}`);
-  }
-  if (userInfo.preferences.dislikes.length > 0) {
-    parts.push(`讨厌：${userInfo.preferences.dislikes.join("、")}`);
-  }
   if (userInfo.social_graph.length > 0) {
     const graph = userInfo.social_graph
       .map((s) => `${s.name}(${s.role})：${s.attitude}`)
       .join("；");
     parts.push(`社交图谱：${graph}`);
   }
-  if (userInfo.psycho_state.current_stressors.length > 0) {
-    parts.push(`近期压力：${userInfo.psycho_state.current_stressors.join("、")}`);
+  if (userInfo.traits.length > 0) {
+    parts.push(`属性：${userInfo.traits.join("、")}`);
   }
-  if (userInfo.psycho_state.comm_preference) {
-    parts.push(`沟通偏好：${userInfo.psycho_state.comm_preference || p.comm_preference}`);
+  const states = activeStates(userInfo, currentTime);
+  if (states.length > 0) {
+    const lines = states
+      .slice()
+      .sort((a, b) => dayjs(b.created_at).valueOf() - dayjs(a.created_at).valueOf())
+      .map((s) => `- ${replacePlaceholders(s.text, s.created_at, userInfo, currentTime)}`);
+    parts.push(`近况：\n${lines.join("\n")}`);
   }
-  if (userInfo.life_quests.long_term_goals.length > 0) {
-    parts.push(`愿望：${userInfo.life_quests.long_term_goals.join("、")}`);
-  }
-  const validTasks = userInfo.life_quests.ongoing_tasks.filter(t => t.task_name && t.status);
-  if (validTasks.length > 0) {
-    const tasks = validTasks
-      .map((t) => `${t.task_name}(${t.status})`)
-      .join("；");
-    parts.push(`待办：${tasks}`);
+  const events = activeEvents(userInfo)
+    .slice()
+    .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf());
+  if (events.length > 0) {
+    const lines = events.map(
+      (e) =>
+        `- ${replacePlaceholders(e.text, e.created_at, userInfo, currentTime)}（${dayjs(e.due_time).format("M/D HH:mm")}）`
+    );
+    parts.push(`安排：\n${lines.join("\n")}`);
   }
   if (currentStatus) {
     parts.push(`当前状态：${currentStatus}`);
@@ -205,14 +210,11 @@ const EMPTY = "__EMPTY__";
 function renderStateTemplate(
   template: string,
   userInfo: UserInfo,
-  currentStatus: string | undefined
+  currentStatus: string | undefined,
+  now: dayjs.Dayjs
 ): string {
   const bi = userInfo.basic_identity;
   const p = getPlaceholders();
-  const ps = userInfo.psycho_state;
-  const pref = userInfo.preferences;
-  const sg = userInfo.social_graph;
-  const lq = userInfo.life_quests;
 
   let result = template
     .replace(/\{\{nickname\}\}/g, bi.nickname || p.nickname)
@@ -220,28 +222,42 @@ function renderStateTemplate(
     .replace(/\{\{birthday\}\}/g, bi.birthday || "")
     .replace(/\{\{occupation\}\}/g, bi.occupation || p.occupation)
     .replace(/\{\{location\}\}/g, bi.location || p.location)
-    .replace(/\{\{likes\}\}/g, pref.likes.length > 0 ? pref.likes.join("、") : EMPTY)
-    .replace(/\{\{dislikes\}\}/g, pref.dislikes.length > 0 ? pref.dislikes.join("、") : EMPTY)
-    .replace(/\{\{comm_preference\}\}/g, ps.comm_preference || EMPTY)
-    .replace(/\{\{personality_traits\}\}/g, ps.personality_traits.length > 0 ? ps.personality_traits.join("、") : EMPTY)
-    .replace(/\{\{current_stressors\}\}/g, ps.current_stressors.length > 0 ? ps.current_stressors.join("、") : EMPTY)
-    .replace(/\{\{long_term_goals\}\}/g, lq.long_term_goals.length > 0 ? lq.long_term_goals.join("、") : EMPTY)
+    .replace(/\{\{traits\}\}/g, userInfo.traits.length > 0 ? userInfo.traits.join("、") : EMPTY)
     .replace(/\{\{current_status\}\}/g, currentStatus || EMPTY);
 
   // 社交图谱
   const graphText =
-    sg.length > 0
-      ? sg.map((s) => `${s.name}(${s.role})：${s.attitude}`).join("\n* ")
+    userInfo.social_graph.length > 0
+      ? userInfo.social_graph.map((s) => `${s.name}(${s.role})：${s.attitude}`).join("\n* ")
       : EMPTY;
   result = result.replace(/\{\{social_graph\}\}/g, graphText);
 
-  // 待办任务（过滤掉无效任务）
-  const validTasks = lq.ongoing_tasks.filter(t => t.task_name && t.status);
-  const tasksText =
-    validTasks.length > 0
-      ? validTasks.map((t) => `${t.task_name}(${t.status})`).join("；")
+  // 近况（状态）：文本自带 [time] 占位符，按各自时间渲染成相对时间（「7天前开始发烧」）
+  const states = activeStates(userInfo, now);
+  const statesText =
+    states.length > 0
+      ? states
+          .slice()
+          .sort((a, b) => dayjs(b.created_at).valueOf() - dayjs(a.created_at).valueOf())
+          .map((s) => replacePlaceholders(s.text, s.created_at, userInfo, now))
+          .join("\n")
       : EMPTY;
-  result = result.replace(/\{\{ongoing_tasks\}\}/g, tasksText);
+  result = result.replace(/\{\{states\}\}/g, statesText);
+
+  // 安排（事件）：带到期时间，按到期先后排
+  const events = activeEvents(userInfo)
+    .slice()
+    .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf());
+  const eventsText =
+    events.length > 0
+      ? events
+          .map(
+            (e) =>
+              `${replacePlaceholders(e.text, e.created_at, userInfo, now)}（${dayjs(e.due_time).format("M/D HH:mm")}）`
+          )
+          .join("\n")
+      : EMPTY;
+  result = result.replace(/\{\{events\}\}/g, eventsText);
 
   // 移除包含空值占位符的行，以及空的段落标题
   return cleanEmptyLines(result);
@@ -288,16 +304,72 @@ function cleanEmptyLines(text: string): string {
 }
 
 /**
+ * 记忆区的一个「块」：事件标题 + 它下面的片段行
+ *
+ * 每个块都备着 detail / brief 两个版本，Token 超预算时先降级再删除
+ * （否则「要么全给要么全不给」，截断体验很硬）。
+ */
+export interface MemoryBlock {
+  weight: number;
+  isEpiphany: boolean;
+  /** 完整注入内容 */
+  detail: string;
+  /** 降级注入内容（只留一句话印象） */
+  brief: string;
+  /** 当前是否已降级 */
+  degraded: boolean;
+}
+
+/**
+ * 命中事件注入的片段条数上限
+ *
+ * 「被检索唤起」时应该给完整细节，但一个积累几十条片段的事件会一次撑爆预算，
+ * 于是整块被截断、一条都留不下。取最近 3 条 + 最早 1 条，既有近因也有头绪。
+ *
+ * 被当前话题唤起的片段（cuedIds）必须入选——想不起来的细节可以省，
+ * 刚想起来的那条不能省；超额时先丢「没被唤起且更旧」的。
+ */
+function capFragments(fragments: MemoryFragment[], cuedIds?: Set<number>): MemoryFragment[] {
+  if (fragments.length <= 4) return fragments;
+  const picked = new Map<number, MemoryFragment>();
+  picked.set(fragments[0].id, fragments[0]);
+  for (const f of fragments.slice(-3)) picked.set(f.id, f);
+  if (cuedIds) for (const f of fragments) if (cuedIds.has(f.id)) picked.set(f.id, f);
+  const list = [...picked.values()].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+  if (list.length <= 4) return list;
+  const droppable = list
+    .filter((f) => !cuedIds?.has(f.id))
+    .sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+  const dropIds = new Set(droppable.slice(0, list.length - 4).map((f) => f.id));
+  return list.filter((f) => !dropIds.has(f.id));
+}
+
+/**
+ * 详细/简略切换阈值：实时权重低于它的记忆整块只注入一句话 gist
+ * 片段自身的 priority 参与：重大片段把阈值压低，
+ * 也就是衰减到更低的权重才开始变模糊——重要的事确实会记得更久
+ */
+function detailThreshold(priority: number): number {
+  const base = getThresholds().detail_visible_weight || DETAIL_VISIBLE_WEIGHT;
+  return base * (priority >= 7 ? 0.6 : priority <= 3 ? 1.5 : 1);
+}
+
+/**
  * 构建记忆区 — 使用 memory_injection_template + memory_event_template 模板
  * 替换 [user] [time] 占位符
- * 命中事件显示所有关联片段，活跃事件显示最新一条片段摘要
+ *
+ * 分层（模拟「记得很清楚」vs「只记得大概发生过这么件事」）：
+ * - 命中事件**逐条**分层：被当前话题唤起的片段给完整 summary（刚想起来的细节），
+ *   其余片段按各自年龄过遗忘曲线决定 summary/gist——想起一件事不会把整段往事全部擦亮
+ * - 未命中事件按事件实时权重决定最新一条给 summary 还是 gist（整体熟悉感）
  */
 function buildMemorySection(
   userInfo: UserInfo | null,
   topEvents: (MemoryEvent & { live_weight: number })[],
-  epiphany: MemoryEvent | null,
-  hitFragments?: Map<number, MemoryFragment[]>
-): string {
+  epiphany: (MemoryEvent & { gist: string }) | null,
+  hitFragments?: Map<number, MemoryFragment[]>,
+  cuedFragmentIds?: Set<number>
+): MemoryBlock[] {
   const prompts = getPrompts();
   const eventTpl = prompts.memory_event_template;
   const now = dayjs(); // 预计算当前时间，复用
@@ -308,74 +380,120 @@ function buildMemorySection(
     .map((e) => e.id);
   const fallbackFragments = getFragmentsByEventIds(missingIds);
 
-  // 渲染每条事件
-  const eventLines: string[] = [];
+  const blocks: MemoryBlock[] = [];
+
   for (const event of topEvents) {
     const text = replacePlaceholders(event.event_text, event.timestamp, userInfo, now);
-    const line = eventTpl
+    const head = eventTpl
       .replace(/\{\{weight\}\}/g, String(event.live_weight))
       .replace(/\{\{event_text\}\}/g, text);
-    eventLines.push(line);
 
-    // 如果是命中事件，显示所有关联片段
+    const detailLines: string[] = [head];
+    const briefLines: string[] = [head];
+    let startDegraded = false;
+
+    // 命中事件：逐条分层——被唤起的片段给完整 summary（刚想起来的细节），
+    // 其余按各自年龄过遗忘曲线决定 summary/gist（想起一件事不会把整段往事全部擦亮）。
+    // detail 已是逐条分层结果，整块不再降级；budget 截断时仍可退到全 gist 的 brief
     const fragments = hitFragments?.get(event.id);
     if (fragments && fragments.length > 0) {
-      for (const frag of fragments) {
-        const fragText = replacePlaceholders(frag.summary, frag.timestamp, userInfo, now);
-        eventLines.push(`  · ${fragText}`);
+      for (const frag of capFragments(fragments, cuedFragmentIds)) {
+        const cued = cuedFragmentIds?.has(frag.id) ?? false;
+        // 片段自身年龄权重：写入时刻≈经历时刻，priority 参与阈值（重大细节保持更久）
+        const fragLive = calculateWeight(
+          event.active_weight,
+          frag.timestamp,
+          frag.priority,
+          event.memory_kind ?? "daily"
+        );
+        const vivid = cued || fragLive >= detailThreshold(frag.priority);
+        const shortText = frag.gist || frag.summary.slice(0, 24);
+        detailLines.push(
+          `  · ${replacePlaceholders(vivid ? frag.summary : shortText, frag.timestamp, userInfo, now)}`
+        );
+        briefLines.push(`  · ${replacePlaceholders(shortText, frag.timestamp, userInfo, now)}`);
       }
     } else {
-      // 活跃事件：显示最新一条片段摘要
-      // 权重低于阈值时不再展开细节——模拟「记得发生过，但细节已模糊」
-      if (event.live_weight >= DETAIL_VISIBLE_WEIGHT) {
-        const eventFragments = fallbackFragments.get(event.id);
-        if (eventFragments && eventFragments.length > 0) {
-          const latest = eventFragments[eventFragments.length - 1];
-          const fragText = replacePlaceholders(latest.summary, latest.timestamp, userInfo, now);
-          eventLines.push(`  · ${fragText}`);
-        }
-      }
+      const eventFragments = fallbackFragments.get(event.id);
+      const latest = eventFragments?.[eventFragments.length - 1];
+      if (!latest) continue;
+      startDegraded = event.live_weight < detailThreshold(latest.priority);
+      detailLines.push(`  · ${replacePlaceholders(latest.summary, latest.timestamp, userInfo, now)}`);
+      briefLines.push(
+        `  · ${replacePlaceholders(latest.gist || latest.summary.slice(0, 24), latest.timestamp, userInfo, now)}`
+      );
     }
+
+    blocks.push({
+      weight: event.live_weight,
+      isEpiphany: false,
+      detail: detailLines.join("\n"),
+      brief: briefLines.join("\n"),
+      degraded: startDegraded,
+    });
   }
 
-  // 渲染灵光一闪
-  let epiphanyText = "";
+  // 灵光一闪：连同一句印象一起注入，否则 AI 只拿到事件标题、接不上话
   if (epiphany) {
     const text = replacePlaceholders(epiphany.event_text, epiphany.timestamp, userInfo, now);
-    epiphanyText = `- [灵光一闪·冷记忆] ${text}`;
+    const gist = epiphany.gist
+      ? replacePlaceholders(epiphany.gist, epiphany.timestamp, userInfo, now)
+      : "";
+    const line = `- [灵光一闪·冷记忆] ${text}${gist && gist !== text ? `（${gist}）` : ""}`;
+    blocks.push({ weight: 0, isEpiphany: true, detail: line, brief: line, degraded: false });
   }
 
-  // 使用 memory_injection_template 拼装
+  return blocks;
+}
+
+/**
+ * 把记忆块渲染成注入文本
+ * 使用 memory_injection_template 模板；无模板时降级为硬编码格式
+ */
+function renderMemoryBlocks(blocks: MemoryBlock[]): string {
+  const prompts = getPrompts();
+  const now = dayjs();
+  const eventList = blocks.filter((b) => !b.isEpiphany);
+  const epiphanyBlock = blocks.find((b) => b.isEpiphany);
+  const render = (b: MemoryBlock) => (b.degraded ? b.brief : b.detail);
+
+  const eventText = eventList.map(render).join("\n");
+  const epiphanyText = epiphanyBlock ? render(epiphanyBlock) : "";
+
   const template = prompts.memory_injection_template;
   if (template && template.includes("{{")) {
     let result = template
-      .replace(/\{\{event_list\}\}/g, eventLines.join("\n") || "（暂无记忆事件）")
+      .replace(/\{\{event_list\}\}/g, eventText || "（暂无记忆事件）")
       .replace(/\{\{epiphany\}\}/g, epiphanyText);
-    // 替换通用变量 [now]
-    if (result.includes("[now]")) {
-      const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-      result = result.replace(/\[now\]/g, `${now.format("M/D")}(${WEEKDAYS[now.day()]}) ${now.format("HH:mm")}`);
+    // 替换通用变量 [today] / [now]
+    result = result
+      .replace(/\[today\]/g, formatTodayLine(now))
+      .replace(/\[now\]/g, formatNow(now));
+    // 兜底：存量覆盖模板没放时间变量的，末尾补一行时间上下文——
+    // 「今天是周几、放不放假」每轮都要让模型看到（模板自带 [now] 的尊重用户排版）
+    if (!template.includes("[today]") && !template.includes("[now]")) {
+      result += `\n\n---\n${formatTodayLine(now)}`;
     }
     return result;
   }
 
   // 降级：无模板时硬编码
   const lines: string[] = [];
-  if (eventLines.length > 0) {
+  if (eventText) {
     lines.push("## 记忆区");
-    lines.push(...eventLines);
+    lines.push(eventText);
   }
   if (epiphanyText) lines.push(epiphanyText);
   return lines.join("\n");
 }
 
 /**
- * 替换 [user]、[time]、[now] 占位符
+ * 替换 [user]、[time]、[now] 占位符（记忆区与游戏回顾共用）
  * [user] → 用户昵称
  * [time] → 相对时间描述（如"前两个月"、"上周"）
- * [now] → 当前时间（如"2026年7月17日 15:30"）
+ * [now] → 当前时间（如"2026年7月17日（周五）15:30"）
  */
-function replacePlaceholders(
+export function replacePlaceholders(
   text: string,
   eventTimestamp: string,
   userInfo: UserInfo | null,
@@ -395,7 +513,13 @@ function replacePlaceholders(
   // [time] → 相对时间
   if (result.includes("[time]") && eventTimestamp) {
     const eventTime = dayjs(eventTimestamp);
-    const diffDays = currentTime.diff(eventTime, "day");
+    // 自然日差（与聊天页日期横幅 formatDateLabel 同口径）：
+    // 昨晚的事今早看是「昨天」。此前用 24h 截断差，不足一天一律显示「今天」，
+    // 昨天聊的事也被说成今天
+    const diffDays = Math.max(
+      0,
+      currentTime.startOf("day").diff(eventTime.startOf("day"), "day")
+    );
     let relativeTime: string;
 
     if (diffDays < 1) {
@@ -420,144 +544,91 @@ function replacePlaceholders(
 
   // [now] → 当前时间
   if (result.includes("[now]")) {
-    const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-    result = result.replace(/\[now\]/g, `${currentTime.format("YYYY年M月D日")} ${WEEKDAYS[currentTime.day()]} ${currentTime.format("HH:mm")}`);
+    result = result.replace(/\[now\]/g, formatNow(currentTime));
   }
 
   return result;
 }
 
 /**
- * 截断策略：按权重从低到高依次剔除记忆区事件
- * 优先保护：系统人设 > 状态区 > 最近 15 轮对话 > 灵光一闪 > Top N 事件
- */
-interface MemoryBlock {
-  start: number;
-  end: number;
-  text: string;
-  isEpiphany: boolean;
-  /** 匹配到的事件实时权重，未匹配或未染色时为 0 */
-  weight: number;
-}
-
-/**
- * 将记忆区按 "- 事件行 + 其下的   片段行" 切块
- * 删除时整块移除，避免留下孤儿片段行
- */
-function splitMemoryBlocks(lines: string[]): MemoryBlock[] {
-  const blocks: MemoryBlock[] = [];
-  let current: MemoryBlock | null = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.startsWith("- ")) {
-      if (current) blocks.push(current);
-      current = {
-        start: i,
-        end: i,
-        text: line,
-        isEpiphany: line.startsWith("- [灵光一闪"),
-        weight: 0,
-      };
-    } else if (current && line.startsWith("  ")) {
-      // 归属于上一个事件块的片段行
-      current.end = i;
-      current.text += `\n${line}`;
-    }
-  }
-  if (current) blocks.push(current);
-  return blocks;
-}
-
-/**
  * 截断策略：预算覆盖「系统人设 + 状态区 + 记忆区 + 历史」
- * 顺序：优先删除灵光一闪 → 按实时权重从低到高删除记忆块 → 仍超则从最旧的历史开始丢弃
+ *
+ * 顺序（越靠后越伤体感，所以尽量往后放）：
+ *   1. 删灵光一闪（锦上添花，最先让路）
+ *   2. **先把低权重记忆块降级**（detail → brief，只留一句话）——别直接把整块抹掉
+ *   3. 再按权重从低到高删除记忆块
+ *   4. 仍超预算则丢弃最旧历史（至少保留最后一轮）
  */
 function truncateToFit(params: {
   system: string;
   state: string;
-  memory: string;
+  memoryBlocks: MemoryBlock[];
   messages: { role: "user" | "assistant"; content: string }[];
-  topEvents: (MemoryEvent & { live_weight: number })[];
-  epiphany: MemoryEvent | null;
-  userInfo: UserInfo | null;
   budget: number;
 }): { memory: string; messages: { role: "user" | "assistant"; content: string }[] } {
-  const { system, state, memory, messages, topEvents, epiphany, userInfo, budget } = params;
+  const { system, state, memoryBlocks, messages, budget } = params;
 
   const systemTokens = estimateTokens(system);
   const stateTokens = estimateTokens(state);
   let keptMessages = messages;
 
-  const measure = (memText: string, msgs: typeof messages) =>
+  const measure = (blocks: MemoryBlock[], msgs: typeof messages) =>
     systemTokens +
     stateTokens +
-    estimateTokens(memText) +
+    estimateTokens(renderMemoryBlocks(blocks)) +
     msgs.reduce((sum, m) => sum + estimateTokens(m.content), 0);
 
-  let total = measure(memory, keptMessages);
-  if (total <= budget) return { memory, messages: keptMessages };
-
-  // --- 第一步：按块删除记忆 ---
-  const lines = memory.split("\n");
-  const blocks = splitMemoryBlocks(lines);
-
-  // 建立事件块到权重的映射：用渲染后的事件文本匹配 topEvents
-  const weightByLine = new Map<string, number>();
-  for (const event of topEvents) {
-    const rendered = replacePlaceholders(event.event_text, event.timestamp, userInfo);
-    weightByLine.set(rendered, event.live_weight);
-  }
-  for (const block of blocks) {
-    if (block.isEpiphany) continue;
-    const firstLine = block.text.split("\n")[0];
-    for (const [rendered, weight] of weightByLine) {
-      if (firstLine.includes(rendered)) {
-        block.weight = weight;
-        break;
-      }
-    }
+  // 就地标记，避免截断过程中改动调用方传入的数组
+  const blocks = memoryBlocks.map((b) => ({ ...b }));
+  let total = measure(blocks, keptMessages);
+  if (total <= budget) {
+    return { memory: renderMemoryBlocks(blocks), messages: keptMessages };
   }
 
-  const removedLines = new Set<number>();
+  const removed = new Set<MemoryBlock>();
   const dropBlock = (block: MemoryBlock) => {
-    if (removedLines.has(block.start)) return false;
-    for (let i = block.start; i <= block.end; i++) removedLines.add(i);
+    if (removed.has(block)) return false;
+    removed.add(block);
     return true;
   };
+  const alive = () => blocks.filter((b) => !removed.has(b));
+  const remeasure = () => {
+    total = measure(alive(), keptMessages);
+    return total;
+  };
 
-  const remainingMemory = () =>
-    lines.filter((_, i) => !removedLines.has(i)).join("\n");
-
-  // 灵光一闪优先删除（存在其它记忆时）
-  if (epiphany && blocks.length > 1) {
-    const epiphanyBlock = blocks.find((b) => b.isEpiphany);
-    if (epiphanyBlock) {
-      dropBlock(epiphanyBlock);
-      total = measure(remainingMemory(), keptMessages);
+  // 1. 灵光一闪优先删除（还有其它记忆时）
+  const epi = blocks.find((b) => b.isEpiphany);
+  if (epi && blocks.length > 1) {
+    dropBlock(epi);
+    if (remeasure() <= budget) {
+      return { memory: renderMemoryBlocks(alive()), messages: keptMessages };
     }
   }
 
-  // 按权重从低到高删除事件块
+  // 2. 先降级：按权重从低到高，把 detail 换成 brief（一句话），而不是直接删掉
   const eventBlocks = blocks
-    .filter((b) => !b.isEpiphany)
+    .filter((b) => !b.isEpiphany && !b.degraded)
     .sort((a, b) => a.weight - b.weight);
-
   for (const block of eventBlocks) {
+    block.degraded = true;
+    if (remeasure() <= budget) break;
+  }
+
+  // 3. 仍超预算：按权重从低到高整块删除
+  for (const block of blocks.filter((b) => !b.isEpiphany).sort((a, b) => a.weight - b.weight)) {
     if (total <= budget) break;
     if (!dropBlock(block)) continue;
-    total = measure(remainingMemory(), keptMessages);
+    remeasure();
   }
 
-  // --- 第二步：记忆削完仍超预算，丢弃最旧的历史（至少保留最后一轮） ---
-  if (total > budget) {
-    while (keptMessages.length > 2 && total > budget) {
-      keptMessages = keptMessages.slice(1);
-      total = measure(remainingMemory(), keptMessages);
-    }
+  // 4. 仍超预算：丢弃最旧历史（至少保留最后一轮）
+  while (keptMessages.length > 2 && total > budget) {
+    keptMessages = keptMessages.slice(1);
+    remeasure();
   }
 
-  return { memory: remainingMemory(), messages: keptMessages };
+  return { memory: renderMemoryBlocks(alive()), messages: keptMessages };
 }
 
 /**

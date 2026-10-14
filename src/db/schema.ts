@@ -18,8 +18,9 @@ export function initSchema(): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       "index" INTEGER NOT NULL,
       timestamp TEXT NOT NULL,
+      gist TEXT NOT NULL DEFAULT '',
       summary TEXT NOT NULL,
-      emotion TEXT NOT NULL,
+      keywords TEXT NOT NULL DEFAULT '',
       priority INTEGER NOT NULL DEFAULT 5
     );
 
@@ -71,7 +72,39 @@ export function initSchema(): void {
       created_at TEXT NOT NULL
     );
 
+    -- 心情动态表（用户与 AI 双方发帖，类朋友圈）
+    CREATE TABLE IF NOT EXISTS moments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      author TEXT NOT NULL CHECK(author IN ('user','ai')),
+      content TEXT NOT NULL,
+      mood TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+
+    -- 动态评论表
+    CREATE TABLE IF NOT EXISTS moment_comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      moment_id INTEGER NOT NULL,
+      author TEXT NOT NULL CHECK(author IN ('user','ai')),
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    -- 周发帖计划（随作息表一起由 LLM 生成，AI 不定期发帖用）
+    CREATE TABLE IF NOT EXISTS post_plan (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      week_start TEXT NOT NULL,
+      day_of_week INTEGER NOT NULL,
+      time_slot INTEGER NOT NULL,
+      theme_hint TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','posted','skipped')),
+      created_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_schedule_week ON behavior_schedule(week_start);
+    CREATE INDEX IF NOT EXISTS idx_moments_created ON moments(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_comments_moment ON moment_comments(moment_id);
+    CREATE INDEX IF NOT EXISTS idx_post_plan_week ON post_plan(week_start);
     CREATE INDEX IF NOT EXISTS idx_fragments_index ON memory_fragments("index");
     CREATE INDEX IF NOT EXISTS idx_events_weight ON memory_events(active_weight DESC);
   `);
@@ -125,6 +158,31 @@ function migrateLegacyColumns(db: ReturnType<typeof getDB>): void {
   if (colsAfterArchive.includes("index")) {
     try {
       db.execSync(`ALTER TABLE memory_events DROP COLUMN "index"`);
+    } catch {}
+  }
+
+  // 4. 补 gist 列（记忆分层：一句话概要，低活跃度时只保留这一句）
+  try {
+    db.execSync(`ALTER TABLE memory_fragments ADD COLUMN gist TEXT NOT NULL DEFAULT ''`);
+  } catch {}
+
+  // 5. 补 keywords 列（写入时抽取的关键词索引，含同义表达，供检索匹配）
+  try {
+    db.execSync(`ALTER TABLE memory_fragments ADD COLUMN keywords TEXT NOT NULL DEFAULT ''`);
+  } catch {}
+
+  // 6. emotion 列下线：它只写不读（从未进入 Prompt，getLatestEmotion 也无调用方），
+  //    情绪改由 summary 一并承载。删列前先把老内容并进 summary，避免丢信息
+  if (getColumns(db, "memory_fragments").includes("emotion")) {
+    try {
+      db.execSync(
+        `UPDATE memory_fragments
+         SET summary = summary || '（' || emotion || '）'
+         WHERE emotion IS NOT NULL AND TRIM(emotion) <> ''`
+      );
+    } catch {}
+    try {
+      db.execSync(`ALTER TABLE memory_fragments DROP COLUMN emotion`);
     } catch {}
   }
 }

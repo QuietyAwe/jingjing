@@ -1,4 +1,5 @@
 import { Tabs } from "expo-router";
+import { Text } from "react-native";
 import { useTheme } from "@/theme/useTheme";
 
 export default function TabLayout() {
@@ -15,6 +16,7 @@ export default function TabLayout() {
           borderTopColor: colors.border,
           backgroundColor: colors.sectionBg,
         },
+        tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 18 }}>●</Text>,
       }}
     >
       <Tabs.Screen
@@ -22,8 +24,15 @@ export default function TabLayout() {
         options={{
           title: "私藏",
           headerShown: false,
-          // 聊天页隐藏底部导航，沉浸式显示更多内容（进设置走顶部入口）
-          tabBarStyle: { display: "none" },
+          tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>💬</Text>,
+        }}
+      />
+      <Tabs.Screen
+        name="moments"
+        options={{
+          title: "动态",
+          headerShown: false,
+          tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🌤</Text>,
         }}
       />
       <Tabs.Screen
@@ -31,6 +40,7 @@ export default function TabLayout() {
         options={{
           title: "设置",
           headerTitle: "设置",
+          tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>⚙️</Text>,
         }}
       />
     </Tabs>

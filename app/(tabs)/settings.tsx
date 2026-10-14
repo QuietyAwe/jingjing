@@ -27,13 +27,20 @@ import {
   getPrompts,
   setConfigOverride,
   resetConfigOverride,
+  loadConfigOverrides,
 } from "@/prompt/config";
-import { getUserInfo, getTopActive, getActiveCount, clearAllData, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById } from "@/db/queries";
+import { getUserInfo, setUserInfo as persistUserInfo, getTopActive, getActiveCount, clearAllData, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById } from "@/db/queries";
 import { getWeekStart } from "@/memory/scheduler";
+import { identityNames } from "@/memory/identity";
 import { fetchModels, getClient } from "@/llm/client";
 import { CollapsibleSection } from "@/components/CollapsibleSection";
 import { exportBackup, importBackup } from "../../src/utils/backup";
-import type { UserInfo, MemoryEvent, MemoryFragment } from "@/types/schema";
+import * as Updates from "expo-updates";
+import { RELEASE_VERSION } from "@/version";
+import type { UserInfo, MemoryEvent, MemoryFragment, ConsolidationResponse } from "@/types/schema";
+
+/** 人设提取结果（与巩固流 new_info 同构：属性/状态/事件 三桶） */
+type PersonaInfo = ConsolidationResponse["new_info"];
 
 // 替换片段中的 [user] [ai] [time] 占位符
 function replaceFragmentPlaceholder(text: string, timestamp: string, nickname: string, aiName?: string): string {
@@ -42,7 +49,8 @@ function replaceFragmentPlaceholder(text: string, timestamp: string, nickname: s
   if (result.includes("[time]") && timestamp) {
     const now = dayjs();
     const eventTime = dayjs(timestamp);
-    const diffDays = now.diff(eventTime, "day");
+    // 自然日差（与聊天页日期横幅同口径），不足 24h 的昨天不再显示「今天」
+    const diffDays = Math.max(0, now.startOf("day").diff(eventTime.startOf("day"), "day"));
     let relativeTime: string;
     if (diffDays < 1) relativeTime = "今天";
     else if (diffDays < 2) relativeTime = "昨天";
@@ -74,6 +82,7 @@ const THRESHOLD_FIELDS: ConfigField[] = [
   { key: "consolidation_window_turns", label: "巩固触发轮数", type: "number", description: "累计多少轮对话后触发一次记忆提取（仅控制触发频率）" },
   { key: "context_history_rounds", label: "上下文轮数上限", type: "number", description: "发送给 AI 的历史对话轮数（与巩固触发频率互不影响）" },
   { key: "context_active_events_limit", label: "记忆区事件上限", type: "number", description: "上下文中加载的高权重事件数量" },
+  { key: "detail_visible_weight", label: "详细/简略切换权重", type: "number", description: "实时权重低于此值的记忆只显示一句话摘要（默认 60，调高=更多记忆变简略）" },
 ];
 
 // 提示词分组配置
@@ -94,7 +103,8 @@ const PROMPT_GROUPS: PromptGroup[] = [
       { key: "state_injection_template", label: "② 状态区注入模板", type: "multiline", description: "定义用户信息的注入格式。此部分在10轮对话内保持稳定，空字段自动隐藏。" },
       { key: "memory_injection_template", label: "③ 记忆区注入模板", type: "multiline", description: "定义记忆区的整体结构。每次检索可能注入不同事件。" },
       { key: "memory_event_template", label: "└ 记忆事件格式", type: "multiline", description: "定义单条记忆事件的格式。[time] 为相对于事件发生时间的描述。" },
-      { key: "promise_injection_template", label: "约定提醒模板", type: "multiline", description: "当与用户有时间约定到期时，注入此模板提醒用户。{{promises}} 为约定内容。" },
+      { key: "event_reminder_template", label: "事件临近提示", type: "multiline", description: "隐形提示词：事件到期前 24h 注入消息末尾，AI 自然提起。{{event}} 事件内容、{{due_time}} 到期时间。" },
+      { key: "event_care_template", label: "事件过期关心", type: "multiline", description: "隐形提示词：事件过期且用户没提起时注入，AI 找机会关心。{{event}} 事件内容、{{due_time}} 到期时间。" },
     ],
   },
   {
@@ -115,7 +125,7 @@ const PROMPT_GROUPS: PromptGroup[] = [
 ];
 
 export default function SettingsScreen() {
-  const { apiKey, baseUrl, user_nickname, ai_name, stream_output, thinking_mode, customColorsLight, customColorsDark, saveApiKey, saveBaseUrl, saveUserNickname, saveAiName, saveStreamOutput, saveThinkingMode, saveCustomColors } = useSettingsStore();
+  const { apiKey, baseUrl, user_nickname, ai_name, stream_output, thinking_mode, auto_focus_input, blocked_keywords, customColorsLight, customColorsDark, saveApiKey, saveBaseUrl, saveUserNickname, saveAiName, saveStreamOutput, saveThinkingMode, saveAutoFocusInput, saveBlockedKeywords, saveCustomColors } = useSettingsStore();
   const clearMessages = useChatStore((s) => s.clearMessages);
   const colors = useTheme();
   const { themeMode, toggleTheme } = useThemeStore();
@@ -125,10 +135,12 @@ export default function SettingsScreen() {
   const [showUrlModal, setShowUrlModal] = useState(false);
   const [showNicknameModal, setShowNicknameModal] = useState(false);
   const [showAiNameModal, setShowAiNameModal] = useState(false);
+  const [showBlockedModal, setShowBlockedModal] = useState(false);
   const [inputKey, setInputKey] = useState("");
   const [inputUrl, setInputUrl] = useState("");
   const [inputNickname, setInputNickname] = useState("");
   const [inputAiName, setInputAiName] = useState("");
+  const [inputBlocked, setInputBlocked] = useState("");
 
   // 配置编辑器状态
   const [editorVisible, setEditorVisible] = useState(false);
@@ -155,19 +167,30 @@ export default function SettingsScreen() {
       { label: "生日", value: "{{birthday}}" },
       { label: "职业", value: "{{occupation}}" },
       { label: "所在地", value: "{{location}}" },
-      { label: "喜欢", value: "{{likes}}" },
-      { label: "讨厌", value: "{{dislikes}}" },
       { label: "社交图谱", value: "{{social_graph}}" },
-      { label: "性格特质", value: "{{personality_traits}}" },
-      { label: "近期压力", value: "{{current_stressors}}" },
-      { label: "沟通偏好", value: "{{comm_preference}}" },
-      { label: "长期目标", value: "{{long_term_goals}}" },
-      { label: "待办任务", value: "{{ongoing_tasks}}" },
+      { label: "属性（永久）", value: "{{traits}}" },
+      { label: "近况（状态）", value: "{{states}}" },
+      { label: "安排（事件）", value: "{{events}}" },
       { label: "当前状态", value: "{{current_status}}" },
+      { label: "今天是（周几/假期）", value: "[today]" },
+    ],
+    event_reminder_template: [
+      ...COMMON_VARIABLES,
+      { label: "相对时间", value: "[time]" },
+      { label: "事件内容", value: "{{event}}" },
+      { label: "到期时间", value: "{{due_time}}" },
+    ],
+    event_care_template: [
+      ...COMMON_VARIABLES,
+      { label: "相对时间", value: "[time]" },
+      { label: "事件内容", value: "{{event}}" },
+      { label: "到期时间", value: "{{due_time}}" },
     ],
     memory_injection_template: [
       { label: "事件列表", value: "{{event_list}}" },
       { label: "灵光一闪", value: "{{epiphany}}" },
+      { label: "今天是（周几/假期）", value: "[today]" },
+      { label: "当前时间", value: "[now]" },
     ],
     memory_event_template: [
       ...COMMON_VARIABLES,
@@ -212,7 +235,7 @@ export default function SettingsScreen() {
   const [showEventEditor, setShowEventEditor] = useState(false);
   const [editorFragments, setEditorFragments] = useState<MemoryFragment[]>([]);
   const [newFragmentSummary, setNewFragmentSummary] = useState("");
-  const [newFragmentEmotion, setNewFragmentEmotion] = useState("");
+  const [newFragmentGist, setNewFragmentGist] = useState("");
   const [newFragmentPriority, setNewFragmentPriority] = useState("5");
   const [deletingEvent, setDeletingEvent] = useState<MemoryEvent | null>(null);
   const [showNewEventModal, setShowNewEventModal] = useState(false);
@@ -233,7 +256,7 @@ export default function SettingsScreen() {
   const [personaModalVisible, setPersonaModalVisible] = useState(false);
   const [personaInput, setPersonaInput] = useState("");
   const [personaExtracting, setPersonaExtracting] = useState(false);
-  const [personaResult, setPersonaResult] = useState<UserInfo | null>(null);
+  const [personaResult, setPersonaResult] = useState<PersonaInfo | null>(null);
   const [personaError, setPersonaError] = useState("");
 
   useFocusEffect(
@@ -278,6 +301,11 @@ export default function SettingsScreen() {
     setShowAiNameModal(false);
   };
 
+  const handleSaveBlocked = async () => {
+    await saveBlockedKeywords(inputBlocked);
+    setShowBlockedModal(false);
+  };
+
   const handleCreateEvent = () => {
     const text = newEventText.trim();
     const weight = parseInt(newEventWeight) || 50;
@@ -292,10 +320,12 @@ export default function SettingsScreen() {
   const handleCreateFragment = () => {
     if (!editingEvent || !newFragmentSummary.trim()) return;
     const priority = parseInt(newFragmentPriority) || 5;
-    insertFragment(editingEvent.id, newFragmentSummary.trim(), newFragmentEmotion.trim() || "未标记情绪", Math.min(9, Math.max(1, priority)));
+    // 一句话概要留空时由摘要截取，保证分层渲染有内容
+    const gist = newFragmentGist.trim() || newFragmentSummary.trim().slice(0, 24);
+    insertFragment(editingEvent.id, gist, newFragmentSummary.trim(), Math.min(9, Math.max(1, priority)));
     setEditorFragments(getFragmentsByEventId(editingEvent.id));
     setNewFragmentSummary("");
-    setNewFragmentEmotion("");
+    setNewFragmentGist("");
   };
 
   // 获取模型列表
@@ -341,28 +371,31 @@ export default function SettingsScreen() {
   const EMPTY = "__EMPTY__";
   const renderStateTemplate = (template: string, ui: UserInfo, currentStatus: string): string => {
     const bi = ui.basic_identity;
-    const pref = ui.preferences;
     const sg = ui.social_graph;
-    const ps = ui.psycho_state;
-    const lq = ui.life_quests;
+    const nickname = bi.nickname || "你";
     const graphText = sg.length > 0 ? sg.map((s) => `${s.name}(${s.role})：${s.attitude}`).join("\n* ") : EMPTY;
-    const validTasks = lq.ongoing_tasks.filter(t => t.task_name && t.status);
-    const tasksText = validTasks.length > 0 ? validTasks.map((t) => `${t.task_name}(${t.status})`).join("；") : EMPTY;
+    // 近况（状态）带 [time] 相对时间，安排（事件）带到期时间
+    const statesText = ui.states.length > 0
+      ? ui.states.map((s) => replaceFragmentPlaceholder(s.text, s.created_at, nickname, ai_name)).join("\n")
+      : EMPTY;
+    const eventsText = ui.events.filter((e) => e.status !== "archived").length > 0
+      ? ui.events
+          .filter((e) => e.status !== "archived")
+          .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf())
+          .map((e) => `${replaceFragmentPlaceholder(e.text, e.created_at, nickname, ai_name)}（${dayjs(e.due_time).format("M/D HH:mm")}）`)
+          .join("\n")
+      : EMPTY;
     const result = template
-      .replace(/\{\{nickname\}\}/g, bi.nickname || "你")
+      .replace(/\{\{nickname\}\}/g, nickname)
       .replace(/\{\{occupation\}\}/g, bi.occupation || "未知")
       .replace(/\{\{location\}\}/g, bi.location || "未知")
-      .replace(/\{\{likes\}\}/g, pref.likes.length > 0 ? pref.likes.join("、") : EMPTY)
-      .replace(/\{\{dislikes\}\}/g, pref.dislikes.length > 0 ? pref.dislikes.join("、") : EMPTY)
+      .replace(/\{\{traits\}\}/g, ui.traits.length > 0 ? ui.traits.join("、") : EMPTY)
       .replace(/\{\{social_graph\}\}/g, graphText)
-      .replace(/\{\{personality_traits\}\}/g, ps.personality_traits.length > 0 ? ps.personality_traits.join("、") : EMPTY)
-      .replace(/\{\{current_stressors\}\}/g, ps.current_stressors.length > 0 ? ps.current_stressors.join("、") : EMPTY)
-      .replace(/\{\{comm_preference\}\}/g, ps.comm_preference || EMPTY)
-      .replace(/\{\{long_term_goals\}\}/g, lq.long_term_goals.length > 0 ? lq.long_term_goals.join("、") : EMPTY)
-      .replace(/\{\{ongoing_tasks\}\}/g, tasksText)
+      .replace(/\{\{states\}\}/g, statesText)
+      .replace(/\{\{events\}\}/g, eventsText)
       .replace(/\{\{current_status\}\}/g, currentStatus || EMPTY)
       // 通用变量
-      .replace(/\[user\]/g, bi.nickname || "你")
+      .replace(/\[user\]/g, nickname)
       .replace(/\[now\]/g, new Date().toLocaleString("zh-CN", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }));
     // 移除空值行和空段落标题
     return result.split("\n").filter(line => !line.includes(EMPTY)).join("\n")
@@ -514,7 +547,7 @@ export default function SettingsScreen() {
         lines.push("", "## 对话快照（最近 10 轮）");
         lines.push("[用户] （示例：你好）");
         lines.push("[助手] （示例：你好呀～最近怎么样？）");
-        lines.push("", '请严格输出 JSON，格式：{"updated_user_info": {...}, "new_fragment": {"summary": "...", "emotion": "...", "target_event_index": 数字或-1, "new_event_text": ""}}');
+        lines.push("", '请严格输出 JSON，格式：{"new_info": {只写本次新发现的字段, 没有新信息的字段不要输出}, "new_fragments": [{"gist": "...", "summary": "...", "keywords": ["..."], "priority": 数字1-9, "target_event_index": 数字或-1, "new_event_text": ""}]}');
         return lines.join("\n");
       }
 
@@ -575,19 +608,21 @@ export default function SettingsScreen() {
 文本：
 ${text}
 
-输出格式：
+输出格式（属性/状态/事件 三桶）：
 {
   "basic_identity": {"nickname":"", "gender":"", "birthday":"", "occupation":"", "location":""},
-  "preferences": {"likes":[], "dislikes":[]},
   "social_graph": [],
-  "psycho_state": {"personality_traits":[], "current_stressors":[], "comm_preference":""},
-  "life_quests": {"long_term_goals":[], "ongoing_tasks":[]}
+  "traits": [],
+  "states": [],
+  "events": []
 }
 
 规则：
 - 只提取文本中明确提到的信息，不要推测
 - 未提到的字段留空字符串或空数组
-- likes/dislikes/personality_traits/long_term_goals 用字符串数组
+- traits（属性，永久有效）：喜好/厌恶/性格/能力/长期目标等，如「喜欢吃番茄炒蛋」
+- states（状态，有时效）：近况文本带 [time] 占位符表示时间，如「[time]开始发烧」
+- events（事件，有到期时间）：形如 {"text":"周五下午面试","due_time":"2026-10-12T14:00:00+08:00"}
 - social_graph 暂时留空数组
 - 只输出 JSON，不要其他文字`;
 
@@ -607,9 +642,9 @@ ${text}
       const raw = response.choices[0]?.message?.content;
       if (!raw) throw new Error("AI 返回为空");
 
-      const parsed = JSON.parse(raw) as UserInfo;
+      const parsed = JSON.parse(raw) as PersonaInfo;
       // 基础校验
-      if (!parsed.basic_identity || !parsed.preferences) {
+      if (!parsed.basic_identity) {
         throw new Error("返回格式不正确");
       }
       setPersonaResult(parsed);
@@ -665,37 +700,43 @@ ${text}
   const saveEditField = () => {
     if (!userInfo) return;
     const val = editFieldValue.trim();
-    const updated = { ...userInfo };
+    const updated: UserInfo = {
+      ...userInfo,
+      basic_identity: { ...userInfo.basic_identity },
+    };
 
     switch (editFieldKey) {
-      case "nickname": updated.basic_identity = { ...updated.basic_identity, nickname: val }; break;
-      case "gender": updated.basic_identity = { ...updated.basic_identity, gender: val }; break;
-      case "birthday": updated.basic_identity = { ...updated.basic_identity, birthday: val }; break;
-      case "occupation": updated.basic_identity = { ...updated.basic_identity, occupation: val }; break;
-      case "location": updated.basic_identity = { ...updated.basic_identity, location: val }; break;
-      case "likes": updated.preferences = { ...updated.preferences, likes: val ? val.split(/[,，、\s]+/).filter(Boolean) : [] }; break;
-      case "dislikes": updated.preferences = { ...updated.preferences, dislikes: val ? val.split(/[,，、\s]+/).filter(Boolean) : [] }; break;
-      case "personality_traits": updated.psycho_state = { ...updated.psycho_state, personality_traits: val ? val.split(/[,，、\s]+/).filter(Boolean) : [] }; break;
-      case "current_stressors": updated.psycho_state = { ...updated.psycho_state, current_stressors: val ? val.split(/[,，、\s]+/).filter(Boolean) : [] }; break;
-      case "comm_preference": updated.psycho_state = { ...updated.psycho_state, comm_preference: val }; break;
-      case "long_term_goals": updated.life_quests = { ...updated.life_quests, long_term_goals: val ? val.split(/[,，、\s]+/).filter(Boolean) : [] }; break;
+      case "nickname": updated.basic_identity.nickname = val; break;
+      case "gender": updated.basic_identity.gender = val; break;
+      case "birthday": updated.basic_identity.birthday = val; break;
+      case "occupation": updated.basic_identity.occupation = val; break;
+      case "location": updated.basic_identity.location = val; break;
+      case "traits":
+        updated.traits = val ? val.split(/[,，、\n]+/).filter(Boolean) : [];
+        break;
+      case "states":
+        // 手动编辑视为刚提及：时间戳全部刷新，按 7 天规则重新计时
+        updated.states = val
+          ? val.split(/[,，、\n]+/).filter(Boolean).map((text) => ({ text, created_at: new Date().toISOString() }))
+          : [];
+        break;
       default: return;
     }
 
+    if (editFieldKey === "nickname") {
+      // 称呼的唯一写入口（写库 + 同步内存镜像）
+      saveUserNickname(val);
+    }
+    // 手动编辑是替换语义（删掉的条目要真正消失），直接全量落库
     setUserInfo(updated);
-    mergeUserInfo({
-      basic_identity: updated.basic_identity,
-      preferences: updated.preferences,
-      psycho_state: updated.psycho_state,
-      life_quests: updated.life_quests,
-    });
+    persistUserInfo(updated);
     setEditFieldModalVisible(false);
   };
 
   const renderUserInfo = () => {
     if (!userInfo) return <Text style={styles.emptyText}>暂无用户数据</Text>;
 
-    const { basic_identity, preferences, social_graph, psycho_state, life_quests } = userInfo;
+    const { basic_identity, social_graph, traits, states, events } = userInfo;
 
     const Row = ({ label, value, fieldKey, fieldValue }: { label: string; value: string; fieldKey: string; fieldValue: string }) => (
       <TouchableOpacity style={[styles.editableRow, { borderBottomColor: colors.border }]} onPress={() => openEditField(label, fieldKey, fieldValue)}>
@@ -711,18 +752,26 @@ ${text}
         <Row label="生日" value={basic_identity.birthday} fieldKey="birthday" fieldValue={basic_identity.birthday} />
         <Row label="职业" value={basic_identity.occupation} fieldKey="occupation" fieldValue={basic_identity.occupation} />
         <Row label="城市" value={basic_identity.location} fieldKey="location" fieldValue={basic_identity.location} />
-        <Row label="喜欢" value={preferences.likes.join("、")} fieldKey="likes" fieldValue={preferences.likes.join("、")} />
-        <Row label="讨厌" value={preferences.dislikes.join("、")} fieldKey="dislikes" fieldValue={preferences.dislikes.join("、")} />
         {social_graph.length > 0 && (
           <View style={[styles.editableRow, { borderBottomColor: colors.border }]}>
             <Text style={[styles.editableLabel, { color: colors.textMuted }]}>社交</Text>
             <Text style={[styles.editableValue, { color: colors.text }]}>{social_graph.map((s) => `${s.name}(${s.role})`).join("、")}</Text>
           </View>
         )}
-        <Row label="性格特质" value={psycho_state.personality_traits.join("、")} fieldKey="personality_traits" fieldValue={psycho_state.personality_traits.join("、")} />
-        <Row label="近期压力" value={psycho_state.current_stressors.join("、")} fieldKey="current_stressors" fieldValue={psycho_state.current_stressors.join("、")} />
-        <Row label="沟通偏好" value={psycho_state.comm_preference} fieldKey="comm_preference" fieldValue={psycho_state.comm_preference} />
-        <Row label="长期目标" value={life_quests.long_term_goals.join("、")} fieldKey="long_term_goals" fieldValue={life_quests.long_term_goals.join("、")} />
+        <Row label="属性（永久）" value={traits.join("、")} fieldKey="traits" fieldValue={traits.join("、")} />
+        <Row label="近况（7 天）" value={states.map((s) => s.text).join("、")} fieldKey="states" fieldValue={states.map((s) => s.text).join("、")} />
+        {events.some((e) => e.status !== "archived") && (
+          <View style={[styles.editableRow, { borderBottomColor: colors.border }]}>
+            <Text style={[styles.editableLabel, { color: colors.textMuted }]}>安排</Text>
+            <Text style={[styles.editableValue, { color: colors.text }]}>
+              {events
+                .filter((e) => e.status !== "archived")
+                .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf())
+                .map((e) => `${e.text}(${dayjs(e.due_time).format("M/D HH:mm")})`)
+                .join("、")}
+            </Text>
+          </View>
+        )}
       </>
     );
   };
@@ -845,6 +894,10 @@ ${text}
           <Text style={[styles.label, { color: colors.text }]}>AI 怎么称呼你</Text>
           <Text style={[styles.value, { color: colors.textMuted }]}>{user_nickname || "未设置"}</Text>
         </TouchableOpacity>
+        <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={() => { setInputBlocked(blocked_keywords || identityNames().join("、")); setShowBlockedModal(true); }}>
+          <Text style={[styles.label, { color: colors.text }]}>检索屏蔽词</Text>
+          <Text style={[styles.value, { color: colors.textMuted }]} numberOfLines={1}>{blocked_keywords || identityNames().join("、")}</Text>
+        </TouchableOpacity>
         <View style={[styles.row, { borderBottomColor: colors.border }]}>
           <View style={styles.modelInfo}>
             <Text style={[styles.label, { color: colors.text }]}>流式输出</Text>
@@ -870,6 +923,20 @@ ${text}
           >
             <Text style={[styles.toggleText, thinking_mode ? styles.toggleTextOn : styles.toggleTextOff]}>
               {thinking_mode ? "开" : "关"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        <View style={[styles.row, { borderBottomColor: colors.border }]}>
+          <View style={styles.modelInfo}>
+            <Text style={[styles.label, { color: colors.text }]}>自动弹起输入框</Text>
+            <Text style={[styles.rowDesc, { color: colors.textMuted }]}>回复完成后自动聚焦输入框，方便继续输入</Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.toggle, auto_focus_input ? styles.toggleOn : styles.toggleOff]}
+            onPress={() => saveAutoFocusInput(!auto_focus_input)}
+          >
+            <Text style={[styles.toggleText, auto_focus_input ? styles.toggleTextOn : styles.toggleTextOff]}>
+              {auto_focus_input ? "开" : "关"}
             </Text>
           </TouchableOpacity>
         </View>
@@ -948,34 +1015,34 @@ ${text}
         </TouchableOpacity>
       </CollapsibleSection>
 
-      {/* 约定提醒 */}
+      {/* 事件（约定/安排，到期注入隐形提醒） */}
       <CollapsibleSection
-        title={`约定提醒 (${userInfo?.life_quests?.ongoing_tasks?.filter(t => t.due_time && t.task_name)?.length || 0})`}
+        title={`事件 (${userInfo?.events?.filter((e) => e.status !== "archived").length || 0})`}
         icon="⏰"
         defaultExpanded={true}
       >
-        {!userInfo?.life_quests?.ongoing_tasks?.some(t => t.due_time && t.task_name) ? (
-          <Text style={[styles.emptyText, { color: colors.textMuted, paddingVertical: 16 }]}>暂无约定</Text>
+        {!userInfo?.events?.some((e) => e.status !== "archived") ? (
+          <Text style={[styles.emptyText, { color: colors.textMuted, paddingVertical: 16 }]}>暂无事件</Text>
         ) : (
-          userInfo.life_quests.ongoing_tasks
-            .filter(t => t.due_time && t.task_name)
+          userInfo.events
+            .filter((e) => e.status !== "archived")
             .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf())
-            .map((task, index) => {
-              const dueTime = dayjs(task.due_time);
+            .map((event, index) => {
+              const dueTime = dayjs(event.due_time);
               const isPast = dueTime.isBefore(dayjs());
               return (
                 <View key={index} style={[styles.promiseItem, { borderBottomColor: colors.border }]}>
                   <View style={styles.promiseContent}>
                     <Text style={[styles.promiseText, { color: isPast ? colors.danger : colors.text }]}>
-                      {task.task_name}
+                      {event.text}
                     </Text>
                     <Text style={[styles.promiseTime, { color: isPast ? colors.danger : colors.textMuted }]}>
-                      {isPast ? "已过期 " : ""}{dueTime.format("M/D HH:mm")}
+                      {isPast ? "已过期，AI 会找机会关心 " : "到期 "}{dueTime.format("M/D HH:mm")}
                     </Text>
                   </View>
-                  {task.status && task.status !== "in_progress" && (
-                    <Text style={[styles.promiseStatus, { color: colors.textMuted }]}>{task.status}</Text>
-                  )}
+                  <Text style={[styles.promiseStatus, { color: colors.textMuted }]}>
+                    {event.status === "caring" ? "关心中" : "待发生"}
+                  </Text>
                 </View>
               );
             })
@@ -1046,6 +1113,11 @@ ${text}
                   await useChatStore.getState().reloadMessages();
                   // 重新加载设置
                   await useSettingsStore.getState().loadApiKey();
+                  // 重新加载提示词/阈值覆盖（备份会覆盖 config_overrides，内存缓存必须跟着刷新）
+                  await loadConfigOverrides();
+                  setThresholds(getThresholds());
+                  setModelRouting(getModelRouting());
+                  setSystemPromptState(getSystemPrompt());
                   Alert.alert("导入成功", result.message);
                 } else {
                   Alert.alert("导入失败", result.message);
@@ -1072,6 +1144,28 @@ ${text}
         <TouchableOpacity style={[styles.actionRow, { borderBottomColor: colors.border }]} onPress={handleClearData}>
           <Text style={[styles.actionText, { color: colors.danger }]}>清除所有数据</Text>
         </TouchableOpacity>
+      </CollapsibleSection>
+
+      {/* 版本信息（用于确认 OTA 更新是否生效） */}
+      <CollapsibleSection title={`版本信息 · ${RELEASE_VERSION}`} icon="ℹ️" defaultExpanded={false}>
+        <View style={[styles.infoBlock, { borderBottomColor: colors.border }]}>
+          <Text style={[styles.label, { color: colors.text }]}>发布版本：{RELEASE_VERSION}（每次 OTA 递增）</Text>
+          <Text style={[styles.label, { color: colors.text }]}>运行时版本：{Updates.runtimeVersion ?? "—"}</Text>
+          <Text style={[styles.label, { color: colors.text }]}>
+            更新时间：{Updates.createdAt ? dayjs(Updates.createdAt).format("MM-DD HH:mm:ss") : "—"}
+          </Text>
+          <Text style={[styles.label, { color: colors.text }]}>
+            更新 ID：{Updates.updateId ? `${Updates.updateId.slice(0, 8)}…` : "（内置包，无 ID）"}
+          </Text>
+          <Text style={[styles.label, { color: colors.text }]}>
+            运行来源：{Updates.updateId ? "OTA 远程更新" : "内置包（APK 自带）"}
+          </Text>
+          <Text style={[styles.hint, { color: colors.textMuted }]}>
+            {Updates.updateId
+              ? "✅ 当前跑的是 OTA 远程更新，已是最新代码"
+              : "⚠️ 当前是 APK 自带的老代码，OTA 未应用——请从最近任务彻底关闭 App 再打开"}
+          </Text>
+        </View>
       </CollapsibleSection>
 
       <Text style={[styles.hint, { color: colors.textMuted }]}>支持所有 OpenAI 兼容 API：OpenAI / DeepSeek / Moonshot / 本地模型等</Text>
@@ -1130,6 +1224,21 @@ ${text}
             <View style={styles.modalButtons}>
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowAiNameModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
               <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveAiName}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 检索屏蔽词弹窗 */}
+      <Modal visible={showBlockedModal} transparent animationType="fade">
+        <View style={styles.overlay}>
+          <View style={styles.modal}>
+            <Text style={styles.modalTitle}>检索屏蔽词</Text>
+            <TextInput style={styles.input} value={inputBlocked} onChangeText={setInputBlocked} placeholder="用逗号分隔，如：小明、私藏" placeholderTextColor="#9B9A97" autoFocus />
+            <Text style={styles.modalHint}>高频词不参与记忆检索召回，默认屏蔽你和 TA 的称呼{"\n"}只影响检索，不会修改记忆内容；留空恢复默认</Text>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowBlockedModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveBlocked}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
             </View>
           </View>
         </View>
@@ -1372,9 +1481,6 @@ ${text}
                       <Text style={[styles.fragmentSummary, { color: colors.text }]}>
                         {replaceFragmentPlaceholder(frag.summary, frag.timestamp, user_nickname, ai_name)}
                       </Text>
-                      {frag.emotion ? (
-                        <Text style={[styles.fragmentEmotionLine, { color: colors.accent }]}>情绪：{replaceFragmentPlaceholder(frag.emotion, frag.timestamp, user_nickname, ai_name)}</Text>
-                      ) : null}
                     </View>
                   ))
                 )}
@@ -1387,15 +1493,15 @@ ${text}
                   style={[styles.input, { marginTop: 8 }]}
                   value={newFragmentSummary}
                   onChangeText={setNewFragmentSummary}
-                  placeholder="片段摘要（必填，建议包含 [user] [time]）"
+                  placeholder="片段摘要（必填，建议包含 [user] [time]，写清发生了什么 + 细节 + 情绪）"
                   placeholderTextColor="#9B9A97"
                   multiline
                 />
                 <TextInput
                   style={[styles.input, { marginTop: 8 }]}
-                  value={newFragmentEmotion}
-                  onChangeText={setNewFragmentEmotion}
-                  placeholder="情绪标记（选填）"
+                  value={newFragmentGist}
+                  onChangeText={setNewFragmentGist}
+                  placeholder="一句话概要（选填，20 字内，留空自动截取）"
                   placeholderTextColor="#9B9A97"
                 />
                 <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8, gap: 8 }}>
@@ -1509,9 +1615,6 @@ ${text}
                   <Text style={[styles.fragmentText, { color: colors.text }]}>
                     {replaceFragmentPlaceholder(frag.summary, frag.timestamp, user_nickname, ai_name)}
                   </Text>
-                  {frag.emotion ? (
-                    <Text style={[styles.fragmentEmotionLine, { color: colors.accent }]}>情绪：{replaceFragmentPlaceholder(frag.emotion, frag.timestamp, user_nickname, ai_name)}</Text>
-                  ) : null}
                   <Text style={[styles.fragmentTime, { color: colors.textMuted }]}>
                     {new Date(frag.timestamp).toLocaleString()}
                   </Text>
@@ -1619,37 +1722,40 @@ ${text}
                   {/* 基础信息 */}
                   <View style={[styles.infoBlock, { borderBottomColor: colors.border, marginTop: 16 }]}>
                     <Text style={[styles.infoTitle, { color: colors.text }]}>基础信息</Text>
-                    {personaResult.basic_identity.nickname && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>昵称：{personaResult.basic_identity.nickname}</Text>}
-                    {personaResult.basic_identity.gender && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>性别：{personaResult.basic_identity.gender}</Text>}
-                    {personaResult.basic_identity.occupation && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>职业：{personaResult.basic_identity.occupation}</Text>}
-                    {personaResult.basic_identity.location && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>城市：{personaResult.basic_identity.location}</Text>}
-                    {personaResult.basic_identity.birthday && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>生日：{personaResult.basic_identity.birthday}</Text>}
+                    {personaResult.basic_identity?.nickname && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>昵称：{personaResult.basic_identity.nickname}</Text>}
+                    {personaResult.basic_identity?.gender && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>性别：{personaResult.basic_identity.gender}</Text>}
+                    {personaResult.basic_identity?.occupation && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>职业：{personaResult.basic_identity.occupation}</Text>}
+                    {personaResult.basic_identity?.location && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>城市：{personaResult.basic_identity.location}</Text>}
+                    {personaResult.basic_identity?.birthday && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>生日：{personaResult.basic_identity.birthday}</Text>}
                   </View>
 
-                  {/* 偏好 */}
-                  {(personaResult.preferences.likes.length > 0 || personaResult.preferences.dislikes.length > 0) && (
+                  {/* 属性（永久） */}
+                  {(personaResult.traits?.length ?? 0) > 0 && (
                     <View style={[styles.infoBlock, { borderBottomColor: colors.border }]}>
-                      <Text style={[styles.infoTitle, { color: colors.text }]}>偏好</Text>
-                      {personaResult.preferences.likes.length > 0 && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>喜欢：{personaResult.preferences.likes.join("、")}</Text>}
-                      {personaResult.preferences.dislikes.length > 0 && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>讨厌：{personaResult.preferences.dislikes.join("、")}</Text>}
+                      <Text style={[styles.infoTitle, { color: colors.text }]}>属性（永久）</Text>
+                      {personaResult.traits!.map((t, i) => (
+                        <Text key={i} style={[styles.infoLine, { color: colors.textSecondary }]}>· {t}</Text>
+                      ))}
                     </View>
                   )}
 
-                  {/* 心理状态 */}
-                  {(personaResult.psycho_state.personality_traits.length > 0 || personaResult.psycho_state.comm_preference) && (
+                  {/* 近况（状态） */}
+                  {(personaResult.states?.length ?? 0) > 0 && (
                     <View style={[styles.infoBlock, { borderBottomColor: colors.border }]}>
-                      <Text style={[styles.infoTitle, { color: colors.text }]}>心理状态</Text>
-                      {personaResult.psycho_state.personality_traits.length > 0 && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>性格：{personaResult.psycho_state.personality_traits.join("、")}</Text>}
-                      {personaResult.psycho_state.current_stressors.length > 0 && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>压力：{personaResult.psycho_state.current_stressors.join("、")}</Text>}
-                      {personaResult.psycho_state.comm_preference && <Text style={[styles.infoLine, { color: colors.textSecondary }]}>沟通偏好：{personaResult.psycho_state.comm_preference}</Text>}
+                      <Text style={[styles.infoTitle, { color: colors.text }]}>近况（7 天内有效）</Text>
+                      {personaResult.states!.map((s, i) => (
+                        <Text key={i} style={[styles.infoLine, { color: colors.textSecondary }]}>· {s}</Text>
+                      ))}
                     </View>
                   )}
 
-                  {/* 生活主线 */}
-                  {personaResult.life_quests.long_term_goals.length > 0 && (
+                  {/* 安排（事件） */}
+                  {(personaResult.events?.length ?? 0) > 0 && (
                     <View style={[styles.infoBlock, { borderBottomColor: colors.border }]}>
-                      <Text style={[styles.infoTitle, { color: colors.text }]}>生活主线</Text>
-                      <Text style={[styles.infoLine, { color: colors.textSecondary }]}>目标：{personaResult.life_quests.long_term_goals.join("、")}</Text>
+                      <Text style={[styles.infoTitle, { color: colors.text }]}>安排（到期提醒）</Text>
+                      {personaResult.events!.map((e, i) => (
+                        <Text key={i} style={[styles.infoLine, { color: colors.textSecondary }]}>· {e.text}（{dayjs(e.due_time).format("M/D HH:mm")}）</Text>
+                      ))}
                     </View>
                   )}
 
@@ -1678,11 +1784,13 @@ ${text}
           <View style={[styles.modal, { backgroundColor: colors.sectionBg }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>编辑{editFieldLabel}</Text>
             <TextInput
-              style={[styles.input, { color: colors.text, borderColor: colors.border }]}
+              style={[styles.input, styles.editFieldInput, { color: colors.text, borderColor: colors.border }]}
               value={editFieldValue}
               onChangeText={setEditFieldValue}
-              placeholder={`输入${editFieldLabel}，多项用逗号分隔`}
+              placeholder={`输入${editFieldLabel}，多项用逗号或换行分隔`}
               placeholderTextColor={colors.textMuted}
+              multiline
+              textAlignVertical="top"
               autoFocus
             />
             <View style={styles.modalButtons}>
@@ -1742,6 +1850,8 @@ const styles = StyleSheet.create({
   modal: { width: "85%", backgroundColor: "#fff", borderRadius: 12, padding: 24 },
   modalTitle: { fontSize: 17, fontWeight: "600", color: "#37352F", marginBottom: 16 },
   input: { borderWidth: 1, borderColor: "#E8E7E4", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: "#37352F" },
+  // 用户属性编辑框：多行可换行，长内容不再挤成一条细长条
+  editFieldInput: { minHeight: 120, maxHeight: 260, textAlignVertical: "top", lineHeight: 22 },
   modalHint: { fontSize: 12, color: "#9B9A97", marginTop: 8, lineHeight: 18 },
   modalButtons: { flexDirection: "row", justifyContent: "flex-end", marginTop: 20, gap: 12 },
   cancelBtn: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 6 },
@@ -1791,7 +1901,6 @@ const styles = StyleSheet.create({
   fragmentPriority: { fontSize: 12, fontWeight: "600" },
   fragmentDelete: { fontSize: 12 },
   fragmentText: { fontSize: 14, lineHeight: 20 },
-  fragmentEmotionLine: { fontSize: 13, marginTop: 6 },
   fragmentTime: { fontSize: 11, marginTop: 4 },
   sectionDivider: { borderTopWidth: StyleSheet.hairlineWidth },
   fragmentItem: { paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth },

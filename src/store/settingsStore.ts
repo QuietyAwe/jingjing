@@ -14,6 +14,8 @@ const LEGACY_NICKNAME_STORAGE = "user_nickname";
 const AI_NAME_STORAGE = "ai_name";
 const STREAM_OUTPUT_STORAGE = "stream_output";
 const THINKING_MODE_STORAGE = "thinking_mode";
+const AUTO_FOCUS_INPUT_STORAGE = "auto_focus_input";
+const BLOCKED_KEYWORDS_STORAGE = "blocked_keywords";
 const CUSTOM_COLORS_LIGHT_STORAGE = "custom_colors_light";
 const CUSTOM_COLORS_DARK_STORAGE = "custom_colors_dark";
 
@@ -39,6 +41,10 @@ interface SettingsState {
   ai_name: string;
   stream_output: boolean;
   thinking_mode: boolean;
+  /** AI 回复完成后自动聚焦输入框（弹起键盘），方便继续输入 */
+  auto_focus_input: boolean;
+  /** 检索屏蔽词（逗号/顿号分隔原文）。空串 = 未配置，默认屏蔽用户昵称 + AI 名称 */
+  blocked_keywords: string;
   customColorsLight: CustomBubbleColors;
   customColorsDark: CustomBubbleColors;
   isReady: boolean;
@@ -59,6 +65,10 @@ interface SettingsState {
   saveStreamOutput: (enabled: boolean) => Promise<void>;
   /** 保存思考模式开关 */
   saveThinkingMode: (enabled: boolean) => Promise<void>;
+  /** 保存「回复后自动弹起输入框」开关 */
+  saveAutoFocusInput: (enabled: boolean) => Promise<void>;
+  /** 保存检索屏蔽词（原文落库，切分解析交给 memory/identity.blockedWords） */
+  saveBlockedKeywords: (value: string) => Promise<void>;
   /** 保存自定义颜色（当前模式） */
   saveCustomColors: (colors: Partial<CustomBubbleColors>, mode: "light" | "dark") => Promise<void>;
 }
@@ -70,19 +80,23 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   ai_name: "",
   stream_output: false,
   thinking_mode: false,
+  auto_focus_input: true,
+  blocked_keywords: "",
   customColorsLight: {} as CustomBubbleColors,
   customColorsDark: {} as CustomBubbleColors,
   isReady: false,
 
   loadApiKey: async () => {
     try {
-      const [key, url, legacyNickname, aiName, stream, thinking, lightJson, darkJson] = await Promise.all([
+      const [key, url, legacyNickname, aiName, stream, thinking, autoFocus, blocked, lightJson, darkJson] = await Promise.all([
         AsyncStorage.getItem(API_KEY_STORAGE),
         AsyncStorage.getItem(BASE_URL_STORAGE),
         AsyncStorage.getItem(LEGACY_NICKNAME_STORAGE),
         AsyncStorage.getItem(AI_NAME_STORAGE),
         AsyncStorage.getItem(STREAM_OUTPUT_STORAGE),
         AsyncStorage.getItem(THINKING_MODE_STORAGE),
+        AsyncStorage.getItem(AUTO_FOCUS_INPUT_STORAGE),
+        AsyncStorage.getItem(BLOCKED_KEYWORDS_STORAGE),
         AsyncStorage.getItem(CUSTOM_COLORS_LIGHT_STORAGE),
         AsyncStorage.getItem(CUSTOM_COLORS_DARK_STORAGE),
       ]);
@@ -116,6 +130,9 @@ export const useSettingsStore = create<SettingsState>((set) => ({
         ai_name: aiName || "",
         stream_output: stream === "true",
         thinking_mode: thinking === "true",
+        // 默认开启；显式存过 "false" 才关闭
+        auto_focus_input: autoFocus !== "false",
+        blocked_keywords: blocked || "",
         customColorsLight,
         customColorsDark,
         isReady: true,
@@ -163,6 +180,17 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   saveThinkingMode: async (enabled: boolean) => {
     await AsyncStorage.setItem(THINKING_MODE_STORAGE, String(enabled));
     set({ thinking_mode: enabled });
+  },
+
+  saveAutoFocusInput: async (enabled: boolean) => {
+    await AsyncStorage.setItem(AUTO_FOCUS_INPUT_STORAGE, String(enabled));
+    set({ auto_focus_input: enabled });
+  },
+
+  saveBlockedKeywords: async (value: string) => {
+    const trimmed = value.trim();
+    await AsyncStorage.setItem(BLOCKED_KEYWORDS_STORAGE, trimmed);
+    set({ blocked_keywords: trimmed });
   },
 
   saveCustomColors: async (colors: Partial<CustomBubbleColors>, mode: "light" | "dark") => {

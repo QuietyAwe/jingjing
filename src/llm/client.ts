@@ -16,6 +16,10 @@ function _rebuild(): OpenAI {
     apiKey: _apiKey,
     ...(_baseUrl ? { baseURL: _baseUrl } : {}),
     dangerouslyAllowBrowser: true,
+    // 全局超时兜底：judge / 题库 / 题材抽取 / 记忆提取等辅助调用最坏 30s 必然返回。
+    // 各调用点均有兜底（ruleJudge / 内置题库 / fallback 决策），快速失败优于重试。
+    timeout: 30_000,
+    maxRetries: 0,
   });
   return _client;
 }
@@ -42,9 +46,9 @@ export function setBaseUrl(url: string): void {
   _client = null;
 }
 
-/** 检查是否已配置 API Key */
+/** 检查是否已配置 API Key（空串不算已配置，否则 getClient 会抛异常） */
 export function hasApiKey(): boolean {
-  return _apiKey !== null;
+  return _apiKey !== null && _apiKey !== "";
 }
 
 /** 获取可用模型列表 */

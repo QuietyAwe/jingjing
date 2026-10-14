@@ -24,6 +24,9 @@ export interface JudgeResult {
   correct?: boolean;
 }
 
+/** 判定超时：超时后回退 ruleJudge，别让一次网络挂起卡死发送流程 */
+const JUDGE_TIMEOUT_MS = 8000;
+
 const JUDGE_SYSTEM = `你是 20问游戏的裁判。你会得到一个「谜底」和玩家已经问过的问题及当时的回答。
 
 任务：
@@ -71,7 +74,8 @@ export async function judgeUserInput(
   try {
     const client = getClient();
     const routing = getModelRouting();
-    const response = await client.chat.completions.create({
+    // 超时兜底：判定挂起不能卡死整条发送链路，超时回退 ruleJudge
+    const request = client.chat.completions.create({
       model: routing.background_extraction_config.model,
       temperature: 0,
       response_format: { type: "json_object" },
@@ -80,13 +84,34 @@ export async function judgeUserInput(
         { role: "user", content: userPrompt },
       ],
     });
+    // 竞速落败的请求也要接住 rejection：超时后迟到的失败没人处理会变成 unhandled rejection
+    request.catch(() => {});
+    const response = await Promise.race([
+      request,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), JUDGE_TIMEOUT_MS)),
+    ]);
+    if (!response) {
+      logDebug("20问判定超时", `${JUDGE_TIMEOUT_MS}ms 未返回，回退规则判定`);
+      return null;
+    }
     const text = response.choices[0]?.message?.content;
     if (!text) return null;
 
-    const parsed = JSON.parse(stripFence(text)) as JudgeResult;
-    if (!parsed.intent) return null;
-    logDebug("20问判定", `意图=${parsed.intent} 答案=${parsed.answer ?? "-"} 依据=${parsed.reason ?? "-"}`);
-    return parsed;
+    // LLM 输出不做类型保证：intent/answer/correct 全部白名单校验。
+    // 尤其 correct 必须 === true 才算猜中——"false" 字符串经 Boolean() 会被判成猜中（假胜）
+    const parsed = JSON.parse(stripFence(text)) as Record<string, unknown>;
+    const intent = parsed.intent;
+    const VALID_INTENTS: GameIntent[] = ["question", "guess", "chitchat", "give_up", "rule_query"];
+    if (typeof intent !== "string" || !VALID_INTENTS.includes(intent as GameIntent)) return null;
+    const result: JudgeResult = { intent: intent as GameIntent };
+    if (parsed.answer === "yes" || parsed.answer === "no" || parsed.answer === "unknown") {
+      result.answer = parsed.answer;
+    }
+    if (typeof parsed.reason === "string") result.reason = parsed.reason;
+    if (typeof parsed.guess === "string") result.guess = parsed.guess;
+    if (result.intent === "guess") result.correct = parsed.correct === true;
+    logDebug("20问判定", `意图=${result.intent} 答案=${result.answer ?? "-"} 依据=${result.reason ?? "-"}`);
+    return result;
   } catch (err) {
     logDebug("20问判定失败", err instanceof Error ? err.message : String(err));
     return null;
@@ -105,7 +130,9 @@ export function ruleJudge(userText: string): JudgeResult | null {
   if (/(还有几次|还剩|第几问|怎么玩|规则)/.test(s)) {
     return { intent: "rule_query" };
   }
-  if (/[吗呢吧]\s*[?？]?$/.test(s) && s.length <= 30 && !/(是.+吗)$/.test(s)) {
+  // 注意：不要排除「是X吗」——「它是动物吗」「是个人物吗」是最常见的是非问句，
+  // 旧排除项 `!/(是.+吗)$/` 会把它们全部漏判成闲聊，判定模型不可用时游戏直接卡死
+  if (/[吗呢吧]\s*[?？]?$/.test(s) && s.length <= 30) {
     return { intent: "question", answer: "unknown", reason: "判定模型不可用，回退为不确定" };
   }
   return null;

@@ -14,7 +14,7 @@ import type { YachtSlot, ScoreMap } from "./rules";
 import { YACHT_SLOTS, availableSlots, previewScores, totalScore, upperSubtotal } from "./rules";
 import { MAX_ROLLS, TOTAL_ROUNDS } from "./engine";
 
-const AI_SYSTEM = `你在和玩家玩「快艇骰子」1v1 对战。你是 AI 玩家，目标是让自己的总分最高。
+const AI_SYSTEM = `你在和玩家玩「快艇骰子」1v1 对战。你是其中一名玩家，目标是让自己的总分最高。
 
 ## 规则（简要）
 - 5 个骰子，每轮最多掷 3 次。第一次全掷，之后可以选择保留某些骰子只重掷其余

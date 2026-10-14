@@ -11,9 +11,11 @@ interface Props {
   state: BombState;
   aiName?: string;
   onQuit?: () => void;
+  /** 操作禁用（AI 回合/发言中），防止并发退出竞态 */
+  disabled?: boolean;
 }
 
-export function BombCard({ state, aiName = "AI", onQuit }: Props) {
+export function BombCard({ state, aiName = "对方", onQuit, disabled }: Props) {
   const colors = useTheme();
   const { low, high } = currentRange(state);
 
@@ -40,12 +42,15 @@ export function BombCard({ state, aiName = "AI", onQuit }: Props) {
 
       <Text style={[styles.hint, { color: colors.textMuted }]}>
         {state.currentPlayer === "user" && !state.finished
-          ? "在聊天框输入 1-100 的数字来猜"
+          ? `在聊天框输入 ${low} ~ ${high} 之间的数字来猜`
           : "在聊天框可以继续闲聊"}
       </Text>
 
       {onQuit && !state.finished ? (
-        <Text style={[styles.quitText, { color: colors.textMuted }]} onPress={onQuit}>
+        <Text
+          style={[styles.quitText, { color: colors.textMuted }, disabled && { opacity: 0.4 }]}
+          onPress={() => !disabled && onQuit()}
+        >
           退出对局
         </Text>
       ) : null}

@@ -9,11 +9,11 @@ import { YACHT_SLOTS, totalScore, upperSubtotal, upperBonus } from "./rules";
 /**
  * 游戏区（稳定段）：对局信息与 AI 视角
  */
-export function buildYachtSection(state: YachtState): string {
+export function buildYachtSection(state: YachtState, ended = false): string {
   return [
-    `## 游戏：快艇骰子 1v1 对战（进行中）`,
+    ended ? `## 游戏：快艇骰子 1v1 对战（已结束）` : `## 游戏：快艇骰子 1v1 对战（进行中）`,
     `你和玩家正在玩快艇骰子，各 13 轮，每轮最多掷 3 次、最后在计分卡上选一项填分。`,
-    `你（AI）和玩家都在争取总分最高。`,
+    `你和玩家都在争取总分最高。`,
     ``,
     `【当前比分】我 ${totalScore(state.scores.ai)} - ${totalScore(state.scores.user)} 玩家`,
     `【进度】第 ${state.round}/13 轮`,
@@ -27,7 +27,7 @@ export function buildYachtSection(state: YachtState): string {
 
 /**
  * 本回合 AI 的动作提示（易变段，放在历史之后）
- * 让 AI 用自己的语气把决策说出来
+ * 用自然的一段话描述状态并让 AI 解释自己的决策
  */
 export function buildYachtActionHint(params: {
   state: YachtState;
@@ -37,22 +37,26 @@ export function buildYachtActionHint(params: {
   slot?: string;
   slotValue?: number;
   reason?: string;
+  aiName?: string;
+  playerLabel?: string;
 }): string {
   const { state, action, dice, kept, slot, slotValue, reason } = params;
-
-  if (action === "keep") {
-    return [
-      `你刚掷出：${dice.join(" ")}`,
-      `你决定保留 ${kept && kept.length > 0 ? kept.map((i) => dice[i]).join(" ") : "（全部重掷）"}，继续掷。`,
-      `用一两句话说说你的打算${reason ? `（你的想法是：${reason}）` : ""}，然后等玩家行动。`,
-    ].join("\n");
-  }
+  const aiName = params.aiName || "对方";
+  const playerLabel = params.playerLabel || "玩家";
+  const myScore = totalScore(state.scores.ai);
+  const userScore = totalScore(state.scores.user);
 
   if (action === "score") {
     return [
-      `你最终的骰子是：${dice.join(" ")}`,
-      `你选择了「${slot}」，得分 ${slotValue} 分。`,
-      `用一两句话说说为什么这么选${reason ? `（你的想法是：${reason}）` : ""}，然后交给玩家行动。`,
+      `你们在进行快艇游戏第 ${state.round} 回合，${aiName}刚投掷出了 ${dice.join(" ")}，选择了「${slot}」，得分 ${slotValue}，当前比分 ${userScore}比${myScore}。`,
+      `你最终的骰子是 ${dice.join(" ")}，你选择了「${slot}」，得分 ${slotValue}，用一两句话说说为什么这么选${reason ? `（你的想法是：${reason}）` : ""}，然后交给${playerLabel}行动。`,
+    ].join("\n");
+  }
+
+  if (action === "keep") {
+    return [
+      `${aiName}刚投掷出了 ${dice.join(" ")}，决定保留 ${kept && kept.length > 0 ? kept.map((i) => dice[i]).join(" ") : "（全部重掷）"}，当前比分 ${userScore}比${myScore}。`,
+      `用一两句话说说你的打算${reason ? `（你的想法是：${reason}）` : ""}，然后继续掷骰。`,
     ].join("\n");
   }
 
@@ -61,12 +65,15 @@ export function buildYachtActionHint(params: {
 
 /**
  * 开场提示：新的一局开始
+ * @param firstPlayer 谁先掷（先后手随机，别让 AI 说错）
  */
-export function buildYachtStartHint(): string {
+export function buildYachtStartHint(firstPlayer: "user" | "ai" = "user"): string {
   return [
     `你刚和玩家开始了一局快艇骰子 1v1 对战（13 轮）。`,
-    `规则已经由系统告诉玩家了，你不要重复规则。`,
-    `只说一两句简短的话表示开始，可以提一下自己的手气、或者打个招呼，然后等玩家先掷。`,
+    `规则玩家已经看到了，你不要重复规则。`,
+    `只说一两句简短的话表示开始，可以提一下自己的手气、或者打个招呼，然后${
+      firstPlayer === "user" ? "等玩家先掷。" : "你先掷骰子。"
+    }`,
   ].join("\n");
 }
 
@@ -86,6 +93,18 @@ export function buildYachtEndHint(state: YachtState): string {
     `对局结束：${result}。`,
     `用你自己的语气宣布结果（开心/不服气/惋惜都可以），`,
     `可以提一下这局亮点（比如某个大顺、快艇），然后自然地接回日常聊天。`,
+  ].join("\n");
+}
+
+/**
+ * 中途退出提示：收尾告别
+ */
+export function buildYachtQuitHint(state: YachtState): string {
+  const myScore = totalScore(state.scores.ai);
+  const userScore = totalScore(state.scores.user);
+  return [
+    `玩家中途退出了这局快艇骰子，当时比分 ${userScore} : ${myScore}（玩家 : 你）。`,
+    `用你的语气说一两句收尾告别的话（比如下次再战），不要报分数明细，然后自然地接回日常聊天。`,
   ].join("\n");
 }
 

@@ -5,6 +5,7 @@
 
 import { getUserInfo } from "@/db/queries";
 import { retrieve } from "./retrieval";
+import { buildEventNudges } from "./eventChecker";
 import { assemblePrompt, buildColdStartPrompt } from "@/prompt/assembler";
 import { getThresholds } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
@@ -54,7 +55,7 @@ export function buildChatContext(
   const isColdStart = !userInfo;
 
   // 2. 本地检索（PRD 2.1 节第 2-5 步）
-  const { topEvents, epiphany, keywords, hitFragments } = retrieve(userInput);
+  const { topEvents, epiphany, keywords, hitFragments, cuedFragmentIds } = retrieve(userInput);
 
   // 获取 AI 当前情境（自己的作息），拼成自然的一句注入到 [你] 段落
   const scene = getCurrentScene();
@@ -95,12 +96,18 @@ export function buildChatContext(
     epiphany,
     chatHistory,
     currentStatus,
-    hitFragments
+    hitFragments,
+    undefined, // tokenBudget 用默认值
+    cuedFragmentIds
   );
 
   const memoryCount = topEvents.length + (epiphany ? 1 : 0);
 
-  // Prompt 顺序：[system, state, game, memory, ...history, gameHint]
+  // 事件提醒：临近/过期事件的隐形提示词，AI 在回复里自然提起/关心。
+  // 对局中不注入——别让关心得知打断游戏节奏
+  const eventNudge = game ? null : buildEventNudges(userInput);
+
+  // Prompt 顺序：[system, state, game, memory, ...history, gameHint, eventNudge]
   const messages = [
     { role: "system" as const, content: assembled.system },
     ...(assembled.state ? [{ role: "system" as const, content: assembled.state }] : []),
@@ -108,6 +115,7 @@ export function buildChatContext(
     ...(assembled.memory ? [{ role: "system" as const, content: assembled.memory }] : []),
     ...assembled.messages,
     ...(game?.hint ? [{ role: "system" as const, content: game.hint }] : []),
+    ...(eventNudge ? [{ role: "system" as const, content: eventNudge }] : []),
   ];
   logDebug("上下文", `正常模式${game ? "(游戏中)" : ""}, 记忆: ${memoryCount} 条\n消息数: ${messages.length}\nsystem 长度: ${assembled.system.length}\nstate 长度: ${assembled.state.length}\nmemory 长度: ${assembled.memory.length}`);
   return {
