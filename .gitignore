@@ -39,3 +39,11 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# local dev logs & artifacts
+.expo-dev.log
+.gw-*.log
+$null
+
+# CodeBuddy project data（项目数据，勿删，仅不入库）
+.codebuddy/
