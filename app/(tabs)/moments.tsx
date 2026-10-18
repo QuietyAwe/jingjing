@@ -6,11 +6,13 @@ import {
   TouchableOpacity,
   StyleSheet,
   RefreshControl,
+  Alert,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useTheme } from "@/theme/useTheme";
-import { getMoments, getCommentsByMomentIds } from "@/db/queries";
+import { getMoments, getCommentsByMomentIds, getAllFriends, setFriendActive } from "@/db/queries";
+import { notifyMomentUpdates } from "@/moments/bus";
 import {
   postUserMoment,
   addComment,
@@ -19,7 +21,7 @@ import {
 } from "@/moments/service";
 import { MomentCard } from "@/components/MomentCard";
 import { MomentComposer } from "@/components/MomentComposer";
-import type { Moment, MomentComment, MoodTag } from "@/types/schema";
+import type { Moment, MomentComment, MoodTag, FriendPersona } from "@/types/schema";
 
 const PAGE_SIZE = 20;
 
@@ -35,6 +37,7 @@ export default function MomentsScreen() {
   const [items, setItems] = useState<Moment[]>([]);
   const [commentsMap, setCommentsMap] = useState<Record<number, MomentComment[]>>({});
   const [typingMap, setTypingMap] = useState<Record<number, boolean>>({});
+  const [friendMap, setFriendMap] = useState<Record<number, FriendPersona>>({});
   const [composerVisible, setComposerVisible] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -53,6 +56,12 @@ export default function MomentsScreen() {
     }
     setCommentsMap(nextComments);
     setTypingMap(nextTyping);
+
+    // 好友档案：feed 里好友动态/评论都靠它署名（含停用的，历史内容还要能显示名字）
+    const friends = getAllFriends();
+    const nextFriends: Record<number, FriendPersona> = {};
+    for (const f of friends) nextFriends[f.id] = f;
+    setFriendMap(nextFriends);
   }, []);
 
   // 首次加载 + 订阅 AI 发帖/评论落库后的刷新
@@ -80,6 +89,29 @@ export default function MomentsScreen() {
       postUserMoment(content, mood);
     },
     []
+  );
+
+  /** 长按好友头像/评论：一键让 ta 不再出现（停用，不洗记忆） */
+  const handleBlockFriend = useCallback(
+    (friendId: number) => {
+      const f = friendMap[friendId];
+      Alert.alert(
+        "不再让 ta 出现？",
+        `${f?.name ?? "这个人"} 以后不会再发动态、评论，也不会出现在会话列表里。以前认识过的事不会被抹掉。`,
+        [
+          { text: "取消", style: "cancel" },
+          {
+            text: "不再出现",
+            style: "destructive",
+            onPress: () => {
+              setFriendActive(friendId, false);
+              notifyMomentUpdates();
+            },
+          },
+        ]
+      );
+    },
+    [friendMap]
   );
 
   return (
@@ -116,8 +148,10 @@ export default function MomentsScreen() {
             moment={item}
             comments={commentsMap[item.id] ?? []}
             aiLabel={aiLabel}
+            friendMap={friendMap}
             aiTyping={typingMap[item.id]}
             onSendComment={addComment}
+            onBlockFriend={handleBlockFriend}
           />
         )}
         refreshControl={

@@ -9,16 +9,20 @@ import {
 } from "react-native";
 import dayjs from "dayjs";
 import { useTheme } from "@/theme/useTheme";
-import { MOOD_COLORS, type Moment, type MomentComment, type MoodTag } from "@/types/schema";
+import { MOOD_COLORS, type Moment, type MomentComment, type MoodTag, type FriendPersona } from "@/types/schema";
 
 interface Props {
   moment: Moment;
   comments: MomentComment[];
   /** AI 的称呼（评论区署名用） */
   aiLabel: string;
+  /** 好友档案（按 friend_id 索引），用于头像/署名 */
+  friendMap?: Record<number, FriendPersona>;
   /** AI 正在写评论（显示三点动效） */
   aiTyping?: boolean;
   onSendComment: (momentId: number, content: string) => void;
+  /** 长按好友头像：不让他再出现（快捷入口，不用翻设置） */
+  onBlockFriend?: (friendId: number) => void;
 }
 
 /** 相对时间：刚刚 / N 分钟前 / 今天 HH:mm / 昨天 / MM-DD */
@@ -70,7 +74,15 @@ function TypingDots() {
 /**
  * 单条心情动态卡片：头像、心情标签、正文、相对时间、评论线程与评论输入
  */
-export function MomentCard({ moment, comments, aiLabel, aiTyping, onSendComment }: Props) {
+export function MomentCard({
+  moment,
+  comments,
+  aiLabel,
+  friendMap,
+  aiTyping,
+  onSendComment,
+  onBlockFriend,
+}: Props) {
   const colors = useTheme();
   const [inputVisible, setInputVisible] = useState(false);
   const [draft, setDraft] = useState("");
@@ -82,7 +94,35 @@ export function MomentCard({ moment, comments, aiLabel, aiTyping, onSendComment 
   }, [fade]);
 
   const isMe = moment.author === "user";
+  const isAi = moment.author === "ai";
+  const authorFriend = moment.friend_id != null ? friendMap?.[moment.friend_id] : undefined;
   const moodColor = MOOD_COLORS[moment.mood as MoodTag] ?? colors.textMuted;
+
+  // 三种作者：我（实心）/ 主角色（强调色）/ 好友（头像 emoji + 名字）
+  const authorName = isMe ? "我" : isAi ? aiLabel : authorFriend?.name ?? "朋友";
+  const avatarText = isMe
+    ? "我"
+    : isAi
+      ? aiLabel.slice(0, 1)
+      : authorFriend?.avatar_emoji || authorFriend?.name?.slice(0, 1) || "友";
+  const avatarBg = isMe ? colors.bubbleUser : isAi ? colors.accent : colors.accentMuted;
+  const avatarFg = isMe ? colors.textOnAccent : isAi ? "#FFFFFF" : colors.accent;
+
+  /** 评论署名：好友用真名，否则评论区全是「我」和 AI，看不出谁在说话 */
+  const commentLabel = (author: MomentComment["author"], friendId?: number | null) => {
+    if (author === "ai") return aiLabel;
+    if (author === "friend") return friendMap?.[friendId ?? -1]?.name ?? "朋友";
+    return "我";
+  };
+
+  const commentAvatar = (author: MomentComment["author"], friendId?: number | null) => {
+    if (author === "ai") return aiLabel.slice(0, 1);
+    if (author === "friend") {
+      const f = friendMap?.[friendId ?? -1];
+      return f?.avatar_emoji || f?.name?.slice(0, 1) || "友";
+    }
+    return "我";
+  };
 
   const send = () => {
     const text = draft.trim();
@@ -106,20 +146,20 @@ export function MomentCard({ moment, comments, aiLabel, aiTyping, onSendComment 
     >
       {/* 头部：头像 + 名字 + 心情标签 + 时间 */}
       <View style={styles.header}>
-        <View
-          style={[
-            styles.avatar,
-            { backgroundColor: isMe ? colors.bubbleUser : colors.accent },
-          ]}
+        <TouchableOpacity
+          activeOpacity={0.8}
+          disabled={!authorFriend || !onBlockFriend}
+          onLongPress={() => {
+            if (authorFriend && onBlockFriend) onBlockFriend(authorFriend.id);
+          }}
+          style={[styles.avatar, { backgroundColor: avatarBg }]}
         >
-          <Text style={[styles.avatarText, { color: isMe ? colors.textOnAccent : "#FFFFFF" }]}>
-            {isMe ? "我" : aiLabel.slice(0, 1)}
-          </Text>
-        </View>
+          <Text style={[styles.avatarText, { color: avatarFg }]}>{avatarText}</Text>
+        </TouchableOpacity>
         <View style={styles.headerMain}>
           <View style={styles.headerTop}>
             <Text style={[styles.name, { color: colors.text }]} numberOfLines={1}>
-              {isMe ? "我" : aiLabel}
+              {authorName}
             </Text>
             <View style={styles.moodWrap}>
               <View style={[styles.moodDot, { backgroundColor: moodColor }]} />
@@ -138,14 +178,33 @@ export function MomentCard({ moment, comments, aiLabel, aiTyping, onSendComment 
       {/* 评论线程 */}
       {comments.length > 0 && (
         <View style={[styles.thread, { backgroundColor: colors.inputBg }]}>
-          {comments.map((c) => (
-            <View key={c.id} style={styles.commentRow}>
-              <Text style={[styles.commentName, { color: c.author === "ai" ? colors.accent : colors.textSecondary }]}>
-                {c.author === "ai" ? aiLabel : "我"}：
-              </Text>
-              <Text style={[styles.commentText, { color: colors.textSecondary }]}>{c.content}</Text>
-            </View>
-          ))}
+          {comments.map((c) => {
+            const cf = c.friend_id != null ? friendMap?.[c.friend_id] : undefined;
+            return (
+              <TouchableOpacity
+                key={c.id}
+                activeOpacity={0.8}
+                disabled={!cf || !onBlockFriend}
+                onLongPress={() => {
+                  if (cf && onBlockFriend) onBlockFriend(cf.id);
+                }}
+                style={styles.commentRow}
+              >
+                <Text style={[styles.commentAvatar, { color: colors.textMuted }]}>
+                  {commentAvatar(c.author, c.friend_id)}
+                </Text>
+                <Text
+                  style={[
+                    styles.commentName,
+                    { color: c.author === "user" ? colors.textSecondary : colors.accent },
+                  ]}
+                >
+                  {commentLabel(c.author, c.friend_id)}：
+                </Text>
+                <Text style={[styles.commentText, { color: colors.textSecondary }]}>{c.content}</Text>
+              </TouchableOpacity>
+            );
+          })}
           {aiTyping ? <TypingDots /> : null}
         </View>
       )}
@@ -261,6 +320,10 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     alignItems: "flex-start",
     marginBottom: 4,
+  },
+  commentAvatar: {
+    fontSize: 12,
+    marginRight: 4,
   },
   commentName: {
     fontSize: 13,

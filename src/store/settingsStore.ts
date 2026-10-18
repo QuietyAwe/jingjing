@@ -16,6 +16,8 @@ const STREAM_OUTPUT_STORAGE = "stream_output";
 const THINKING_MODE_STORAGE = "thinking_mode";
 const AUTO_FOCUS_INPUT_STORAGE = "auto_focus_input";
 const BLOCKED_KEYWORDS_STORAGE = "blocked_keywords";
+/** 好友偏好（对 AI 熟人圈的持续约束：交谁 + 怎么处），空串 = 不约束 */
+const FRIEND_PREFERENCES_STORAGE = "friend_preferences";
 const CUSTOM_COLORS_LIGHT_STORAGE = "custom_colors_light";
 const CUSTOM_COLORS_DARK_STORAGE = "custom_colors_dark";
 
@@ -45,6 +47,8 @@ interface SettingsState {
   auto_focus_input: boolean;
   /** 检索屏蔽词（逗号/顿号分隔原文）。空串 = 未配置，默认屏蔽用户昵称 + AI 名称 */
   blocked_keywords: string;
+  /** 好友偏好：约束 AI 熟人圈结交谁、怎么相处；空串 = 不约束 */
+  friend_preferences: string;
   customColorsLight: CustomBubbleColors;
   customColorsDark: CustomBubbleColors;
   isReady: boolean;
@@ -69,6 +73,8 @@ interface SettingsState {
   saveAutoFocusInput: (enabled: boolean) => Promise<void>;
   /** 保存检索屏蔽词（原文落库，切分解析交给 memory/identity.blockedWords） */
   saveBlockedKeywords: (value: string) => Promise<void>;
+  /** 保存好友偏好（原文落库，直接注入好友相关 prompt） */
+  saveFriendPreferences: (value: string) => Promise<void>;
   /** 保存自定义颜色（当前模式） */
   saveCustomColors: (colors: Partial<CustomBubbleColors>, mode: "light" | "dark") => Promise<void>;
 }
@@ -82,13 +88,14 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   thinking_mode: false,
   auto_focus_input: true,
   blocked_keywords: "",
+  friend_preferences: "",
   customColorsLight: {} as CustomBubbleColors,
   customColorsDark: {} as CustomBubbleColors,
   isReady: false,
 
   loadApiKey: async () => {
     try {
-      const [key, url, legacyNickname, aiName, stream, thinking, autoFocus, blocked, lightJson, darkJson] = await Promise.all([
+      const [key, url, legacyNickname, aiName, stream, thinking, autoFocus, blocked, friendPrefs, lightJson, darkJson] = await Promise.all([
         AsyncStorage.getItem(API_KEY_STORAGE),
         AsyncStorage.getItem(BASE_URL_STORAGE),
         AsyncStorage.getItem(LEGACY_NICKNAME_STORAGE),
@@ -97,6 +104,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
         AsyncStorage.getItem(THINKING_MODE_STORAGE),
         AsyncStorage.getItem(AUTO_FOCUS_INPUT_STORAGE),
         AsyncStorage.getItem(BLOCKED_KEYWORDS_STORAGE),
+        AsyncStorage.getItem(FRIEND_PREFERENCES_STORAGE),
         AsyncStorage.getItem(CUSTOM_COLORS_LIGHT_STORAGE),
         AsyncStorage.getItem(CUSTOM_COLORS_DARK_STORAGE),
       ]);
@@ -133,6 +141,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
         // 默认开启；显式存过 "false" 才关闭
         auto_focus_input: autoFocus !== "false",
         blocked_keywords: blocked || "",
+        friend_preferences: friendPrefs || "",
         customColorsLight,
         customColorsDark,
         isReady: true,
@@ -191,6 +200,12 @@ export const useSettingsStore = create<SettingsState>((set) => ({
     const trimmed = value.trim();
     await AsyncStorage.setItem(BLOCKED_KEYWORDS_STORAGE, trimmed);
     set({ blocked_keywords: trimmed });
+  },
+
+  saveFriendPreferences: async (value: string) => {
+    const trimmed = value.trim();
+    await AsyncStorage.setItem(FRIEND_PREFERENCES_STORAGE, trimmed);
+    set({ friend_preferences: trimmed });
   },
 
   saveCustomColors: async (colors: Partial<CustomBubbleColors>, mode: "light" | "dark") => {

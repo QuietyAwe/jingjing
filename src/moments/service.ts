@@ -17,36 +17,23 @@ import { generateMomentComment } from "@/llm/background";
 import { getPrompts, getThresholds } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
 import { recordUserMomentMemory, recordMomentExchangeMemory } from "@/moments/memory";
+import { notifyMomentUpdates, subscribeMomentUpdates } from "@/moments/bus";
+import { maybeFriendCommentsOnMoment, maybeFriendReplyToUser } from "@/friends/service";
+import { friendName } from "@/friends/persona";
 
-type Listener = () => void;
+/** 复用总线：AI 评论落库后与好友评论走同一个刷新通道 */
+export { subscribeMomentUpdates, notifyMomentUpdates };
 
-const listeners = new Set<Listener>();
 /** AI 正在构思评论的动态 ID（UI 显示「正在输入」三点动效） */
 const aiTypingMoments = new Set<number>();
 /** 已排队的 AI 评论 key（momentId:replyTo），防同一互动重复触发 */
 const pendingKeys = new Set<string>();
 
-/** 订阅动态数据变化（AI 发帖/评论落库后刷新 UI），返回取消订阅函数 */
-export function subscribeMomentUpdates(cb: Listener): () => void {
-  listeners.add(cb);
-  return () => {
-    listeners.delete(cb);
-  };
-}
-
-function notify(): void {
-  for (const cb of [...listeners]) {
-    try {
-      cb();
-    } catch (err) {
-      console.error("[moments] 刷新回调异常:", err);
-    }
-  }
-}
-
-/** 外部（发帖调度引擎）落库动态后触发 UI 刷新 */
-export function notifyMomentUpdates(): void {
-  notify();
+/** 评论上下文里的作者署名（好友评论不能显示成 [user]） */
+function authorLabel(author: "user" | "ai" | "friend", friendId?: number | null): string {
+  if (author === "ai") return "你";
+  if (author === "friend") return friendName(friendId) || "朋友";
+  return "[user]";
 }
 
 /** 该动态上是否有 AI 评论正在生成 */
@@ -64,11 +51,13 @@ function randomDelay(baseMs: number, minMult: number, maxMult: number): number {
 export function postUserMoment(content: string, mood: string): number {
   const id = insertMoment("user", content.trim(), mood);
   logDebug("动态", `用户发布动态 #${id}（${mood}）`);
-  notify();
+  notifyMomentUpdates();
   // 用户的心情即刻进记忆（即使本次没有互动，之后也要记得）
   recordUserMomentMemory(id);
   // AI 有概率来评论（真人不会每条都评）
   maybeAiCommentOnUserMoment(id);
+  // 朋友圈里的其他人也会看见：中不中、谁来说都是随机的
+  maybeFriendCommentsOnMoment(id);
   return id;
 }
 
@@ -76,7 +65,7 @@ export function postUserMoment(content: string, mood: string): number {
 export function addComment(momentId: number, content: string): number {
   const id = insertMomentComment(momentId, "user", content.trim());
   logDebug("动态", `用户评论动态 #${momentId}`);
-  notify();
+  notifyMomentUpdates();
 
   const moment = getMomentById(momentId);
   if (!moment) return id;
@@ -84,8 +73,12 @@ export function addComment(momentId: number, content: string): number {
   if (moment.author === "ai") {
     // 自己动态下收到评论：随机延迟回评
     scheduleAiComment(momentId, content.trim(), replyDelayMs());
+  } else if (moment.author === "friend") {
+    // 好友自己的动态：本人可能回一句（被动回复）
+    maybeFriendReplyToUser(momentId, content.trim());
   } else {
     maybeAiCommentOnUserMoment(momentId);
+    maybeFriendCommentsOnMoment(momentId);
   }
   return id;
 }
@@ -115,12 +108,12 @@ function scheduleAiComment(momentId: number, replyTo: string | undefined, delayM
   setTimeout(() => {
     pendingKeys.delete(key);
     aiTypingMoments.add(momentId);
-    notify();
+    notifyMomentUpdates();
     runAiComment(momentId, replyTo)
       .catch((err) => console.error("[moments] AI 评论异常:", err))
       .finally(() => {
         aiTypingMoments.delete(momentId);
-        notify();
+        notifyMomentUpdates();
       });
   }, delayMs);
 }
@@ -133,8 +126,17 @@ async function runAiComment(momentId: number, replyTo?: string): Promise<void> {
   const comments = getMomentComments(momentId);
   const { system_prompt } = getPrompts();
   const text = await generateMomentComment(system_prompt, {
-    moment: { author: moment.author, content: moment.content, mood: moment.mood },
-    comments: comments.map((c) => ({ author: c.author, content: c.content })),
+    moment: {
+      author: moment.author,
+      content: moment.content,
+      mood: moment.mood,
+      authorLabel: authorLabel(moment.author, moment.friend_id),
+    },
+    comments: comments.map((c) => ({
+      author: c.author,
+      content: c.content,
+      authorLabel: authorLabel(c.author, c.friend_id),
+    })),
     replyTo,
   });
 
@@ -145,7 +147,9 @@ async function runAiComment(momentId: number, replyTo?: string): Promise<void> {
 
   insertMomentComment(momentId, "ai", text);
   logDebug("动态", `AI 评论动态 #${momentId}：${text.slice(0, 30)}`);
-  notify();
+  notifyMomentUpdates();
   // 互动闭环：动态 + 评论来往一起计入记忆（不等巩固流）
   recordMomentExchangeMemory(momentId);
+  // 这条动态已经有对话了，围观的人更容易插句嘴
+  maybeFriendCommentsOnMoment(momentId);
 }

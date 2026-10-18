@@ -72,25 +72,27 @@ export function initSchema(): void {
       created_at TEXT NOT NULL
     );
 
-    -- 心情动态表（用户与 AI 双方发帖，类朋友圈）
+    -- 心情动态表（用户 / AI / AI 熟人圈好友发帖，类朋友圈）
     CREATE TABLE IF NOT EXISTS moments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      author TEXT NOT NULL CHECK(author IN ('user','ai')),
+      author TEXT NOT NULL CHECK(author IN ('user','ai','friend')),
       content TEXT NOT NULL,
       mood TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      friend_id INTEGER
     );
 
     -- 动态评论表
     CREATE TABLE IF NOT EXISTS moment_comments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       moment_id INTEGER NOT NULL,
-      author TEXT NOT NULL CHECK(author IN ('user','ai')),
+      author TEXT NOT NULL CHECK(author IN ('user','ai','friend')),
       content TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      friend_id INTEGER
     );
 
-    -- 周发帖计划（随作息表一起由 LLM 生成，AI 不定期发帖用）
+    -- 周发帖计划（AI 随作息表生成；好友按日掷骰后插入，author/friend_id 区分归属）
     CREATE TABLE IF NOT EXISTS post_plan (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       week_start TEXT NOT NULL,
@@ -98,6 +100,33 @@ export function initSchema(): void {
       time_slot INTEGER NOT NULL,
       theme_hint TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','posted','skipped')),
+      created_at TEXT NOT NULL,
+      author TEXT NOT NULL DEFAULT 'ai',
+      friend_id INTEGER
+    );
+
+    -- 每日实况（周表是习惯，这张表是今天具体怎么过的）
+    CREATE TABLE IF NOT EXISTS daily_log (
+      day TEXT PRIMARY KEY,
+      slots TEXT NOT NULL DEFAULT '',
+      mood TEXT NOT NULL DEFAULT '',
+      highlight TEXT NOT NULL DEFAULT '',
+      late_night TEXT NOT NULL DEFAULT '',
+      weather TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    -- AI 的熟人圈（不是用户的社交图谱，两个桶不混用）
+    CREATE TABLE IF NOT EXISTS friend_personas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      avatar_emoji TEXT NOT NULL DEFAULT '',
+      summary TEXT NOT NULL DEFAULT '',
+      profile TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      is_deleted INTEGER NOT NULL DEFAULT 0,
+      debut_at TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -111,6 +140,17 @@ export function initSchema(): void {
 
   // 兼容旧表 + 清理已废弃列
   migrateLegacyColumns(db);
+
+  // 好友圈/日实况相关的结构迁移（moments 的 CHECK 约束只能靠重建表扩展）
+  migrateSocialSchema(db);
+
+  // 表重建会连带删掉索引，这里统一补回（幂等）
+  db.execSync(`
+    CREATE INDEX IF NOT EXISTS idx_moments_created ON moments(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_comments_moment ON moment_comments(moment_id);
+    CREATE INDEX IF NOT EXISTS idx_post_plan_week ON post_plan(week_start);
+    CREATE INDEX IF NOT EXISTS idx_moments_friend ON moments(friend_id);
+  `);
 
   // 初始化默认事件"日常闲聊"（用于兜底，减少垃圾信息）
   initDefaultEvent(db);
@@ -185,6 +225,79 @@ function migrateLegacyColumns(db: ReturnType<typeof getDB>): void {
       db.execSync(`ALTER TABLE memory_fragments DROP COLUMN emotion`);
     } catch {}
   }
+}
+
+/** 读取建表 SQL（用于判断 CHECK 约束/列是否已更新） */
+function getTableSql(db: ReturnType<typeof getDB>, table: string): string {
+  const row = db.getFirstSync<{ sql: string | null }>(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+    table
+  );
+  return row?.sql ?? "";
+}
+
+/**
+ * 好友圈 / 日实况的结构迁移
+ *
+ * `moments.author` 与 `moment_comments.author` 原本带 `CHECK(author IN ('user','ai'))`，
+ * SQLite 无法直接修改 CHECK，只能重建表。用「新建 → 拷贝 → 删旧 → 改名」的顺序，
+ * 中途失败时旧表仍在，不会丢数据。
+ */
+function migrateSocialSchema(db: ReturnType<typeof getDB>): void {
+  // 1. moments
+  const momentsSql = getTableSql(db, "moments");
+  if (momentsSql && (!momentsSql.includes("friend_id") || !momentsSql.includes("'friend'"))) {
+    try {
+      db.execSync(`
+        CREATE TABLE moments_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          author TEXT NOT NULL CHECK(author IN ('user','ai','friend')),
+          content TEXT NOT NULL,
+          mood TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          friend_id INTEGER
+        );
+        INSERT INTO moments_new (id, author, content, mood, created_at, friend_id)
+          SELECT id, author, content, mood, created_at, NULL FROM moments;
+        DROP TABLE moments;
+        ALTER TABLE moments_new RENAME TO moments;
+      `);
+    } catch {}
+  }
+
+  // 2. moment_comments
+  const commentsSql = getTableSql(db, "moment_comments");
+  if (commentsSql && (!commentsSql.includes("friend_id") || !commentsSql.includes("'friend'"))) {
+    try {
+      db.execSync(`
+        CREATE TABLE moment_comments_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          moment_id INTEGER NOT NULL,
+          author TEXT NOT NULL CHECK(author IN ('user','ai','friend')),
+          content TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          friend_id INTEGER
+        );
+        INSERT INTO moment_comments_new (id, moment_id, author, content, created_at, friend_id)
+          SELECT id, moment_id, author, content, created_at, NULL FROM moment_comments;
+        DROP TABLE moment_comments;
+        ALTER TABLE moment_comments_new RENAME TO moment_comments;
+      `);
+    } catch {}
+  }
+
+  // 3. post_plan 归属列（后加字段，旧库缺失）
+  try {
+    db.execSync(`ALTER TABLE post_plan ADD COLUMN author TEXT NOT NULL DEFAULT 'ai'`);
+  } catch {}
+  try {
+    db.execSync(`ALTER TABLE post_plan ADD COLUMN friend_id INTEGER`);
+  } catch {}
+
+  // 4. 好友删除标记（删除只让人消失，不洗记忆；历史动态还要显示名字）
+  try {
+    db.execSync(`ALTER TABLE friend_personas ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0`);
+  } catch {}
 }
 
 /**

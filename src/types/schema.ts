@@ -205,6 +205,14 @@ export interface PromptsConfig {
   moment_generation_prompt: string;
   /** AI 在动态下评论/回评的文案生成指令 */
   moment_comment_prompt: string;
+  /** 每日实况生成指令（习惯基底 + 昨夜 + 节假日 + 天气 + 用户在场） */
+  daily_life_generation_prompt: string;
+  /** 好友花名册生成指令 */
+  friend_persona_generation_prompt: string;
+  /** 好友发帖文案生成指令 */
+  friend_moment_generation_prompt: string;
+  /** 好友评论生成指令 */
+  friend_comment_prompt: string;
 }
 
 export interface DefaultPlaceholders {
@@ -229,6 +237,14 @@ export interface ThresholdsConfig {
   moment_ai_reply_delay_ms: number;
   /** 发帖计划临场放弃的概率（0~1，真人偶尔想发又没发） */
   moment_post_skip_probability: number;
+  /** 好友花名册人数（默认 5） */
+  friend_roster_size: number;
+  /** 每位好友每天发帖的概率（0~1，掷骰后当天固定） */
+  friend_moment_probability: number;
+  /** 每条动态被好友评论的概率（0~1） */
+  friend_comment_probability: number;
+  /** 花名册行只列最近这么多天有互动（或刚创建）的好友 */
+  friend_roster_visible_days: number;
 }
 
 export interface WeightDecayConfig {
@@ -271,8 +287,8 @@ export const MOOD_COLORS: Record<MoodTag, string> = {
   期待: "#7FB77E",
 };
 
-/** 动态作者 */
-export type MomentAuthor = "user" | "ai";
+/** 动态作者：user=用户 ai=主角色 friend=AI 熟人圈里的某个人 */
+export type MomentAuthor = "user" | "ai" | "friend";
 
 /** 发帖计划执行状态 */
 export type PostPlanStatus = "pending" | "posted" | "skipped";
@@ -286,6 +302,8 @@ export interface Moment {
   /** 心情标签，如「开心」「平静」「低落」 */
   mood: string;
   created_at: string;
+  /** 好友动态指向 friend_personas.id；其他作者为 null */
+  friend_id?: number | null;
 }
 
 /** 动态评论表 (moment_comments) */
@@ -295,9 +313,10 @@ export interface MomentComment {
   author: MomentAuthor;
   content: string;
   created_at: string;
+  friend_id?: number | null;
 }
 
-/** 周发帖计划行 (post_plan)：随作息表一起由 LLM 生成，允许某天不发 */
+/** 周发帖计划行 (post_plan)：AI 随作息表生成，好友按日掷骰后插入 */
 export interface PostPlanItem {
   id: number;
   week_start: string;
@@ -308,6 +327,8 @@ export interface PostPlanItem {
   /** 主题/心情提示，发帖时作为生成参考 */
   theme_hint: string;
   status: PostPlanStatus;
+  author?: "ai" | "friend";
+  friend_id?: number | null;
 }
 
 /** 发帖计划草稿（LLM 输出行，落库时补 week_start 与 status） */
@@ -315,6 +336,55 @@ export interface PostPlanDraft {
   day_of_week: number;
   time_slot: number;
   theme_hint: string;
+  author?: "ai" | "friend";
+  friend_id?: number | null;
+}
+
+// --- AI 熟人圈 ---
+
+/**
+ * 好友档案（friend_personas）——「这个人是谁」的唯一真相源。
+ * 只把代码真正需要的字段结构化，人格/关系/口吻/自己的日子全部写在 profile 里。
+ */
+export interface FriendPersona {
+  id: number;
+  name: string;
+  /** 头像 emoji */
+  avatar_emoji: string;
+  /** 一句关系与态度（小传原文摘要），用于列表与状态区花名册行 */
+  summary: string;
+  /** 自由文本小传：按 [身份]/[说话方式]/[与关系]/[看法]/[自己的日子] 分段 */
+  profile: string;
+  /** 1=启用 0=停用（停用后不发帖、不评论、不进花名册，历史记忆保留） */
+  is_active: number;
+  /** 1=已删除：从生活里消失且不再出现在管理列表；历史动态仍保留名字 */
+  is_deleted?: number;
+  /** 首次登场时间 ISO；未到不入 feed、不进花名册、不开放私聊 */
+  debut_at: string | null;
+  created_at: string;
+}
+
+// --- 每日实况（daily_log） ---
+
+/**
+ * 当日实况：周基线表是「习惯」，这张表是「今天具体怎么过的」。
+ * slots 为 5 格（可能留白），空串表示该时段没有具体安排。
+ */
+export interface DailyLog {
+  /** YYYY-MM-DD（本地日期） */
+  day: string;
+  /** JSON string[]，长度 0~5 */
+  slots: string;
+  /** 今天整体心情（沿用心情标签集合） */
+  mood: string;
+  /** 今日主线，如「面试的一天」 */
+  highlight: string;
+  /** 0-6 点的深夜状态（当天凌晨），喂给清晨的实况生成 */
+  late_night: string;
+  /** 伪天气（按日期种子生成，当天稳定） */
+  weather: string;
+  created_at: string;
+  updated_at: string;
 }
 
 // --- 聊天相关 ---
@@ -328,6 +398,8 @@ export interface ChatMessage {
   thinking?: string;
   /** 属于哪一局游戏（有值则普通巩固流跳过，由游戏自己的巩固写入记忆） */
   game_id?: number;
+  /** 属于与哪位好友的私聊（有值则不进主聊天上下文、不进主巩固流） */
+  friend_id?: number;
   /** 游戏结束后合并出的摘要消息（替代整局对话，进上下文但不污染历史） */
   is_game_summary?: boolean;
 }

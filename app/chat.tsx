@@ -32,6 +32,8 @@ import { streamChat } from "@/llm/foreground";
 import { hasApiKey } from "@/llm/client";
 import { shouldConsolidate, runConsolidation, runCatchUpConsolidation } from "@/memory/consolidation";
 import { checkAndGenerateSchedule } from "@/memory/scheduler";
+import { ensureDailyLife } from "@/memory/dailyLife";
+import { checkAndGenerateFriends } from "@/friends/roster";
 import {
   getActiveGameSession,
   getGameSessionById,
@@ -195,7 +197,7 @@ function shouldShowDate(prevTs: string | null, ts: string): boolean {
 
 export default function ChatScreen() {
   const {
-    messages,
+    messages: allMessages,
     isLoading,
     streamingText,
     streamingChunks,
@@ -214,6 +216,13 @@ export default function ChatScreen() {
     clearDebugLogs,
     getHistory,
   } = useChatStore();
+
+  // 好友私聊是另一个空间：主聊天页只显示与 AI 的对话
+  // （在源头过滤一次，下游的分组/滚动/编辑/空态都自动只看主会话）
+  const messages = useMemo(
+    () => allMessages.filter((m) => !m.friend_id),
+    [allMessages]
+  );
 
   const { load: loadMeta, incrementTurn } = useMetaStore();
   const { loadApiKey, saveApiKey, saveBaseUrl, saveUserNickname, apiKey, baseUrl, user_nickname, ai_name, isReady } =
@@ -590,6 +599,14 @@ export default function ChatScreen() {
     });
   }, [isReady]);
 
+  // 今日实况：早上第一次进来就后台生成，失败回退周基线（不阻塞输入）
+  useEffect(() => {
+    if (!isReady) return;
+    ensureDailyLife().catch((err) => {
+      console.error("[chat] 今日实况生成异常:", err);
+    });
+  }, [isReady]);
+
   // 恢复未结束的对局（含快艇、数字炸弹、真心话状态）
   useEffect(() => {
     if (!isReady) return;
@@ -898,6 +915,12 @@ export default function ChatScreen() {
           if (animateIn) setAnimatingMsgId(aiMsg.id);
           addMessage(aiMsg);
           setLoading(false);
+
+          // 首轮对话完成后生成好友花名册：此刻人设已生效、用户称呼也有了，
+          // 生成出来的人最贴。函数内部幂等，已建过/已停用都不会重掷。
+          checkAndGenerateFriends().catch((err) =>
+            console.error("[chat] 好友花名册生成异常:", err),
+          );
 
           const shouldRun = shouldConsolidate();
           if (shouldRun) {
@@ -2113,6 +2136,12 @@ export default function ChatScreen() {
           if (animateIn) setAnimatingMsgId(aiMsg.id);
           addMessage(aiMsg);
           setLoading(false);
+
+          // 首轮对话完成后生成好友花名册：此刻人设已生效、用户称呼也有了，
+          // 生成出来的人最贴。函数内部幂等，已建过/已停用都不会重掷。
+          checkAndGenerateFriends().catch((err) =>
+            console.error("[chat] 好友花名册生成异常:", err),
+          );
 
           const shouldRun = shouldConsolidate();
           if (shouldRun) {

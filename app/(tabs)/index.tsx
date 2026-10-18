@@ -1,11 +1,14 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { View, Text, StyleSheet, Pressable, ScrollView } from "react-native";
+import { useFocusEffect } from "@react-navigation/native";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import dayjs from "dayjs";
 import { useChatStore } from "@/store/chatStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useTheme } from "@/theme/useTheme";
+import { getDebutedFriends } from "@/db/queries";
+import { friendAvatarText } from "@/friends/persona";
 
 /** 按时段打招呼（只给时段感，不报精确时间） */
 function greeting(hour: number): string {
@@ -43,13 +46,35 @@ export default function ConversationListScreen() {
 
   const messages = useChatStore((s) => s.messages);
   const { ai_name, user_nickname, loadApiKey } = useSettingsStore();
+  // 好友到登场时间不一定伴随状态变化：回到列表页时重算一次
+  const [, setFocusTick] = useState(0);
 
   useEffect(() => {
     loadApiKey();
   }, []);
 
+  useFocusEffect(
+    useCallback(() => {
+      setFocusTick((v) => v + 1);
+    }, [])
+  );
+
   const aiLabel = ai_name || "私藏";
-  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+  // 主会话只看主聊天：好友私聊各有自己的线程
+  const mainMessages = messages.filter((m) => !m.friend_id);
+  const lastMessage = mainMessages.length > 0 ? mainMessages[mainMessages.length - 1] : null;
+
+  // 好友入口：登场之后才出现，按最近一条私聊排序（没聊过的排在后面）
+  const friendRows = getDebutedFriends()
+    .map((f) => {
+      const thread = messages.filter((m) => m.friend_id === f.id);
+      return { friend: f, last: thread.length > 0 ? thread[thread.length - 1] : null };
+    })
+    .sort((a, b) => {
+      const ta = a.last ? dayjs(a.last.timestamp).valueOf() : 0;
+      const tb = b.last ? dayjs(b.last.timestamp).valueOf() : 0;
+      return tb - ta;
+    });
 
   return (
     <View style={[styles.container, { backgroundColor: colors.bg }]}>
@@ -110,6 +135,50 @@ export default function ConversationListScreen() {
           </View>
         </Pressable>
 
+        {/* 好友：登场之后才出现在会话列表；点头像进私聊 */}
+        {friendRows.length > 0 ? (
+          <>
+            <Text style={[styles.sectionLabel, { color: colors.textMuted }]}>朋友</Text>
+            {friendRows.map(({ friend, last }) => (
+              <Pressable
+                key={friend.id}
+                onPress={() => router.push(`/friend/${friend.id}`)}
+                style={({ pressed }) => [
+                  styles.chatRow,
+                  styles.friendRow,
+                  {
+                    backgroundColor: colors.sectionBg,
+                    borderColor: colors.border,
+                    transform: [{ scale: pressed ? 0.985 : 1 }],
+                    opacity: pressed ? 0.85 : 1,
+                  },
+                ]}
+              >
+                <View style={[styles.avatar, { backgroundColor: colors.accentMuted }]}>
+                  <Text style={styles.avatarEmoji}>{friendAvatarText(friend)}</Text>
+                </View>
+                <View style={styles.chatRowMain}>
+                  <View style={styles.chatRowTop}>
+                    <Text style={[styles.chatName, { color: colors.text }]} numberOfLines={1}>
+                      {friend.name}
+                    </Text>
+                    {last ? (
+                      <Text style={[styles.chatTime, { color: colors.textMuted }]}>
+                        {formatTime(last.timestamp)}
+                      </Text>
+                    ) : null}
+                  </View>
+                  <Text style={[styles.chatPreview, { color: colors.textMuted }]} numberOfLines={1}>
+                    {last
+                      ? previewText(last.content)
+                      : friend.summary || "在朋友圈见过，还没单独聊过"}
+                  </Text>
+                </View>
+              </Pressable>
+            ))}
+          </>
+        ) : null}
+
         {/* 扩展位：后续支持更多联系人 */}
         <View style={[styles.placeholderRow, { borderColor: colors.border }]}>
           <Text style={[styles.placeholderText, { color: colors.textMuted }]}>
@@ -159,6 +228,19 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 20,
     fontWeight: "600",
+  },
+  avatarEmoji: {
+    fontSize: 22,
+  },
+  sectionLabel: {
+    marginTop: 20,
+    marginBottom: 8,
+    marginLeft: 4,
+    fontSize: 12,
+    letterSpacing: 1,
+  },
+  friendRow: {
+    marginTop: 10,
   },
   chatRowMain: {
     flex: 1,

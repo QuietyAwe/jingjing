@@ -134,7 +134,14 @@ export function shouldConsolidate(): boolean {
  * @returns 是否成功写入
  */
 export async function runConsolidation(
-  recentMessages: Array<{ id: string; timestamp: string; role: string; content: string; game_id?: number }>,
+  recentMessages: Array<{
+    id: string;
+    timestamp: string;
+    role: string;
+    content: string;
+    game_id?: number;
+    friend_id?: number;
+  }>,
   opts?: { catchUp?: boolean },
 ): Promise<boolean> {
   const counterBefore = parseInt(getMeta("turn_counter") ?? "0", 10);
@@ -178,8 +185,9 @@ export async function runConsolidation(
     const start = Math.min(resolveCursor(recentMessages), windowStart);
     const windowMessages = recentMessages.slice(start, windowStart);
     // 游戏回合由游戏自己的巩固写入记忆，这里跳过，避免重复记账。
+    // 好友私聊同理：好友对话不进主 AI 记忆（信息隔离），只留一条弱痕迹。
     // 注意：被跳过的只是「不参与提取」，游标仍会推进——否则一整段对局会让巩固反复空转
-    const snapshot = windowMessages.filter((m) => !m.game_id);
+    const snapshot = windowMessages.filter((m) => !m.game_id && !m.friend_id);
     // 批末消息时间 = 这批对话实际发生的时刻：提取提示词与落库时间戳都用它，
     // 避免把历史对话当成「现在」巩固（否则几天前的事被写成「今天」）
     const batchEndTs =

@@ -10,6 +10,7 @@ import { assemblePrompt, buildColdStartPrompt } from "@/prompt/assembler";
 import { getThresholds } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
 import { getCurrentScene, formatScene } from "./scheduler";
+import { resolveFriendMention } from "@/friends/persona";
 import type { ChatMessage, UserInfo } from "@/types/schema";
 
 /** 游戏注入：稳定段放记忆区之前，易变段放历史之后 */
@@ -89,6 +90,10 @@ export function buildChatContext(
     };
   }
 
+  // 用户提到某位好友的名字：前置她的档案卡
+  // （档案回答「她是谁」，片段回答「她说过什么」，不混为一谈）
+  const mention = resolveFriendMention(userInput);
+
   // 正常流程：拼装含状态区 + 记忆区的 prompt
   const assembled = assemblePrompt(
     userInfo,
@@ -98,7 +103,17 @@ export function buildChatContext(
     currentStatus,
     hitFragments,
     undefined, // tokenBudget 用默认值
-    cuedFragmentIds
+    cuedFragmentIds,
+    mention
+      ? {
+          name: mention.friend.name,
+          profile: mention.friend.profile,
+          fragments: mention.fragments.map((f) => ({
+            summary: f.summary,
+            timestamp: f.timestamp,
+          })),
+        }
+      : undefined
   );
 
   const memoryCount = topEvents.length + (epiphany ? 1 : 0);

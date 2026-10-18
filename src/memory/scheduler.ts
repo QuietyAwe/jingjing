@@ -1,6 +1,12 @@
 // ============================================================
 // 行为时间表模块
-// 生成每周行为时间表，查询当前状态用于 Prompt 注入
+//
+// 两层：
+// - 周基线表 behavior_schedule = 习惯（稳定，一周生成一次）
+// - 当日实况 daily_log = 今天具体怎么过的（每天生成一次，见 dailyLife.ts）
+//
+// getCurrentScene 优先取当日实况，实况缺失/该格留白时回退基线——
+// 生成失败不影响功能，只是没那么真。
 // ============================================================
 
 import dayjs from "dayjs";
@@ -17,50 +23,11 @@ import { generateSchedule } from "@/llm/background";
 import { getPrompts } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
 import type { PostPlanDraft } from "@/types/schema";
+import { getWeekStart, getCurrentTimeSlot, getCurrentDayOfWeek } from "./week";
+import { getLiveDay, getLateNight, formatPastDaysForWeekly, dayKey } from "./dailyLife";
 
-/** 时段定义 */
-const TIME_SLOTS = [
-  { index: 0, label: "早", range: "6-9点" },
-  { index: 1, label: "上午", range: "9-12点" },
-  { index: 2, label: "午", range: "12-15点" },
-  { index: 3, label: "下午", range: "15-18点" },
-  { index: 4, label: "晚", range: "18-23点" },
-];
-
-/** 获取本周一的日期字符串 */
-export function getWeekStart(date: dayjs.Dayjs = dayjs()): string {
-  const monday = date.day() === 0 ? date.subtract(6, "day") : date.startOf("week").add(1, "day");
-  return monday.format("YYYY-MM-DD");
-}
-
-/** 根据当前时间获取时段索引 */
-export function getCurrentTimeSlot(hour: number): number {
-  if (hour < 6) return -1;  // 深夜/凌晨，特殊处理
-  if (hour < 9) return 0;   // 早(6-9点)
-  if (hour < 12) return 1;  // 上午(9-12点)
-  if (hour < 15) return 2;  // 午(12-15点)
-  if (hour < 18) return 3;  // 下午(15-18点)
-  return 4;                 // 晚(18-23点)
-}
-
-/**
- * 深夜活动（0-6点）
- * 以「你」叙述 AI 自身状态（状态区为 system 内容，其中的「你」指 AI），
- * 指代用户时用 [user] 变量，由状态区渲染替换为昵称，避免人称混淆
- */
-const LATE_NIGHT_ACTIVITIES = [
-  "准备睡觉了",
-  "已经睡着了，被[user]叫醒了",
-  "还在迷糊中",
-  "做了个奇怪的梦",
-  "失眠中，正好[user]来了",
-];
-
-/** 根据当前时间获取星期几（0=周一, 6=周日） */
-export function getCurrentDayOfWeek(): number {
-  const day = dayjs().day();
-  return day === 0 ? 6 : day - 1;
-}
+/** 周/时段换算对外仍从本模块导出（调用方不必感知拆分） */
+export { getWeekStart, getCurrentTimeSlot, getCurrentDayOfWeek };
 
 /** 生成中的调用（in-flight 护栏）：聊天页与动态引擎可能并发触发，避免重复生成落库两份 */
 let generatingSchedule: Promise<void> | null = null;
@@ -95,20 +62,25 @@ async function doCheckAndGenerateSchedule(): Promise<void> {
     return;
   }
 
-  // 获取上周时间表作为参考
+  // 上周实况优先于上周计划：实况才是习惯的证据
+  // （重复出现的事自然沉淀成习惯，只试过一次的事自然消退）
+  const lastWeekActuals = formatPastDaysForWeekly(7);
   const lastWeekStart = dayjs(weekStart).subtract(7, "day").format("YYYY-MM-DD");
   const lastWeekSchedule = hasScheduleForWeek(lastWeekStart)
     ? getWeekSchedule(lastWeekStart)
     : [];
 
   try {
-    const result = await generateSchedule(system_prompt, lastWeekSchedule);
+    const result = await generateSchedule(system_prompt, lastWeekSchedule, 30000, lastWeekActuals);
     if (result && result.schedule.length > 0) {
       insertSchedule(weekStart, result.schedule);
       // 发帖计划随作息表一并落库；LLM 没给（旧提示词覆盖层）就用兜底计划
       const plan = result.post_plan.length > 0 ? result.post_plan : getDefaultPostPlan();
       insertPostPlan(weekStart, plan);
-      logDebug("时间表", `生成完成，作息 ${result.schedule.length} 条，发帖计划 ${plan.length} 条`);
+      logDebug(
+        "时间表",
+        `生成完成，作息 ${result.schedule.length} 条，发帖计划 ${plan.length} 条${lastWeekActuals ? "（参考了上周实况）" : ""}`
+      );
     } else {
       logDebug("时间表", "LLM 返回空，使用默认时间表");
       insertSchedule(weekStart, getDefaultSchedule());
@@ -128,42 +100,57 @@ async function doCheckAndGenerateSchedule(): Promise<void> {
  * 用途：让 AI 在深夜/午休等场景下表现出符合自身作息的状态感
  */
 export interface AIScene {
-  /** 当前活动短语，例如「在窗边看书」「准备睡觉了」 */
+  /** 当前活动短语，例如「在窗边看书」「凌晨才睡着，还困着」 */
   activity: string;
-  /** 今天已完成的活动，例如 ['晨跑','看书'] */
+  /** 今天已完成的事（只作为“记得今天做过什么”的素材，不再复述成流水账） */
   done: string[];
+  /** 今天整体心情（来自当日实况） */
+  mood: string;
+  /** 今日主线，如「面试的一天」 */
+  highlight: string;
+  /** 伪天气（当天稳定） */
+  weather: string;
+  /** true=来自当日实况；false=回退周基线 */
+  isLive: boolean;
 }
 
-// 缓存深夜状态，避免每次调用都随机变化
-let cachedLateNightActivity: string | null = null;
-let cachedLateNightHour: number = -1;
-
-export function getCurrentScene(): AIScene | null {
-  const weekStart = getWeekStart();
-  const now = dayjs();
-  const dayOfWeek = getCurrentDayOfWeek();
+export function getCurrentScene(now: dayjs.Dayjs = dayjs()): AIScene | null {
+  const weekStart = getWeekStart(now);
+  const dayOfWeek = getCurrentDayOfWeek(now);
   const timeSlot = getCurrentTimeSlot(now.hour());
+  const today = dayKey(now);
+  const live = getLiveDay(today);
 
-  // 深夜时段（0-6点）使用缓存，同一小时内保持一致
+  // 深夜（0-6 点）：由当天种子决定，且会被晨间实况生成读作因果起点
   if (timeSlot === -1) {
-    const currentHour = now.hour();
-    if (cachedLateNightHour !== currentHour || !cachedLateNightActivity) {
-      cachedLateNightActivity = LATE_NIGHT_ACTIVITIES[Math.floor(Math.random() * LATE_NIGHT_ACTIVITIES.length)];
-      cachedLateNightHour = currentHour;
-    }
-    return { activity: cachedLateNightActivity, done: [] };
+    return {
+      activity: getLateNight(today),
+      done: [],
+      mood: live?.mood ?? "",
+      highlight: live?.highlight ?? "",
+      weather: live?.weather ?? "",
+      isLive: false,
+    };
   }
 
-  // 非深夜时段清除缓存
-  cachedLateNightActivity = null;
-  cachedLateNightHour = -1;
+  const baseline = getCurrentActivity(dayOfWeek, timeSlot, weekStart);
+  const liveActivity = live?.slots[timeSlot]?.trim();
 
-  const currentActivity = getCurrentActivity(dayOfWeek, timeSlot, weekStart);
-  if (!currentActivity) return null;
+  // 实况这一格可能故意留白（发呆、补觉），此时回退习惯基线
+  const activity = liveActivity || baseline;
+  if (!activity) return null;
+
+  const done = live
+    ? live.slots.slice(0, timeSlot).filter(Boolean)
+    : getEndedActivities(dayOfWeek, timeSlot, weekStart);
 
   return {
-    activity: currentActivity,
-    done: getEndedActivities(dayOfWeek, timeSlot, weekStart),
+    activity,
+    done,
+    mood: live?.mood ?? "",
+    highlight: live?.highlight ?? "",
+    weather: live?.weather ?? "",
+    isLive: Boolean(liveActivity),
   };
 }
 
@@ -178,15 +165,13 @@ function timeOfDay(hour: number): string {
 }
 
 /**
- * 把 AI 当前情境拼成一句自然的话，注入到 Prompt 的 [你] 段落
- * 例如「下午，你刚看完书；今天已经晨跑、看书」
+ * 把 AI 当前情境拼成一句当下处境，注入状态区。
  *
- * 刻意不报精确时间——精确时间由消息时间戳持续提供，
- * 这里只给「深夜/下午」这样的时段感，用来配合作息判断。
+ * 刻意只给一句：真人不复述自己一天的流水账（「今天已经晨跑、看书」），
+ * done 列表留作 remark 素材——AI 需要时能提，但不主动报备。
  */
 export function formatScene(scene: AIScene, now: dayjs.Dayjs = dayjs()): string {
-  const done = scene.done.length > 0 ? `；今天已经${scene.done.join("、")}` : "";
-  return `${timeOfDay(now.hour())}，你${scene.activity}${done}`;
+  return `${timeOfDay(now.hour())}，你${scene.activity}`;
 }
 
 /** 默认时间表（LLM 生成失败时的兜底） */

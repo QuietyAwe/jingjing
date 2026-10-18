@@ -19,6 +19,7 @@ import {
   getMomentById,
   getMomentComments,
 } from "@/db/queries";
+import { friendName } from "@/friends/persona";
 import type { Moment, MomentComment } from "@/types/schema";
 
 export interface MomentMemoryExtraction {
@@ -49,9 +50,15 @@ const EXTRACT_SYSTEM = `你要把一次「心情动态」（类似朋友圈）�
 严格输出 JSON：
 {"gist":"...","summary":"...","keywords":["..."],"priority":5}`;
 
+/** 动态/评论里的作者署名（好友用真名，才能被记忆检索「小雨说过」） */
+function authorLabel(author: string, friendId?: number | null): string {
+  if (author === "ai") return "[ai]";
+  if (author === "friend") return friendName(friendId) || "朋友";
+  return "[user]";
+}
+
 function formatMomentLine(m: Moment): string {
-  const who = m.author === "ai" ? "[ai]" : "[user]";
-  return `${who} 发布（${m.mood || "未标"}）：${m.content}`;
+  return `${authorLabel(m.author, m.friend_id)} 发布（${m.mood || "未标"}）：${m.content}`;
 }
 
 /**
@@ -78,7 +85,7 @@ async function extractMomentMemory(
     ``,
     `## 评论区`,
     comments.length > 0
-      ? comments.map((c) => `${c.author === "ai" ? "[ai]" : "[user]"}：${c.content}`).join("\n")
+      ? comments.map((c) => `${authorLabel(c.author, c.friend_id)}：${c.content}`).join("\n")
       : "（没有评论）",
     ``,
     `请输出 JSON。`,
@@ -119,10 +126,14 @@ async function extractMomentMemory(
 }
 
 /** 记忆事件标题（同名事件只建一次，之后追加片段） */
-function eventTextFor(moment: Moment, kind: MomentMemoryKind): string {
+function eventTextFor(moment: Moment, kind: MomentMemoryKind, comments: MomentComment[]): string {
   if (kind === "ai_moment") return "我的心情动态";
-  if (moment.author === "ai") return "和[user]在动态下的互动";
-  return "[user]的心情动态";
+  if (kind === "user_moment") return "[user]的心情动态";
+  // 好友参与的互动统一挂一个事件：按好友分事件会让事件表迅速膨胀
+  if (moment.author === "friend" || comments.some((c) => c.author === "friend")) {
+    return "朋友圈日常";
+  }
+  return moment.author === "ai" ? "和[user]在动态下的互动" : "[user]的心情动态";
 }
 
 /**
@@ -141,7 +152,7 @@ async function writeMomentMemory(momentId: number, kind: MomentMemoryKind): Prom
   }
 
   insertEpisode(
-    eventTextFor(moment, kind),
+    eventTextFor(moment, kind, comments),
     extraction.gist,
     extraction.summary,
     extraction.priority,

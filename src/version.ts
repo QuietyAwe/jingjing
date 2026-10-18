@@ -7,4 +7,4 @@
 // 运行时版本，导致已装设备收不到后续 OTA。
 // ============================================================
 
-export const RELEASE_VERSION = "1.0.11";
+export const RELEASE_VERSION = "1.0.12";

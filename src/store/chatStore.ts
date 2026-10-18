@@ -42,6 +42,8 @@ interface ChatState {
   deleteMessage: (id: string) => void;
   /** 整局删除：移除该局游戏的全部消息（游戏合并卡片） */
   deleteMessagesByGameId: (gameId: number) => void;
+  /** 清空与某位好友的私聊记录 */
+  deleteMessagesByFriendId: (friendId: number) => void;
   editMessage: (id: string, content: string) => void;
   setLoading: (loading: boolean) => void;
   setStreamingText: (text: string) => void;
@@ -152,6 +154,9 @@ export const useChatStore = create<ChatState>()(
       deleteMessagesByGameId: (gameId) =>
         set((state) => ({ messages: state.messages.filter((m) => m.game_id !== gameId) })),
 
+      deleteMessagesByFriendId: (friendId) =>
+        set((state) => ({ messages: state.messages.filter((m) => m.friend_id !== friendId) })),
+
       editMessage: (id, content) =>
         set((state) => ({
           messages: state.messages.map((m) => (m.id === id ? { ...m, content } : m)),
@@ -191,7 +196,8 @@ export const useChatStore = create<ChatState>()(
       getHistory: () => {
         const { context_history_rounds } = getThresholds();
         const window = context_history_rounds * 2; // 每轮 = user + assistant
-        const msgs = get().messages;
+        // 好友私聊是另一个空间：主聊天的上下文与记忆都不该看到它
+        const msgs = get().messages.filter((m) => !m.friend_id);
         // 把已结束对局的游戏对话合并成一条摘要，避免污染上下文
         const merged = mergeEndedGameMessages(msgs);
         // system 消息（游戏提示等）只用于 UI 展示，不进入模型上下文；

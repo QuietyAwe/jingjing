@@ -21,6 +21,8 @@ import type {
   PostPlanItem,
   PostPlanDraft,
   PostPlanStatus,
+  FriendPersona,
+  DailyLog,
 } from "@/types/schema";
 import dayjs from "dayjs";
 
@@ -638,6 +640,8 @@ export function clearAllData(): void {
   db.runSync("DELETE FROM moment_comments");
   db.runSync("DELETE FROM moments");
   db.runSync("DELETE FROM post_plan");
+  db.runSync("DELETE FROM daily_log");
+  db.runSync("DELETE FROM friend_personas");
 
   // 重新初始化默认事件"日常闲聊"
   const now = dayjs().toISOString();
@@ -894,15 +898,21 @@ export function insertSchedule(weekStart: string, items: ScheduleItem[]): void {
 // 心情动态 CRUD（moments / moment_comments / post_plan）
 // ============================================================
 
-/** 发布一条动态，返回自增 ID */
-export function insertMoment(author: MomentAuthor, content: string, mood: string): number {
+/** 发布一条动态，返回自增 ID（好友发帖传 friendId） */
+export function insertMoment(
+  author: MomentAuthor,
+  content: string,
+  mood: string,
+  friendId?: number | null
+): number {
   const db = getDB();
   const result = db.runSync(
-    "INSERT INTO moments (author, content, mood, created_at) VALUES (?, ?, ?, ?)",
+    "INSERT INTO moments (author, content, mood, created_at, friend_id) VALUES (?, ?, ?, ?, ?)",
     author,
     content,
     mood,
-    dayjs().toISOString()
+    dayjs().toISOString(),
+    friendId ?? null
   );
   return Number(result.lastInsertRowId);
 }
@@ -916,13 +926,13 @@ export function getMoments(limit: number, beforeId?: number): Moment[] {
   const db = getDB();
   if (beforeId !== undefined) {
     return db.getAllSync<Moment>(
-      "SELECT id, author, content, mood, created_at FROM moments WHERE id < ? ORDER BY id DESC LIMIT ?",
+      "SELECT id, author, content, mood, created_at, friend_id FROM moments WHERE id < ? ORDER BY id DESC LIMIT ?",
       beforeId,
       limit
     );
   }
   return db.getAllSync<Moment>(
-    "SELECT id, author, content, mood, created_at FROM moments ORDER BY id DESC LIMIT ?",
+    "SELECT id, author, content, mood, created_at, friend_id FROM moments ORDER BY id DESC LIMIT ?",
     limit
   );
 }
@@ -932,25 +942,27 @@ export function getMomentById(momentId: number): Moment | null {
   const db = getDB();
   return (
     db.getFirstSync<Moment>(
-      "SELECT id, author, content, mood, created_at FROM moments WHERE id = ?",
+      "SELECT id, author, content, mood, created_at, friend_id FROM moments WHERE id = ?",
       momentId
     ) ?? null
   );
 }
 
-/** 追加一条评论，返回自增 ID */
+/** 追加一条评论，返回自增 ID（好友评论传 friendId） */
 export function insertMomentComment(
   momentId: number,
   author: MomentAuthor,
-  content: string
+  content: string,
+  friendId?: number | null
 ): number {
   const db = getDB();
   const result = db.runSync(
-    "INSERT INTO moment_comments (moment_id, author, content, created_at) VALUES (?, ?, ?, ?)",
+    "INSERT INTO moment_comments (moment_id, author, content, created_at, friend_id) VALUES (?, ?, ?, ?, ?)",
     momentId,
     author,
     content,
-    dayjs().toISOString()
+    dayjs().toISOString(),
+    friendId ?? null
   );
   return Number(result.lastInsertRowId);
 }
@@ -959,7 +971,7 @@ export function insertMomentComment(
 export function getMomentComments(momentId: number): MomentComment[] {
   const db = getDB();
   return db.getAllSync<MomentComment>(
-    "SELECT id, moment_id, author, content, created_at FROM moment_comments WHERE moment_id = ? ORDER BY id ASC",
+    "SELECT id, moment_id, author, content, created_at, friend_id FROM moment_comments WHERE moment_id = ? ORDER BY id ASC",
     momentId
   );
 }
@@ -972,7 +984,7 @@ export function getCommentsByMomentIds(momentIds: number[]): Map<number, MomentC
   const db = getDB();
   const placeholders = momentIds.map(() => "?").join(",");
   const rows = db.getAllSync<MomentComment>(
-    `SELECT id, moment_id, author, content, created_at FROM moment_comments WHERE moment_id IN (${placeholders}) ORDER BY id ASC`,
+    `SELECT id, moment_id, author, content, created_at, friend_id FROM moment_comments WHERE moment_id IN (${placeholders}) ORDER BY id ASC`,
     ...momentIds
   );
   for (const row of rows) {
@@ -988,7 +1000,7 @@ export function getLatestAiComment(momentId: number): MomentComment | null {
   const db = getDB();
   return (
     db.getFirstSync<MomentComment>(
-      "SELECT id, moment_id, author, content, created_at FROM moment_comments WHERE moment_id = ? AND author = 'ai' ORDER BY id DESC LIMIT 1",
+      "SELECT id, moment_id, author, content, created_at, friend_id FROM moment_comments WHERE moment_id = ? AND author = 'ai' ORDER BY id DESC LIMIT 1",
       momentId
     ) ?? null
   );
@@ -1025,12 +1037,14 @@ export function insertPostPlan(weekStart: string, items: PostPlanDraft[]): void 
   const now = dayjs().toISOString();
   for (const item of items) {
     db.runSync(
-      "INSERT INTO post_plan (week_start, day_of_week, time_slot, theme_hint, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+      "INSERT INTO post_plan (week_start, day_of_week, time_slot, theme_hint, status, created_at, author, friend_id) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
       weekStart,
       item.day_of_week,
       item.time_slot,
       item.theme_hint,
-      now
+      now,
+      item.author ?? "ai",
+      item.friend_id ?? null
     );
   }
 }
@@ -1039,24 +1053,41 @@ export function insertPostPlan(weekStart: string, items: PostPlanDraft[]): void 
 export function getPostPlanForWeek(weekStart: string): PostPlanItem[] {
   const db = getDB();
   return db.getAllSync<PostPlanItem>(
-    "SELECT id, week_start, day_of_week, time_slot, theme_hint, status FROM post_plan WHERE week_start = ? ORDER BY day_of_week, time_slot",
+    "SELECT id, week_start, day_of_week, time_slot, theme_hint, status, author, friend_id FROM post_plan WHERE week_start = ? ORDER BY day_of_week, time_slot",
     weekStart
   );
 }
 
-/** 获取某天某时段待执行的发帖计划 */
+/**
+ * 获取某天某时段待执行的发帖计划
+ * @param author 'ai'（默认）只取主角色的计划，好友计划由调用方单独取
+ */
 export function getPendingPlanForSlot(
   weekStart: string,
   dayOfWeek: number,
-  timeSlot: number
+  timeSlot: number,
+  author: "ai" | "friend" = "ai"
 ): PostPlanItem[] {
   const db = getDB();
   return db.getAllSync<PostPlanItem>(
-    "SELECT id, week_start, day_of_week, time_slot, theme_hint, status FROM post_plan WHERE week_start = ? AND day_of_week = ? AND time_slot = ? AND status = 'pending'",
+    "SELECT id, week_start, day_of_week, time_slot, theme_hint, status, author, friend_id FROM post_plan WHERE week_start = ? AND day_of_week = ? AND time_slot = ? AND status = 'pending' AND author = ?",
     weekStart,
     dayOfWeek,
-    timeSlot
+    timeSlot,
+    author
   );
+}
+
+/** 某位好友在指定周某天是否已经有发帖计划（含已发/已跳过，用于每日只掷一次骰） */
+export function hasFriendPlanOnDay(weekStart: string, dayOfWeek: number, friendId: number): boolean {
+  const db = getDB();
+  const row = db.getFirstSync<{ cnt: number }>(
+    "SELECT COUNT(*) as cnt FROM post_plan WHERE week_start = ? AND day_of_week = ? AND author = 'friend' AND friend_id = ?",
+    weekStart,
+    dayOfWeek,
+    friendId
+  );
+  return (row?.cnt ?? 0) > 0;
 }
 
 /**
@@ -1081,4 +1112,199 @@ export function skipMissedPostPlans(weekStart: string, dayOfWeek: number, timeSl
 export function updatePostPlanStatus(planId: number, status: PostPlanStatus): void {
   const db = getDB();
   db.runSync("UPDATE post_plan SET status = ? WHERE id = ?", status, planId);
+}
+
+// ============================================================
+// 每日实况 CRUD（daily_log）
+// ============================================================
+
+/** 读取某天的实况 */
+export function getDailyLog(day: string): DailyLog | null {
+  const db = getDB();
+  return (
+    db.getFirstSync<DailyLog>("SELECT * FROM daily_log WHERE day = ?", day) ?? null
+  );
+}
+
+/**
+ * 写入/补齐某天的实况字段（只覆盖传入的字段）
+ * 深夜状态可能在白天生成之前就先落库，所以必须支持部分更新
+ */
+export function upsertDailyLog(
+  day: string,
+  patch: Partial<Omit<DailyLog, "day" | "created_at" | "updated_at">>
+): void {
+  const db = getDB();
+  const now = dayjs().toISOString();
+  const existing = getDailyLog(day);
+  if (!existing) {
+    db.runSync(
+      "INSERT INTO daily_log (day, slots, mood, highlight, late_night, weather, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      day,
+      patch.slots ?? "",
+      patch.mood ?? "",
+      patch.highlight ?? "",
+      patch.late_night ?? "",
+      patch.weather ?? "",
+      now,
+      now
+    );
+    return;
+  }
+  db.runSync(
+    `UPDATE daily_log SET
+       slots = ?, mood = ?, highlight = ?, late_night = ?, weather = ?, updated_at = ?
+     WHERE day = ?`,
+    patch.slots ?? existing.slots,
+    patch.mood ?? existing.mood,
+    patch.highlight ?? existing.highlight,
+    patch.late_night ?? existing.late_night,
+    patch.weather ?? existing.weather,
+    now,
+    day
+  );
+}
+
+/** 最近 N 天（不含今天）的实况，按日期升序 */
+export function getRecentDailyLogs(days: number, beforeDay: string): DailyLog[] {
+  const db = getDB();
+  return db.getAllSync<DailyLog>(
+    "SELECT * FROM daily_log WHERE day < ? ORDER BY day DESC LIMIT ?",
+    beforeDay,
+    days
+  ).reverse();
+}
+
+// ============================================================
+// 好友档案 CRUD（friend_personas）
+// ============================================================
+
+/**
+ * 全部好友（含停用/已删除），用于设置页管理与历史动态署名。
+ * 已删除的人必须还留在这里：ta 发过的动态要能显示名字（关系记忆不洗）。
+ */
+export function getAllFriends(): FriendPersona[] {
+  const db = getDB();
+  return db.getAllSync<FriendPersona>(
+    "SELECT * FROM friend_personas ORDER BY is_active DESC, id ASC"
+  );
+}
+
+/** 已启用且已登场的好友（没到登场时间的人不出现在 feed / 花名册 / 会话列表） */
+export function getDebutedFriends(nowIso: string = dayjs().toISOString()): FriendPersona[] {
+  const db = getDB();
+  return db.getAllSync<FriendPersona>(
+    "SELECT * FROM friend_personas WHERE is_active = 1 AND is_deleted = 0 AND (debut_at IS NULL OR debut_at <= ?) ORDER BY id ASC",
+    nowIso
+  );
+}
+
+export function getFriendById(friendId: number): FriendPersona | null {
+  const db = getDB();
+  return (
+    db.getFirstSync<FriendPersona>("SELECT * FROM friend_personas WHERE id = ?", friendId) ?? null
+  );
+}
+
+/** 花名册是否已生成过（含停用者：停用不等于没建过，不能因此自动重掷） */
+export function hasFriendRoster(): boolean {
+  const db = getDB();
+  const row = db.getFirstSync<{ cnt: number }>(
+    "SELECT COUNT(*) as cnt FROM friend_personas WHERE is_deleted = 0"
+  );
+  return (row?.cnt ?? 0) > 0;
+}
+
+export function insertFriendPersona(params: {
+  name: string;
+  avatar_emoji: string;
+  summary: string;
+  profile: string;
+  debut_at: string | null;
+}): number {
+  const db = getDB();
+  const result = db.runSync(
+    "INSERT INTO friend_personas (name, avatar_emoji, summary, profile, is_active, debut_at, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+    params.name,
+    params.avatar_emoji,
+    params.summary,
+    params.profile,
+    params.debut_at,
+    dayjs().toISOString()
+  );
+  return Number(result.lastInsertRowId);
+}
+
+/** 改名只改称呼，人格小传不动 */
+export function updateFriendName(friendId: number, name: string): void {
+  const db = getDB();
+  db.runSync("UPDATE friend_personas SET name = ? WHERE id = ?", name.trim(), friendId);
+}
+
+/** 停用/启用（停用即整人下线，历史记忆保留） */
+export function setFriendActive(friendId: number, active: boolean): void {
+  const db = getDB();
+  db.runSync("UPDATE friend_personas SET is_active = ? WHERE id = ?", active ? 1 : 0, friendId);
+}
+
+/** 全部停用（重建花名册：旧人下线、关系记忆保留） */
+export function deactivateAllFriends(): void {
+  const db = getDB();
+  db.runSync("UPDATE friend_personas SET is_active = 0 WHERE is_deleted = 0");
+}
+
+/** 清空全部档案（仅用于「首秀前的静默校正」，此时还没有任何关系损失） */
+export function deleteAllFriends(): void {
+  const db = getDB();
+  db.runSync("DELETE FROM friend_personas");
+  db.runSync("DELETE FROM post_plan WHERE author = 'friend'");
+}
+
+/**
+ * 删除好友：停用 + 标记不复活。
+ * 档案行保留（名字用于历史动态署名），但不再出现在任何列表/花名册里。
+ */
+export function deleteFriendPersona(friendId: number): void {
+  const db = getDB();
+  db.runSync(
+    "UPDATE friend_personas SET is_active = 0, is_deleted = 1 WHERE id = ?",
+    friendId
+  );
+  // 未执行的发帖计划一并清掉，避免继续往 feed 里发
+  db.runSync("DELETE FROM post_plan WHERE author = 'friend' AND friend_id = ?", friendId);
+}
+
+/** 该好友最近一次互动的时刻（动态/评论），没有返回 null */
+export function getFriendLastInteraction(friendId: number): string | null {
+  const db = getDB();
+  const row = db.getFirstSync<{ ts: string | null }>(
+    `SELECT MAX(ts) AS ts FROM (
+       SELECT MAX(created_at) AS ts FROM moments WHERE friend_id = ?
+       UNION ALL
+       SELECT MAX(created_at) AS ts FROM moment_comments WHERE friend_id = ?
+     )`,
+    friendId,
+    friendId
+  );
+  return row?.ts ?? null;
+}
+
+/**
+ * 与该好友相关（提到名字）的记忆片段，供私聊与「按名字命中档案」使用。
+ * 只做 LIKE 粗召回并按时间倒序，不做第二套检索。
+ */
+export function getFragmentsMentioning(text: string, limit: number = 4): MemoryFragment[] {
+  const keyword = text.trim();
+  if (!keyword) return [];
+  const db = getDB();
+  return db.getAllSync<MemoryFragment>(
+    `SELECT id, "index", timestamp, gist, summary, keywords, priority
+     FROM memory_fragments
+     WHERE summary LIKE ? OR gist LIKE ? OR keywords LIKE ?
+     ORDER BY timestamp DESC LIMIT ?`,
+    `%${keyword}%`,
+    `%${keyword}%`,
+    `%${keyword}%`,
+    limit
+  );
 }

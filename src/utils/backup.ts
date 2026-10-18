@@ -25,6 +25,9 @@ interface BackupData {
     moments?: any[];
     moment_comments?: any[];
     post_plan?: any[];
+    // 好友圈与每日实况（旧备份没有，按空处理）
+    friend_personas?: any[];
+    daily_log?: any[];
   };
 }
 
@@ -50,6 +53,8 @@ export async function exportBackup(): Promise<{ success: boolean; message: strin
     const moments = db.getAllSync("SELECT * FROM moments");
     const moment_comments = db.getAllSync("SELECT * FROM moment_comments");
     const post_plan = db.getAllSync("SELECT * FROM post_plan");
+    const friend_personas = db.getAllSync("SELECT * FROM friend_personas");
+    const daily_log = db.getAllSync("SELECT * FROM daily_log");
 
     const backup: BackupData = {
       version: BACKUP_VERSION,
@@ -65,6 +70,8 @@ export async function exportBackup(): Promise<{ success: boolean; message: strin
         moments,
         moment_comments,
         post_plan,
+        friend_personas,
+        daily_log,
       },
     };
 
@@ -137,6 +144,8 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
     db.execSync("DELETE FROM user_info");
     db.execSync("DELETE FROM system_metadata");
     db.execSync("DELETE FROM behavior_schedule");
+    db.execSync("DELETE FROM friend_personas");
+    db.execSync("DELETE FROM daily_log");
 
     // 恢复 memory_events（旧备份可能仍含 "index" / is_archived，已废弃列不再写入；
     // memory_kind 必须一并恢复，否则 episode 共同经历会退化成 daily、丢失按天衰减与权重下限）
@@ -203,22 +212,38 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
         row.question_count ?? 0, row.turns ?? "[]", row.started_at, row.ended_at ?? null, row.result_note ?? null
       );
     }
+    // 好友档案先于动态恢复：动态的 friend_id 指向它们
+    for (const row of backup.sqlite.friend_personas ?? []) {
+      db.runSync(
+        "INSERT INTO friend_personas (id, name, avatar_emoji, summary, profile, is_active, is_deleted, debut_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        row.id, row.name, row.avatar_emoji ?? "", row.summary ?? "", row.profile ?? "",
+        row.is_active ?? 1, row.is_deleted ?? 0, row.debut_at ?? null, row.created_at
+      );
+    }
+    for (const row of backup.sqlite.daily_log ?? []) {
+      db.runSync(
+        "INSERT INTO daily_log (day, slots, mood, highlight, late_night, weather, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        row.day, row.slots ?? "", row.mood ?? "", row.highlight ?? "", row.late_night ?? "",
+        row.weather ?? "", row.created_at, row.updated_at ?? row.created_at
+      );
+    }
     for (const row of backup.sqlite.moments ?? []) {
       db.runSync(
-        "INSERT INTO moments (id, author, content, mood, created_at) VALUES (?, ?, ?, ?, ?)",
-        row.id, row.author, row.content, row.mood ?? "", row.created_at
+        "INSERT INTO moments (id, author, content, mood, created_at, friend_id) VALUES (?, ?, ?, ?, ?, ?)",
+        row.id, row.author, row.content, row.mood ?? "", row.created_at, row.friend_id ?? null
       );
     }
     for (const row of backup.sqlite.moment_comments ?? []) {
       db.runSync(
-        "INSERT INTO moment_comments (id, moment_id, author, content, created_at) VALUES (?, ?, ?, ?, ?)",
-        row.id, row.moment_id, row.author, row.content, row.created_at
+        "INSERT INTO moment_comments (id, moment_id, author, content, created_at, friend_id) VALUES (?, ?, ?, ?, ?, ?)",
+        row.id, row.moment_id, row.author, row.content, row.created_at, row.friend_id ?? null
       );
     }
     for (const row of backup.sqlite.post_plan ?? []) {
       db.runSync(
-        "INSERT INTO post_plan (id, week_start, day_of_week, time_slot, theme_hint, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        row.id, row.week_start, row.day_of_week, row.time_slot, row.theme_hint ?? "", row.status ?? "pending", row.created_at
+        "INSERT INTO post_plan (id, week_start, day_of_week, time_slot, theme_hint, status, created_at, author, friend_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        row.id, row.week_start, row.day_of_week, row.time_slot, row.theme_hint ?? "",
+        row.status ?? "pending", row.created_at, row.author ?? "ai", row.friend_id ?? null
       );
     }
 

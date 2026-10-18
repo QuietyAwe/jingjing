@@ -72,6 +72,10 @@ export function getConfigDefault(key: string): string {
     moment_ai_comment_probability: String(thresholds.moment_ai_comment_probability),
     moment_ai_reply_delay_ms: String(thresholds.moment_ai_reply_delay_ms),
     moment_post_skip_probability: String(thresholds.moment_post_skip_probability),
+    friend_roster_size: String(thresholds.friend_roster_size),
+    friend_moment_probability: String(thresholds.friend_moment_probability),
+    friend_comment_probability: String(thresholds.friend_comment_probability),
+    friend_roster_visible_days: String(thresholds.friend_roster_visible_days),
     ebbinghaus_decay_rate: String(decay.ebbinghaus_decay_rate),
     epiphany_trigger_probability: String(decay.epiphany_trigger_probability),
     background_model: bg.model,
@@ -86,6 +90,10 @@ export function getConfigDefault(key: string): string {
     memory_event_template: config.prompts.memory_event_template,
     moment_generation_prompt: config.prompts.moment_generation_prompt,
     moment_comment_prompt: config.prompts.moment_comment_prompt,
+    daily_life_generation_prompt: config.prompts.daily_life_generation_prompt,
+    friend_persona_generation_prompt: config.prompts.friend_persona_generation_prompt,
+    friend_moment_generation_prompt: config.prompts.friend_moment_generation_prompt,
+    friend_comment_prompt: config.prompts.friend_comment_prompt,
     state_injection_template: config.prompts.state_injection_template,
     cold_start_template: config.prompts.cold_start_template,
     schedule_generation_prompt: config.prompts.schedule_generation_prompt,
@@ -149,6 +157,10 @@ export function getPrompts() {
     event_care_template: getOverride("event_care_template", config.prompts.event_care_template),
     moment_generation_prompt: getOverride("moment_generation_prompt", config.prompts.moment_generation_prompt),
     moment_comment_prompt: getOverride("moment_comment_prompt", config.prompts.moment_comment_prompt),
+    daily_life_generation_prompt: getOverride("daily_life_generation_prompt", config.prompts.daily_life_generation_prompt),
+    friend_persona_generation_prompt: getOverride("friend_persona_generation_prompt", config.prompts.friend_persona_generation_prompt),
+    friend_moment_generation_prompt: getOverride("friend_moment_generation_prompt", config.prompts.friend_moment_generation_prompt),
+    friend_comment_prompt: getOverride("friend_comment_prompt", config.prompts.friend_comment_prompt),
   };
 }
 
@@ -177,6 +189,10 @@ export function getThresholds() {
     moment_ai_comment_probability: getOverride("moment_ai_comment_probability", config.thresholds.moment_ai_comment_probability),
     moment_ai_reply_delay_ms: getOverride("moment_ai_reply_delay_ms", config.thresholds.moment_ai_reply_delay_ms),
     moment_post_skip_probability: getOverride("moment_post_skip_probability", config.thresholds.moment_post_skip_probability),
+    friend_roster_size: getOverride("friend_roster_size", config.thresholds.friend_roster_size),
+    friend_moment_probability: getOverride("friend_moment_probability", config.thresholds.friend_moment_probability),
+    friend_comment_probability: getOverride("friend_comment_probability", config.thresholds.friend_comment_probability),
+    friend_roster_visible_days: getOverride("friend_roster_visible_days", config.thresholds.friend_roster_visible_days),
   };
 }
 

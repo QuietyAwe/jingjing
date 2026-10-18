@@ -18,6 +18,7 @@ import { getPrompts, getPlaceholders, getThresholds } from "./config";
 import { DETAIL_VISIBLE_WEIGHT, calculateWeight } from "@/memory/decay";
 import { useSettingsStore } from "@/store/settingsStore";
 import { WEEKDAYS, formatNow, formatTodayLine } from "@/utils/holidays";
+import { formatFriendRoster } from "@/friends/persona";
 import dayjs from "dayjs";
 
 const DEFAULT_TOKEN_BUDGET = 8000; // token 近似值（见 estimateTokens）
@@ -76,7 +77,8 @@ export function assemblePrompt(
   currentStatus?: string,
   hitFragments?: Map<number, MemoryFragment[]>,
   tokenBudget: number = DEFAULT_TOKEN_BUDGET,
-  cuedFragmentIds?: Set<number>
+  cuedFragmentIds?: Set<number>,
+  friendCard?: FriendCardContext
 ): AssembledPrompt {
   const prompts = getPrompts();
   const nickname = getUserNickname(userInfo);
@@ -87,7 +89,14 @@ export function assemblePrompt(
 
   // 2. 易变部分：状态区 + 记忆区（分开返回，便于缓存优化排列）
   const stateText = buildStateSection(userInfo, currentStatus, now);
-  const memoryBlocks = buildMemorySection(userInfo, topEvents, epiphany, hitFragments, cuedFragmentIds);
+  const memoryBlocks = buildMemorySection(
+    userInfo,
+    topEvents,
+    epiphany,
+    hitFragments,
+    cuedFragmentIds,
+    friendCard
+  );
 
   // 3. 转换历史为 API 格式（最后两条用户消息带时间戳，让 AI 感知时间流动）
   const messages = chatHistory.map((m) => {
@@ -223,7 +232,9 @@ function renderStateTemplate(
     .replace(/\{\{occupation\}\}/g, bi.occupation || p.occupation)
     .replace(/\{\{location\}\}/g, bi.location || p.location)
     .replace(/\{\{traits\}\}/g, userInfo.traits.length > 0 ? userInfo.traits.join("、") : EMPTY)
-    .replace(/\{\{current_status\}\}/g, currentStatus || EMPTY);
+    .replace(/\{\{current_status\}\}/g, currentStatus || EMPTY)
+    // 自己的熟人圈（不是用户的社交图谱）：低成本的在场感，让 AI 聊得起来
+    .replace(/\{\{friends\}\}/g, formatFriendRoster(now) || EMPTY);
 
   // 社交图谱
   const graphText =
@@ -320,6 +331,14 @@ export interface MemoryBlock {
   degraded: boolean;
 }
 
+/** 用户输入命中好友名时，前置注入的档案卡素材 */
+export interface FriendCardContext {
+  name: string;
+  /** 人物小传（唯一定义，口吻/关系/看法都在里面） */
+  profile: string;
+  fragments: Array<{ summary: string; timestamp: string }>;
+}
+
 /**
  * 命中事件注入的片段条数上限
  *
@@ -368,7 +387,8 @@ function buildMemorySection(
   topEvents: (MemoryEvent & { live_weight: number })[],
   epiphany: (MemoryEvent & { gist: string }) | null,
   hitFragments?: Map<number, MemoryFragment[]>,
-  cuedFragmentIds?: Set<number>
+  cuedFragmentIds?: Set<number>,
+  friendCard?: FriendCardContext
 ): MemoryBlock[] {
   const prompts = getPrompts();
   const eventTpl = prompts.memory_event_template;
@@ -381,6 +401,28 @@ function buildMemorySection(
   const fallbackFragments = getFragmentsByEventIds(missingIds);
 
   const blocks: MemoryBlock[] = [];
+
+  // 按名字命中的好友档案卡：回答「她是谁」用档案，回答「她说过什么」用片段，
+  // 两者各司其职，不让记忆里的人和设定里的不是同一个人。
+  // 权重置顶：档案是这一轮对话的前提，截断时最后才轮到它。
+  if (friendCard) {
+    // 小传是写给「好友自己」的第二人称文本，直接塞给主角会让人误以为是自己的想法：
+    // 换掉人称段落标题，并明确「以下是 ta 的档案」
+    const profile = replacePlaceholders(friendCard.profile, now.toISOString(), userInfo, now)
+      .replace(/\[你对他们俩的看法\]/g, "[ta对他们俩的看法]")
+      .replace(/\[你自己的日子\]/g, "[ta自己的日子]")
+      .replace(/\[你的日子\]/g, "[ta的日子]");
+    const fragLines = friendCard.fragments.map(
+      (f) => `  · ${replacePlaceholders(f.summary, f.timestamp, userInfo, now)}`
+    );
+    const detail = [
+      `【关于${friendCard.name}】以下是 ta 的档案，不是你的想法（档案里的「你」指 ta 自己）`,
+      profile,
+      ...(fragLines.length > 0 ? ["相关记忆：", ...fragLines] : []),
+    ].join("\n");
+    const brief = `【关于${friendCard.name}】${profile.replace(/\s+/g, " ").slice(0, 60)}`;
+    blocks.push({ weight: 100, isEpiphany: false, detail, brief, degraded: false });
+  }
 
   for (const event of topEvents) {
     const text = replacePlaceholders(event.event_text, event.timestamp, userInfo, now);

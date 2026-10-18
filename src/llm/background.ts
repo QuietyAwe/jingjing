@@ -210,14 +210,16 @@ export async function generateSchedule(
   systemPrompt: string,
   lastWeekSchedule: ScheduleItem[],
   timeoutMs: number = 30000,
+  /** 上周实况文本（有则优先于「上周计划」——实况才是习惯的证据） */
+  lastWeekActuals?: string,
 ): Promise<ScheduleGenerationResult | null> {
   const { schedule_generation_prompt } = getPrompts();
   const routing = getModelRouting();
   const config = routing.background_extraction_config;
 
   // 构建上周时间表文本
-  let lastWeekText = "（无上周时间表）";
-  if (lastWeekSchedule.length > 0) {
+  let lastWeekText = lastWeekActuals?.trim() || "（无上周时间表）";
+  if (!lastWeekActuals?.trim() && lastWeekSchedule.length > 0) {
     const lines: string[] = [];
     const dayLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
     const slotLabels = ["早(6-9)", "上午(9-12)", "午(12-15)", "下午(15-18)", "晚(18-23)"];
@@ -343,13 +345,19 @@ export interface MomentGenerationContext {
   scene: string;
   /** 发帖计划里的主题/心情提示 */
   themeHint: string;
-  /** 最近动态（双方，时间升序），避免重复、保持连贯 */
-  recentMoments: Array<{ author: MomentAuthor; content: string; mood: string }>;
+  /** 最近动态（时间升序），避免重复、保持连贯 */
+  recentMoments: Array<{ author: MomentAuthor; content: string; mood: string; authorLabel?: string }>;
 }
 
-/** 把一条动态拼成 prompt 里的单行 */
-function formatMomentLine(m: { author: MomentAuthor; content: string; mood: string }): string {
-  return `${m.author === "ai" ? "你" : "[user]"}（${m.mood || "未标"}）：${m.content}`;
+/** 把一条动态拼成 prompt 里的单行（authorLabel 用于好友等第三方署名） */
+function formatMomentLine(m: {
+  author: MomentAuthor;
+  content: string;
+  mood: string;
+  authorLabel?: string;
+}): string {
+  const who = m.authorLabel?.trim() || (m.author === "ai" ? "你" : "[user]");
+  return `${who}（${m.mood || "未标"}）：${m.content}`;
 }
 
 /** 把 LLM 输出的心情标签归一到固定集合，出错回退「平静」 */
@@ -423,12 +431,263 @@ export async function generateMoment(
   }
 }
 
+// ============================================================
+// 每日实况：日生成（基线 + 昨夜 + 节假日 + 伪天气 + 用户在场）
+// ============================================================
+
+export interface DailyLifeInput {
+  /** 如「10月18日（周日）」 */
+  date: string;
+  /** 如「周末」「国庆节假期」「调休上班」 */
+  dayContext: string;
+  weather: string;
+  /** 今天在周表里的 5 格习惯 */
+  baseline: string;
+  /** 昨天实际发生的事 */
+  yesterday: string;
+  /** 今天凌晨（0-6 点）的状态 */
+  lateNight: string;
+  /** 和用户有关的事 */
+  userContext: string;
+}
+
+export interface DailyLifeDraft {
+  mood: string;
+  highlight: string;
+  /** 固定长度 5，空串表示该时段留白 */
+  slots: string[];
+}
+
+/**
+ * 生成今天的实况。
+ * 失败/超时返回 null，调用方回退周基线表（不写库，下次轮询重试）。
+ */
+export async function generateDailyLife(
+  systemPrompt: string,
+  ctx: DailyLifeInput,
+  timeoutMs: number = 30000
+): Promise<DailyLifeDraft | null> {
+  const { daily_life_generation_prompt } = getPrompts();
+  if (!daily_life_generation_prompt) return null;
+
+  const prompt = daily_life_generation_prompt
+    .replace("{{persona}}", systemPrompt)
+    .replace("{{date}}", ctx.date)
+    .replace("{{day_context}}", ctx.dayContext)
+    .replace("{{weather}}", ctx.weather)
+    .replace("{{baseline}}", ctx.baseline)
+    .replace("{{yesterday}}", ctx.yesterday)
+    .replace("{{late_night}}", ctx.lateNight)
+    .replace("{{user_context}}", ctx.userContext);
+
+  const parsed = await requestBackgroundJson(prompt, timeoutMs, "每日实况", 0.8);
+  if (!parsed) return null;
+
+  const rawSlots = Array.isArray(parsed.slots) ? parsed.slots : [];
+  const slots: string[] = ["", "", "", "", ""];
+  for (const item of rawSlots) {
+    if (!item || typeof item !== "object") continue;
+    const slot = Number((item as { slot?: unknown }).slot);
+    const activity = String((item as { activity?: unknown }).activity ?? "").trim();
+    if (!Number.isInteger(slot) || slot < 0 || slot > 4) continue;
+    // 一格可以跨到下一格（「一整个下午都在弄同一件事」），但不做强制填充
+    slots[slot] = activity.slice(0, 80);
+  }
+
+  if (!slots.some(Boolean)) {
+    logDebug("每日实况返回", "没有任何时段内容，回退基线");
+    return null;
+  }
+
+  return {
+    mood: normalizeMood(parsed.mood),
+    highlight: String(parsed.highlight ?? "").trim().slice(0, 20),
+    slots,
+  };
+}
+
+// ============================================================
+// AI 熟人圈：花名册 / 好友发帖 / 好友评论
+// ============================================================
+
+export interface FriendRosterInput {
+  persona: string;
+  scene: string;
+  userContext: string;
+  preferences: string;
+  count: number;
+}
+
+export interface FriendRosterDraft {
+  name: string;
+  avatar_emoji: string;
+  summary: string;
+  profile: string;
+}
+
+/** 生成一批固定好友（一次调用产出完整名单，之后稳定复用） */
+export async function generateFriendRoster(
+  ctx: FriendRosterInput,
+  timeoutMs: number = 45000
+): Promise<FriendRosterDraft[]> {
+  const { friend_persona_generation_prompt } = getPrompts();
+  if (!friend_persona_generation_prompt) return [];
+
+  const prompt = friend_persona_generation_prompt
+    .replace("{{persona}}", ctx.persona)
+    .replace("{{scene}}", ctx.scene || "（平常的一天）")
+    .replace("{{user_context}}", ctx.userContext || "（还不了解[user]）")
+    .replace("{{preferences}}", ctx.preferences || "（[user]没有特别要求）")
+    .replace("{{count}}", String(ctx.count));
+
+  const parsed = await requestBackgroundJson(prompt, timeoutMs, "好友花名册", 1.0);
+  if (!parsed) return [];
+
+  const rawList = Array.isArray(parsed.friends) ? parsed.friends : [];
+  const out: FriendRosterDraft[] = [];
+  const seenNames = new Set<string>();
+
+  for (const raw of rawList) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+    const name = String(r.name ?? "").trim().slice(0, 12);
+    const profile = String(r.profile ?? "").trim();
+    if (!name || !profile) continue;
+    // 同名只留一个：花名册里出现两个「小雨」会直接让人出戏
+    if (seenNames.has(name)) continue;
+    seenNames.add(name);
+    out.push({
+      name,
+      avatar_emoji: String(r.avatar_emoji ?? "").trim().slice(0, 4) || name.slice(0, 1),
+      summary: String(r.summary ?? "").trim().slice(0, 24),
+      profile: profile.slice(0, 600),
+    });
+  }
+  return out;
+}
+
+export interface FriendMomentContext {
+  friendName: string;
+  profile: string;
+  scene: string;
+  recent: Array<{ author: string; content: string; mood: string }>;
+}
+
+/** 好友发一条动态（口吻完全由小传决定） */
+export async function generateFriendMoment(
+  ctx: FriendMomentContext,
+  timeoutMs: number = 30000
+): Promise<MomentDraft | null> {
+  const { friend_moment_generation_prompt } = getPrompts();
+  if (!friend_moment_generation_prompt) return null;
+
+  const prompt = friend_moment_generation_prompt
+    .replace("{{friend_name}}", ctx.friendName)
+    .replace("{{profile}}", ctx.profile)
+    .replace("{{scene}}", ctx.scene || "（平常的一天）")
+    .replace(
+      "{{recent}}",
+      ctx.recent.length > 0
+        ? ctx.recent.map((m) => `${m.author}（${m.mood || "未标"}）：${m.content}`).join("\n")
+        : "（最近没人发什么）"
+    );
+
+  const parsed = await requestBackgroundJson(prompt, timeoutMs, `好友发帖·${ctx.friendName}`, 0.95);
+  if (!parsed) return null;
+
+  const content = String(parsed.content ?? "").trim();
+  if (!content) return null;
+  return { content: content.slice(0, 300), mood: normalizeMood(parsed.mood) };
+}
+
+export interface FriendCommentContext {
+  friendName: string;
+  profile: string;
+  preferences: string;
+  moment: { authorLabel: string; content: string; mood: string };
+  comments: Array<{ authorLabel: string; content: string }>;
+}
+
+/** 好友在一条动态下留句话（只拿得到 feed 里的信息，看不到私聊） */
+export async function generateFriendComment(
+  ctx: FriendCommentContext,
+  timeoutMs: number = 30000
+): Promise<string | null> {
+  const { friend_comment_prompt } = getPrompts();
+  if (!friend_comment_prompt) return null;
+
+  const prompt = friend_comment_prompt
+    .replace("{{friend_name}}", ctx.friendName)
+    .replace("{{profile}}", ctx.profile)
+    .replace("{{preferences}}", ctx.preferences || "（没有特别要求）")
+    .replace(
+      "{{moment}}",
+      `${ctx.moment.authorLabel}（${ctx.moment.mood || "未标"}）：${ctx.moment.content}`
+    )
+    .replace(
+      "{{comments}}",
+      ctx.comments.length > 0
+        ? ctx.comments.map((c) => `${c.authorLabel}：${c.content}`).join("\n")
+        : "（还没有评论）"
+    );
+
+  const parsed = await requestBackgroundJson(prompt, timeoutMs, `好友评论·${ctx.friendName}`, 0.95);
+  if (!parsed) return null;
+
+  const content = String(parsed.content ?? "").trim();
+  return content ? content.slice(0, 120) : null;
+}
+
+/**
+ * 后台 JSON 调用的公共壳：模型路由、超时、日志、失败静默
+ * （好友/实况这类内容短、频率低，失败就当这次没发生）
+ */
+async function requestBackgroundJson(
+  prompt: string,
+  timeoutMs: number,
+  tag: string,
+  temperature: number
+): Promise<Record<string, unknown> | null> {
+  const config = getModelRouting().background_extraction_config;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  logDebug(`${tag}请求`, `模型: ${config.model}\n\n=== 完整请求 ===\n${prompt}`);
+
+  try {
+    const client = getClient();
+    const response = await client.chat.completions.create(
+      {
+        model: config.model,
+        temperature,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system" as const, content: "你是一个生活与人物设定生成引擎，只输出 JSON。" },
+          { role: "user" as const, content: prompt },
+        ],
+      },
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
+
+    const text = response.choices[0]?.message?.content;
+    logDebug(`${tag}返回`, `=== 完整响应 ===\n${text ?? "（空回复）"}`);
+    if (!text) return null;
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch (err: unknown) {
+    clearTimeout(timer);
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logDebug(`${tag}失败`, err instanceof Error && err.name === "AbortError" ? `${timeoutMs}ms 超时` : errMsg);
+    return null;
+  }
+}
+
 /** 评论生成上下文 */
 export interface MomentCommentContext {
   /** 被评论的动态 */
-  moment: { author: MomentAuthor; content: string; mood: string };
+  moment: { author: MomentAuthor; content: string; mood: string; authorLabel?: string };
   /** 该动态下已有评论（时间升序） */
-  comments: Array<{ author: MomentAuthor; content: string }>;
+  comments: Array<{ author: MomentAuthor; content: string; authorLabel?: string }>;
   /** 若有值表示回复这条用户评论；无值表示主动评论动态 */
   replyTo?: string;
 }
@@ -453,7 +712,9 @@ export async function generateMomentComment(
     .replace("{{persona}}", systemPrompt)
     .replace("{{moment}}", formatMomentLine(ctx.moment))
     .replace("{{comments}}", ctx.comments.length > 0
-      ? ctx.comments.map((c) => `${c.author === "ai" ? "你" : "[user]"}：${c.content}`).join("\n")
+      ? ctx.comments
+          .map((c) => `${c.authorLabel ?? (c.author === "ai" ? "你" : "[user]")}：${c.content}`)
+          .join("\n")
       : "（还没有评论）")
     .replace("{{task}}", task);
 

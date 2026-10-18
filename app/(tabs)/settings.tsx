@@ -32,12 +32,21 @@ import {
 import { getUserInfo, setUserInfo as persistUserInfo, getTopActive, getActiveCount, clearAllData, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById } from "@/db/queries";
 import { getWeekStart } from "@/memory/scheduler";
 import { identityNames } from "@/memory/identity";
+import {
+  getAllFriends,
+  updateFriendName,
+  setFriendActive,
+  deleteFriendPersona,
+  getFriendLastInteraction,
+} from "@/db/queries";
+import { rebuildFriendRoster, replaceFriend } from "@/friends/roster";
+import { friendAvatarText } from "@/friends/persona";
 import { fetchModels, getClient } from "@/llm/client";
 import { CollapsibleSection } from "@/components/CollapsibleSection";
 import { exportBackup, importBackup } from "../../src/utils/backup";
 import * as Updates from "expo-updates";
 import { RELEASE_VERSION } from "@/version";
-import type { UserInfo, MemoryEvent, MemoryFragment, ConsolidationResponse } from "@/types/schema";
+import type { UserInfo, MemoryEvent, MemoryFragment, ConsolidationResponse, FriendPersona } from "@/types/schema";
 
 /** 人设提取结果（与巩固流 new_info 同构：属性/状态/事件 三桶） */
 type PersonaInfo = ConsolidationResponse["new_info"];
@@ -83,6 +92,10 @@ const THRESHOLD_FIELDS: ConfigField[] = [
   { key: "context_history_rounds", label: "上下文轮数上限", type: "number", description: "发送给 AI 的历史对话轮数（与巩固触发频率互不影响）" },
   { key: "context_active_events_limit", label: "记忆区事件上限", type: "number", description: "上下文中加载的高权重事件数量" },
   { key: "detail_visible_weight", label: "详细/简略切换权重", type: "number", description: "实时权重低于此值的记忆只显示一句话摘要（默认 60，调高=更多记忆变简略）" },
+  { key: "friend_roster_size", label: "好友人数", type: "number", description: "AI 熟人圈的固定人数（默认 5，重建花名册时生效）" },
+  { key: "friend_moment_probability", label: "好友每日发帖概率", type: "number", description: "每位好友每天发一条动态的概率（0~1，默认 0.35），太高会抢主角戏份" },
+  { key: "friend_comment_probability", label: "好友评论概率", type: "number", description: "每条动态招来一位好友评论的概率（0~1，默认 0.3）" },
+  { key: "friend_roster_visible_days", label: "花名册活跃窗口", type: "number", description: "只把最近这么多天有互动（或刚建立关系）的好友写进状态区，默认 14 天" },
 ];
 
 // 提示词分组配置
@@ -119,13 +132,26 @@ const PROMPT_GROUPS: PromptGroup[] = [
     title: "特殊场景",
     fields: [
       { key: "cold_start_template", label: "冷启动模板", type: "multiline", description: "当数据库为空时，与系统人设组合使用，引导用户自我介绍。" },
-      { key: "schedule_generation_prompt", label: "时间表生成指令", type: "multiline", description: "每周自动生成行为时间表时使用。{{persona}} 为 AI 人设，{{last_week}} 为上周时间表。" },
+      { key: "schedule_generation_prompt", label: "时间表生成指令", type: "multiline", description: "每周自动生成行为时间表时使用。{{persona}} 为 AI 人设，{{last_week}} 为上周实况。" },
+    ],
+  },
+  {
+    icon: "🌤️",
+    title: "生活与动态",
+    description: "清晨一次的实况生成 + 朋友圈文案，失败会静默回退，不影响聊天",
+    fields: [
+      { key: "daily_life_generation_prompt", label: "每日实况生成", type: "multiline", description: "每天一次，把习惯基线变成「今天具体怎么过」。可用 {{persona}} {{date}} {{day_context}} {{weather}} {{baseline}} {{yesterday}} {{late_night}} {{user_context}}。" },
+      { key: "moment_generation_prompt", label: "AI 发动态", type: "multiline", description: "AI 发心情动态时的文案指令。{{persona}} {{scene}} {{theme_hint}} {{recent}}。" },
+      { key: "moment_comment_prompt", label: "AI 回评", type: "multiline", description: "AI 在动态下评论/回评。{{persona}} {{moment}} {{comments}} {{task}}。" },
+      { key: "friend_persona_generation_prompt", label: "好友花名册生成", type: "multiline", description: "一次性生成 AI 的熟人圈。{{persona}} {{scene}} {{user_context}} {{preferences}} {{count}}。" },
+      { key: "friend_moment_generation_prompt", label: "好友发动态", type: "multiline", description: "好友发帖文案。{{friend_name}} {{profile}} {{scene}} {{recent}}。" },
+      { key: "friend_comment_prompt", label: "好友评论", type: "multiline", description: "好友在动态下留话。{{friend_name}} {{profile}} {{preferences}} {{moment}} {{comments}}。" },
     ],
   },
 ];
 
 export default function SettingsScreen() {
-  const { apiKey, baseUrl, user_nickname, ai_name, stream_output, thinking_mode, auto_focus_input, blocked_keywords, customColorsLight, customColorsDark, saveApiKey, saveBaseUrl, saveUserNickname, saveAiName, saveStreamOutput, saveThinkingMode, saveAutoFocusInput, saveBlockedKeywords, saveCustomColors } = useSettingsStore();
+  const { apiKey, baseUrl, user_nickname, ai_name, stream_output, thinking_mode, auto_focus_input, blocked_keywords, friend_preferences, customColorsLight, customColorsDark, saveApiKey, saveBaseUrl, saveUserNickname, saveAiName, saveStreamOutput, saveThinkingMode, saveAutoFocusInput, saveBlockedKeywords, saveFriendPreferences, saveCustomColors } = useSettingsStore();
   const clearMessages = useChatStore((s) => s.clearMessages);
   const colors = useTheme();
   const { themeMode, toggleTheme } = useThemeStore();
@@ -141,6 +167,14 @@ export default function SettingsScreen() {
   const [inputNickname, setInputNickname] = useState("");
   const [inputAiName, setInputAiName] = useState("");
   const [inputBlocked, setInputBlocked] = useState("");
+
+  // 好友圈
+  const [friends, setFriends] = useState<FriendPersona[]>([]);
+  const [showFriendPrefsModal, setShowFriendPrefsModal] = useState(false);
+  const [inputFriendPrefs, setInputFriendPrefs] = useState("");
+  const [renamingFriend, setRenamingFriend] = useState<FriendPersona | null>(null);
+  const [inputFriendName, setInputFriendName] = useState("");
+  const [friendBusy, setFriendBusy] = useState(false);
 
   // 配置编辑器状态
   const [editorVisible, setEditorVisible] = useState(false);
@@ -273,6 +307,7 @@ export default function SettingsScreen() {
         if (defaultEvt) activeEvents.unshift(defaultEvt);
       }
       setEvents(activeEvents);
+      setFriends(getAllFriends().filter((f) => !f.is_deleted));
     }, []),
   );
 
@@ -304,6 +339,107 @@ export default function SettingsScreen() {
   const handleSaveBlocked = async () => {
     await saveBlockedKeywords(inputBlocked);
     setShowBlockedModal(false);
+  };
+
+  // --- 好友圈 ---
+
+  const reloadFriends = () => setFriends(getAllFriends().filter((f) => !f.is_deleted));
+
+  const handleSaveFriendPrefs = async () => {
+    await saveFriendPreferences(inputFriendPrefs);
+    setShowFriendPrefsModal(false);
+
+    // 首秀前：引擎会静默按新偏好重掷，不打扰；
+    // 首秀后：给出二选一——默认只影响以后，也可以主动按偏好重建（重建会丢关系）
+    const debuted = getAllFriends().some(
+      (f) =>
+        f.is_active === 1 &&
+        !f.is_deleted &&
+        !!f.debut_at &&
+        !dayjs(f.debut_at).isAfter(dayjs())
+    );
+    if (!debuted) return;
+
+    Alert.alert(
+      "偏好已保存",
+      "已经出现过的朋友不会自动改动。要按新偏好重建花名册吗？（重建后旧人会停用）",
+      [
+        { text: "只影响以后", style: "cancel" },
+        { text: "按偏好重建", onPress: handleRebuildFriends },
+      ]
+    );
+  };
+
+  const handleRenameFriend = () => {
+    const name = inputFriendName.trim();
+    if (!renamingFriend || !name) return;
+    updateFriendName(renamingFriend.id, name);
+    setRenamingFriend(null);
+    reloadFriends();
+  };
+
+  const handleToggleFriend = (f: FriendPersona) => {
+    setFriendActive(f.id, f.is_active !== 1);
+    reloadFriends();
+  };
+
+  const handleDeleteFriend = (f: FriendPersona) => {
+    Alert.alert(
+      "删除这位朋友？",
+      `${f.name} 会从你的生活里消失。以前认识过的记忆不会被抹掉，但 ta 不会再出现。`,
+      [
+        { text: "取消", style: "cancel" },
+        {
+          text: "删除",
+          style: "destructive",
+          onPress: () => {
+            deleteFriendPersona(f.id);
+            reloadFriends();
+          },
+        },
+      ]
+    );
+  };
+
+  const handleReplaceFriend = (f: FriendPersona) => {
+    Alert.alert("换一个朋友？", `${f.name} 会下线，补一位新人。这不要求新人接替原来的关系定位。`, [
+      { text: "取消", style: "cancel" },
+      {
+        text: "换一个",
+        onPress: () => {
+          void (async () => {
+            setFriendBusy(true);
+            const ok = await replaceFriend(f.id);
+            setFriendBusy(false);
+            reloadFriends();
+            if (!ok) Alert.alert("没换成", "生成失败了，可能网络或模型有问题，稍后再试。");
+          })();
+        },
+      },
+    ]);
+  };
+
+  const handleRebuildFriends = () => {
+    Alert.alert(
+      "重建好友圈？",
+      "现有的朋友会全部停用，重新生成一批新人。以前认识过的记忆会保留，但这些人不会再出现。",
+      [
+        { text: "取消", style: "cancel" },
+        {
+          text: "重建",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              setFriendBusy(true);
+              const ok = await rebuildFriendRoster();
+              setFriendBusy(false);
+              reloadFriends();
+              if (!ok) Alert.alert("重建失败", "生成失败了，稍后再试。旧朋友已停用。");
+            })();
+          },
+        },
+      ]
+    );
   };
 
   const handleCreateEvent = () => {
@@ -587,6 +723,7 @@ export default function SettingsScreen() {
         onPress: () => {
           clearMessages();
           clearAllData();
+          reloadFriends();
           setUserInfo(null);
           setEventCount(0);
           Alert.alert("已清除", "所有数据已清除，下次对话将触发冷启动。");
@@ -1015,6 +1152,107 @@ ${text}
         </TouchableOpacity>
       </CollapsibleSection>
 
+      {/* 好友圈：AI 自己的熟人（不是用户的社交图谱） */}
+      <CollapsibleSection
+        title={`好友圈 (${friends.filter((f) => f.is_active === 1).length})`}
+        icon="👥"
+        defaultExpanded={false}
+      >
+        <TouchableOpacity
+          style={[styles.row, { borderBottomColor: colors.border }]}
+          onPress={() => {
+            setInputFriendPrefs(friend_preferences);
+            setShowFriendPrefsModal(true);
+          }}
+        >
+          <View style={styles.rowLeft}>
+            <Text style={[styles.label, { color: colors.text }]}>好友偏好</Text>
+            <Text style={[styles.rowDesc, { color: colors.textMuted }]}>
+              约束 ta 交什么样的朋友、朋友怎么说话（不填 = 不限制）
+            </Text>
+          </View>
+          <Text style={[styles.value, { color: colors.textMuted }]} numberOfLines={1}>
+            {friend_preferences || "未设置"}
+          </Text>
+        </TouchableOpacity>
+
+        {friends.length === 0 ? (
+          <Text style={[styles.emptyText, { color: colors.textMuted, paddingVertical: 16 }]}>
+            还没有自己的圈子，聊过几轮后会自然出现
+          </Text>
+        ) : (
+          friends.map((f) => {
+            const last = getFriendLastInteraction(f.id);
+            const pending = f.debut_at ? dayjs(f.debut_at).isAfter(dayjs()) : false;
+            return (
+              <View
+                key={f.id}
+                style={[
+                  styles.row,
+                  {
+                    borderBottomColor: colors.border,
+                    alignItems: "flex-start",
+                    opacity: f.is_active === 1 ? 1 : 0.45,
+                  },
+                ]}
+              >
+                <View style={[styles.rowLeft, { flex: 1 }]}>
+                  <Text style={[styles.label, { color: colors.text }]}>
+                    {friendAvatarText(f)} {f.name}
+                    {pending ? "（还没出现）" : ""}
+                  </Text>
+                  <Text style={[styles.rowDesc, { color: colors.textMuted }]} numberOfLines={2}>
+                    {f.summary || "（没有小传摘要）"}
+                  </Text>
+                  <Text style={[styles.rowDesc, { color: colors.textMuted }]}>
+                    {last ? `最近互动 ${dayjs(last).format("M/D HH:mm")}` : "还没互动过"}
+                  </Text>
+
+                  <View style={styles.friendActions}>
+                    <TouchableOpacity
+                      onPress={() => {
+                        setRenamingFriend(f);
+                        setInputFriendName(f.name);
+                      }}
+                    >
+                      <Text style={[styles.confirmText, { color: colors.accent }]}>改名</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => handleToggleFriend(f)}>
+                      <Text style={[styles.confirmText, { color: colors.accent }]}>
+                        {f.is_active === 1 ? "停用" : "启用"}
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity disabled={friendBusy} onPress={() => handleReplaceFriend(f)}>
+                      <Text
+                        style={[
+                          styles.confirmText,
+                          { color: friendBusy ? colors.btnDisabled : colors.accent },
+                        ]}
+                      >
+                        换一个
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => handleDeleteFriend(f)}>
+                      <Text style={[styles.confirmText, { color: colors.danger }]}>删除</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </View>
+            );
+          })
+        )}
+
+        <TouchableOpacity
+          style={[styles.actionRow, { borderBottomColor: colors.border }]}
+          disabled={friendBusy}
+          onPress={handleRebuildFriends}
+        >
+          <Text style={[styles.actionText, { color: friendBusy ? colors.btnDisabled : colors.accent }]}>
+            {friendBusy ? "正在重新生成…" : "🔄 重建花名册（全部换新）"}
+          </Text>
+        </TouchableOpacity>
+      </CollapsibleSection>
+
       {/* 事件（约定/安排，到期注入隐形提醒） */}
       <CollapsibleSection
         title={`事件 (${userInfo?.events?.filter((e) => e.status !== "archived").length || 0})`}
@@ -1239,6 +1477,65 @@ ${text}
             <View style={styles.modalButtons}>
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowBlockedModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
               <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveBlocked}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 好友偏好弹窗 */}
+      <Modal visible={showFriendPrefsModal} transparent animationType="fade">
+        <View style={styles.overlay}>
+          <View style={styles.modal}>
+            <Text style={styles.modalTitle}>好友偏好</Text>
+            <TextInput
+              style={[styles.input, { minHeight: 96 }]}
+              value={inputFriendPrefs}
+              onChangeText={setInputFriendPrefs}
+              placeholder="如：不要前任相关的朋友；只要同事/同学；别总开我们玩笑"
+              placeholderTextColor="#9B9A97"
+              multiline
+              textAlignVertical="top"
+              autoFocus
+            />
+            <Text style={styles.modalHint}>
+              一条偏好同时管「交什么样的朋友」和「朋友怎么说话」{"\n"}
+              好友还没露面时修改会静默换掉不合规的人；已经出现过就只影响以后{"\n"}
+              留空 = 不限制
+            </Text>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowFriendPrefsModal(false)}>
+                <Text style={styles.cancelText}>取消</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveFriendPrefs}>
+                <Text style={styles.confirmText}>保存</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 好友改名弹窗（只改称呼，不改人格） */}
+      <Modal visible={renamingFriend !== null} transparent animationType="fade">
+        <View style={styles.overlay}>
+          <View style={styles.modal}>
+            <Text style={styles.modalTitle}>改名</Text>
+            <TextInput
+              style={styles.input}
+              value={inputFriendName}
+              onChangeText={setInputFriendName}
+              placeholder="新的称呼"
+              placeholderTextColor="#9B9A97"
+              autoFocus
+              maxLength={12}
+            />
+            <Text style={styles.modalHint}>只改你怎么称呼 ta，性格、口吻与关系都不变</Text>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setRenamingFriend(null)}>
+                <Text style={styles.cancelText}>取消</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.confirmBtn} onPress={handleRenameFriend}>
+                <Text style={styles.confirmText}>保存</Text>
+              </TouchableOpacity>
             </View>
           </View>
         </View>
@@ -1817,6 +2114,7 @@ const styles = StyleSheet.create({
   rowRight: { flexShrink: 0 },
   rowDesc: { fontSize: 12, color: "#9B9A97", marginTop: 2 },
   label: { fontSize: 15, color: "#37352F" },
+  friendActions: { flexDirection: "row", flexWrap: "wrap", gap: 16, marginTop: 8 },
   value: { fontSize: 14, color: "#9B9A97", maxWidth: 160, textAlign: "right" },
   valueChanged: { color: "#2F81F7" },
   // 模型行
