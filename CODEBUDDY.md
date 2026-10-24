@@ -408,7 +408,7 @@ system  : gameHint       游戏回合指令（对局中，置末就近影响本�
 
 ## 十、当前进度
 
-已完成 P1~P7（基建、数据层、记忆引擎、聊天流、巩固流、UI）与 P10/P11 系列功能；`src/version.ts` 的 `RELEASE_VERSION` 当前为 **1.0.4**（随每次 OTA 递增）。**游戏系统（4 款）已上线。**
+已完成 P1~P7（基建、数据层、记忆引擎、聊天流、巩固流、UI）与 P10/P11 系列功能；`src/version.ts` 的 `RELEASE_VERSION` 当前为 **1.0.14**（随每次 OTA 递增）。**游戏系统（4 款）已上线。**
 
 **做梦流（P6）已下线**：原"前台闲置 180s → LLM 折叠冷事件"机制于 2026-09-29 移除，`src/memory/dreaming.ts` 及其调用、`dream_consolidation_prompt` 配置项、`getColdestEvents` / `softArchiveBatch` 查询函数一并删除。下线原因是它会物理删除被折叠事件下的全部记忆片段，并以高权重插入无片段的概括事件挤占 Top N，净收益为负。若将来重建，核心原则是让片段随事件迁移而非删除。
 
