@@ -413,7 +413,7 @@ function buildMemorySection(
       .replace(/\[你自己的日子\]/g, "[ta自己的日子]")
       .replace(/\[你的日子\]/g, "[ta的日子]");
     const fragLines = friendCard.fragments.map(
-      (f) => `  · ${replacePlaceholders(f.summary, f.timestamp, userInfo, now)}`
+      (f) => `  · ${anchorLine(f.summary, f.timestamp, userInfo, now)}`
     );
     const detail = [
       `【关于${friendCard.name}】以下是 ta 的档案，不是你的想法（档案里的「你」指 ta 自己）`,
@@ -451,18 +451,18 @@ function buildMemorySection(
         const vivid = cued || fragLive >= detailThreshold(frag.priority);
         const shortText = frag.gist || frag.summary.slice(0, 24);
         detailLines.push(
-          `  · ${replacePlaceholders(vivid ? frag.summary : shortText, frag.timestamp, userInfo, now)}`
+          `  · ${anchorLine(vivid ? frag.summary : shortText, frag.timestamp, userInfo, now)}`
         );
-        briefLines.push(`  · ${replacePlaceholders(shortText, frag.timestamp, userInfo, now)}`);
+        briefLines.push(`  · ${anchorLine(shortText, frag.timestamp, userInfo, now)}`);
       }
     } else {
       const eventFragments = fallbackFragments.get(event.id);
       const latest = eventFragments?.[eventFragments.length - 1];
       if (!latest) continue;
       startDegraded = event.live_weight < detailThreshold(latest.priority);
-      detailLines.push(`  · ${replacePlaceholders(latest.summary, latest.timestamp, userInfo, now)}`);
+      detailLines.push(`  · ${anchorLine(latest.summary, latest.timestamp, userInfo, now)}`);
       briefLines.push(
-        `  · ${replacePlaceholders(latest.gist || latest.summary.slice(0, 24), latest.timestamp, userInfo, now)}`
+        `  · ${anchorLine(latest.gist || latest.summary.slice(0, 24), latest.timestamp, userInfo, now)}`
       );
     }
 
@@ -477,9 +477,9 @@ function buildMemorySection(
 
   // 灵光一闪：连同一句印象一起注入，否则 AI 只拿到事件标题、接不上话
   if (epiphany) {
-    const text = replacePlaceholders(epiphany.event_text, epiphany.timestamp, userInfo, now);
+    const text = anchorLine(epiphany.event_text, epiphany.timestamp, userInfo, now);
     const gist = epiphany.gist
-      ? replacePlaceholders(epiphany.gist, epiphany.timestamp, userInfo, now)
+      ? anchorLine(epiphany.gist, epiphany.timestamp, userInfo, now)
       : "";
     const line = `- [灵光一闪·冷记忆] ${text}${gist && gist !== text ? `（${gist}）` : ""}`;
     blocks.push({ weight: 0, isEpiphany: true, detail: line, brief: line, degraded: false });
@@ -530,6 +530,45 @@ function renderMemoryBlocks(blocks: MemoryBlock[]): string {
 }
 
 /**
+ * 相对日标签：今天 / 昨天 / 3天前 / 上周 / 3周前 / 上个月 / 前3个月 / 去年 / 2年前
+ *
+ * 按自然日差算（与聊天页日期横幅同口径）：昨晚的事今早看是「昨天」。
+ */
+export function relativeDayLabel(timestamp: string | undefined, now: dayjs.Dayjs = dayjs()): string {
+  if (!timestamp) return "";
+  const eventTime = dayjs(timestamp);
+  if (!eventTime.isValid()) return "";
+  const diffDays = Math.max(0, now.startOf("day").diff(eventTime.startOf("day"), "day"));
+
+  if (diffDays < 1) return "今天";
+  if (diffDays < 2) return "昨天";
+  if (diffDays < 7) return `${diffDays}天前`;
+  if (diffDays < 30) {
+    const weeks = Math.floor(diffDays / 7);
+    return weeks <= 1 ? "上周" : `${weeks}周前`;
+  }
+  if (diffDays < 365) {
+    const months = Math.floor(diffDays / 30);
+    return months <= 1 ? "上个月" : `前${months}个月`;
+  }
+  const years = Math.floor(diffDays / 365);
+  return years <= 1 ? "去年" : `${years}年前`;
+}
+
+/**
+ * 记忆行的相对时间锚点：`【3天前】…`
+ *
+ * 文本自带 [time] 时渲染出来就是相对时间，不再加前缀；
+ * 没有 [time] 的（gist、老数据、模型漏写）由代码补齐，保证每行都看得出先后。
+ */
+export function anchorLine(raw: string, timestamp: string, userInfo: UserInfo | null, now: dayjs.Dayjs = dayjs()): string {
+  const rendered = replacePlaceholders(raw, timestamp, userInfo, now);
+  if (raw.includes("[time]")) return rendered;
+  const label = relativeDayLabel(timestamp, now);
+  return label ? `【${label}】${rendered}` : rendered;
+}
+
+/**
  * 替换 [user]、[time]、[now] 占位符（记忆区与游戏回顾共用）
  * [user] → 用户昵称
  * [time] → 相对时间描述（如"前两个月"、"上周"）
@@ -554,34 +593,7 @@ export function replacePlaceholders(
 
   // [time] → 相对时间
   if (result.includes("[time]") && eventTimestamp) {
-    const eventTime = dayjs(eventTimestamp);
-    // 自然日差（与聊天页日期横幅 formatDateLabel 同口径）：
-    // 昨晚的事今早看是「昨天」。此前用 24h 截断差，不足一天一律显示「今天」，
-    // 昨天聊的事也被说成今天
-    const diffDays = Math.max(
-      0,
-      currentTime.startOf("day").diff(eventTime.startOf("day"), "day")
-    );
-    let relativeTime: string;
-
-    if (diffDays < 1) {
-      relativeTime = "今天";
-    } else if (diffDays < 2) {
-      relativeTime = "昨天";
-    } else if (diffDays < 7) {
-      relativeTime = `${diffDays}天前`;
-    } else if (diffDays < 30) {
-      const weeks = Math.floor(diffDays / 7);
-      relativeTime = weeks <= 1 ? "上周" : `${weeks}周前`;
-    } else if (diffDays < 365) {
-      const months = Math.floor(diffDays / 30);
-      relativeTime = months <= 1 ? "上个月" : `前${months}个月`;
-    } else {
-      const years = Math.floor(diffDays / 365);
-      relativeTime = years <= 1 ? "去年" : `${years}年前`;
-    }
-
-    result = result.replace(/\[time\]/g, relativeTime);
+    result = result.replace(/\[time\]/g, relativeDayLabel(eventTimestamp, currentTime));
   }
 
   // [now] → 当前时间

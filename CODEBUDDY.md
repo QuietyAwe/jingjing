@@ -141,7 +141,7 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 
 | 字段 | 规格 | 用途 |
 | --- | --- | --- |
-| `gist` | ≤20 字一句话，含 `[user]` | 记忆变淡后只剩的印象 |
+| `gist` | ≤20 字一句话，含 `[user]` `[time]` | 记忆变淡后只剩的印象 |
 | `summary` | 80~120 字，含 `[user]` `[time]`，写清「发生了什么 + 关键细节 + 当时情绪」 | 想起来时的完整细节 |
 
 **渲染规则**（`assembler.ts` 的 `buildMemorySection`）——像人的「想起」**逐条**分层，想起一件事不把整段往事全部擦亮：
@@ -155,6 +155,8 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 命中事件最多注入 4 条片段（最早 1 + 最近 3，**被唤起的必保**，超额先丢未唤起且更旧的）。详略阈值 = `detail_visible_weight`（设置「记忆流转阈值」可调，默认 **60**；调高=更多记忆变简略）× priority 系数（见「记忆引擎行为约定·衰减」）。
 
 `gist` 为空时（老数据、手动新增未填）回退为 `summary` 前 24 字，保证分层渲染永远有内容。
+
+**每行带相对日期**（`anchorLine`）：片段行 / 好友记忆行 / 灵光一闪都以 `【3天前】` 开头。文本自带 `[time]` 时由占位符渲染出相对时间、不再加前缀；`gist`、老数据、模型漏写 `[time]` 的由代码补齐——只有「晚上」「下午」这类时段词，模型看不出事件先后。
 
 **写入方**：巩固流（`background.ts` 提取指令）、游戏记忆（`memory.ts`）、20问（`twentyQuestions.ts`）、四款游戏的 `insertEpisode` 调用点（`chat.tsx`）、心情动态记忆（`src/moments/memory.ts`）。后端的 `gist` 缺失兜底统一为 `summary.slice(0, 24)`。
 
@@ -408,7 +410,7 @@ system  : gameHint       游戏回合指令（对局中，置末就近影响本�
 
 ## 十、当前进度
 
-已完成 P1~P7（基建、数据层、记忆引擎、聊天流、巩固流、UI）与 P10/P11 系列功能；`src/version.ts` 的 `RELEASE_VERSION` 当前为 **1.0.14**（随每次 OTA 递增）。**游戏系统（4 款）已上线。**
+已完成 P1~P7（基建、数据层、记忆引擎、聊天流、巩固流、UI）与 P10/P11 系列功能；`src/version.ts` 的 `RELEASE_VERSION` 当前为 **1.0.15**（随每次 OTA 递增）。**游戏系统（4 款）已上线。**
 
 **做梦流（P6）已下线**：原"前台闲置 180s → LLM 折叠冷事件"机制于 2026-09-29 移除，`src/memory/dreaming.ts` 及其调用、`dream_consolidation_prompt` 配置项、`getColdestEvents` / `softArchiveBatch` 查询函数一并删除。下线原因是它会物理删除被折叠事件下的全部记忆片段，并以高权重插入无片段的概括事件挤占 Top N，净收益为负。若将来重建，核心原则是让片段随事件迁移而非删除。
 

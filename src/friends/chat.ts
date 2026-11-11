@@ -19,7 +19,7 @@ import {
   insertEpisode,
 } from "@/db/queries";
 import { getThresholds } from "@/prompt/config";
-import { replacePlaceholders } from "@/prompt/assembler";
+import { anchorLine } from "@/prompt/assembler";
 import { useChatStore, logDebug } from "@/store/chatStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { friendName } from "./persona";
@@ -71,7 +71,7 @@ export function buildFriendSystemPrompt(friend: FriendPersona): string {
   const fragments = getFragmentsMentioning(friend.name, 3);
   if (fragments.length > 0) {
     const lines = fragments.map((f) =>
-      replacePlaceholders(f.gist || f.summary.slice(0, 24), f.timestamp, info, dayjs())
+      anchorLine(f.gist || f.summary.slice(0, 24), f.timestamp, info, dayjs())
     );
     parts.push("", "## 你还记得的", lines.join("\n"));
   }

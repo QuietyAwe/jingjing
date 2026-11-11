@@ -1031,10 +1031,6 @@ ${text}
           <Text style={[styles.label, { color: colors.text }]}>AI 怎么称呼你</Text>
           <Text style={[styles.value, { color: colors.textMuted }]}>{user_nickname || "未设置"}</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={() => { setInputBlocked(blocked_keywords || identityNames().join("、")); setShowBlockedModal(true); }}>
-          <Text style={[styles.label, { color: colors.text }]}>检索屏蔽词</Text>
-          <Text style={[styles.value, { color: colors.textMuted }]} numberOfLines={1}>{blocked_keywords || identityNames().join("、")}</Text>
-        </TouchableOpacity>
         <View style={[styles.row, { borderBottomColor: colors.border }]}>
           <View style={styles.modelInfo}>
             <Text style={[styles.label, { color: colors.text }]}>流式输出</Text>
@@ -1113,6 +1109,17 @@ ${text}
         </View>
 
         {renderConfigRow("模型路由", { key: "background_temperature", label: "后台温度", type: "number", description: "建议 0，追求结构稳定" }, String(bgRouting.temperature))}
+      </CollapsibleSection>
+
+      {/* 记忆检索 */}
+      <CollapsibleSection title="记忆检索" icon="🔍" defaultExpanded={false}>
+        <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={() => { setInputBlocked(blocked_keywords || identityNames().join("、")); setShowBlockedModal(true); }}>
+          <View style={styles.rowLeft}>
+            <Text style={[styles.label, { color: colors.text }]}>检索屏蔽词</Text>
+            <Text style={[styles.rowDesc, { color: colors.textMuted }]} numberOfLines={1}>高频词不参与召回，默认屏蔽你和 TA 的称呼</Text>
+          </View>
+          <Text style={[styles.value, { color: colors.textMuted }]} numberOfLines={1}>{blocked_keywords || identityNames().join("、")}</Text>
+        </TouchableOpacity>
       </CollapsibleSection>
 
       {/* 记忆流转阈值 */}
