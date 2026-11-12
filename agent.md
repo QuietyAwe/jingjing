@@ -458,3 +458,63 @@ system  : gameHint       游戏回合指令（对局中，置末就近影响本�
 **「想起」逐条分层（2026-10-09）**：命中事件不再整块擦亮——只有被当前话题**真正唤起**的片段（关键词实质重合，`cuedFragmentIds`）回到完整 `summary`，其余片段按**各自年龄**过遗忘曲线逐条决定 `summary`/`gist`；`capFragments` 必保唤起条（超额先丢未唤起且更旧的）。纯渲染层改动（retrieval 算唤起、assembler 逐条分层），数据与命中刷新机制不动。
 
 **巩固时间正确性 + 聊天体验四项（2026-10-08）**：① 巩固落库与提取提示词的时间戳统一沿用**批末消息时间**，修复「几天前的对话被巩固成今天刚发生」；② 聊天列表微信式日期分隔条（间隔 ≥5 分钟或跨天显示：今天 HH:mm / 昨天 / 星期X / YYYY年M月D日），纯展示层；③ 记忆区命中片段同样按实时权重降级为一句话 gist（此前命中片段永远全文），详略阈值 40→60 并进设置可调（`detail_visible_weight`），冷记忆线拆出 `COLD_MEMORY_MAX_WEIGHT=40` 保持灵光一闪池语义不变；④ 重新生成加「收起+淡出」过渡动画（`LayoutAnimation` 220ms，动画结束后再发起重答），消除删末尾消息的布局跳变（编辑后重发的跳变按用户选择本次未处理）。
+
+---
+
+## 十一、部署与 Git 推送认证（HTTPS + PAT，不走 SSH）
+
+> 本文件原名 `CODEBUDDY.md`，已更名为 `agent.md`。`ARCHIVE.md` 与 `docs/` 下历史/评审文档中的 `CODEBUDDY.md` 字样属于留档，保持原样不改。
+
+### 远端与分支
+
+- 远端：`https://github.com/QuietyAwe/jingjing.git`（**HTTPS**，非 SSH；不配 `core.sshCommand`，也不用 SSH key）。
+- 默认分支 `master`；另有 `dev` 分支（承载文档及非主干改动，master 保持不动）。
+
+### 凭据：两个 git credential helper 接力
+
+写在 `/root/.gitconfig`：
+
+| helper | 实现 | 作用 |
+|---|---|---|
+| `/usr/local/system/bin/git-credential-helper` | 系统级 Go 二进制 | 基础兜底 |
+| `!/root/.git-gh-cred.sh` | 一段 shell 脚本 | **实际提供 token** |
+
+注意：`!` 前缀的 helper 由 git 把动作（`get`/`store`/`erase`）作为**命令行参数 `$1`** 传入，凭据属性（protocol/host 等）走 stdin。脚本必须从 `$1` 取动作，不能读 stdin 首行，否则会出现 `could not read Username ... No such device or address`。
+
+### token 从哪来
+
+`/root/.git-gh-cred.sh` 在 git 每次需要认证时读取：
+
+```
+/root/.codebuddy/.mcp.json
+→ mcpServers.github.headers.Authorization  (Bearer <TOKEN>)
+```
+
+把 Bearer token 抽出来，按 git credential 协议回给 git：
+
+```
+username=x-access-token
+password=<PAT>
+```
+
+即 **GitHub 登录授权复用 MCP `github` 连接器的授权**，无需每次 push 重新登录。push 时 `x-access-token` 作用户名、PAT 作密码走 HTTPS 校验。
+
+### 提交与推送
+
+提交用固定身份（覆盖全局，因为全局没设 user）：
+
+```bash
+git -c user.name='QuietyAwe' -c user.email='3283659610@qq.com' commit -m "..."
+git push origin dev          # 或 origin master
+```
+
+新建并推送远端分支：
+
+```bash
+git checkout -b dev
+git push -u origin dev
+```
+
+### 已知坑：443 偶发超时
+
+`github.com:443` 在沙箱里**偶尔连接超时**（曾遇 `curl 28 Failed to connect to github.com port 443`）。发生时**不要反复重试同一条命令**，换一次 `git fetch` / `git push` 重试，通常第二次就通。
