@@ -5,7 +5,7 @@ import type {
   SystemMetadata,
   UserInfo,
   StateItem,
-  EventItem,
+  AppointmentStatus,
   MemoryEvent,
   MemoryFragment,
   ConsolidationResponse,
@@ -60,7 +60,7 @@ export function getDefaultEventId(): number | null {
 }
 
 // ============================================================
-// P2-2: user_info 读写与增量 Merge（属性/状态/事件 三桶）
+// P2-2: user_info 读写与增量 Merge（属性/状态 两桶；未来事件存在 memory_events）
 // ============================================================
 
 /** 状态注入有效期：超过这么多天未再被提及即停止注入（数据保留） */
@@ -76,7 +76,6 @@ function emptyProfile(): UserInfo {
     social_graph: [],
     traits: [],
     states: [],
-    events: [],
   };
 }
 
@@ -86,9 +85,54 @@ export function activeStates(userInfo: UserInfo, now?: dayjs.Dayjs): StateItem[]
   return userInfo.states.filter((s) => dayjs(s.created_at).isAfter(cutoff));
 }
 
-/** 未归档事件（upcoming + caring） */
-export function activeEvents(userInfo: UserInfo): EventItem[] {
-  return userInfo.events.filter((e) => e.status !== "archived");
+/**
+ * 未归档的未来事件（upcoming + caring），按发生时刻排序
+ *
+ * 不只是约定：离职、考试、手术、搬家这类未来节点同样存在这张表里
+ * （timestamp 就是它发生的时刻），靠 event_status 区分生命周期，到点由时间通道注入提醒。
+ */
+export function getUpcomingEvents(): MemoryEvent[] {
+  const db = getDB();
+  return db.getAllSync<MemoryEvent>(
+    `SELECT ${EVENT_COLUMNS} FROM memory_events
+     WHERE event_status IN ('upcoming', 'caring')
+     ORDER BY timestamp ASC`
+  );
+}
+
+/** 推进约定状态（upcoming → caring → archived） */
+export function updateEventStatus(eventId: number, status: AppointmentStatus): void {
+  const db = getDB();
+  db.runSync("UPDATE memory_events SET event_status = ? WHERE id = ?", status, eventId);
+}
+
+/**
+ * 写入 / 更新一条未来事件（约定、安排、重大节点都算）
+ *
+ * 同一件事被重复提取时只更新时刻与状态，不新建事件。
+ * `timestamp` 就是它发生的时刻，`event_status` 由时刻决定：未到 → upcoming，已过 → caring。
+ */
+export function upsertFutureEvent(text: string, happensAt: string, priority: number = 5): number {
+  const db = getDB();
+  const existing = db.getFirstSync<MemoryEvent>(
+    `SELECT ${EVENT_COLUMNS} FROM memory_events
+     WHERE event_status != 'none' AND event_text = ?
+     ORDER BY id DESC LIMIT 1`,
+    text
+  );
+  const status: AppointmentStatus = dayjs(happensAt).isAfter(dayjs()) ? "upcoming" : "caring";
+  if (existing) {
+    db.runSync(
+      "UPDATE memory_events SET timestamp = ?, event_status = ?, priority = MAX(priority, ?), last_accessed = ? WHERE id = ?",
+      happensAt,
+      status,
+      priority,
+      dayjs().toISOString(),
+      existing.id
+    );
+    return existing.id;
+  }
+  return insertEvent(text, 100, priority, "episode", happensAt, status);
 }
 
 /**
@@ -115,14 +159,12 @@ export function getUserInfo(): UserInfo | null {
     }
   };
 
-  // 旧版（五块）画像一次性迁移成三桶：preferences/psycho_state/life_quests 拆进 traits/states/events。
-  // 存量状态打迁移时刻的时间戳（按 7 天规则自然过期）；
-  // 存量带 due_time 的任务进事件桶，已过期的直接进 48h 关心流程。
+  // 旧版（五块）画像一次性迁移成两桶：preferences/psycho_state/life_quests 拆进 traits/states。
+  // 存量约定不迁移：约定已并入 memory_events，旧的 events 键读到时直接丢弃。
   const legacyKeys = ["preferences", "psycho_state", "life_quests"].filter((k) => map.has(k));
   if (legacyKeys.length > 0 && !map.has("traits")) {
     const traits: string[] = [];
     const states: StateItem[] = [];
-    const events: EventItem[] = [];
     const nowIso = dayjs().toISOString();
 
     const prefs = safeParse("preferences", { likes: [] as string[], dislikes: [] as string[] });
@@ -145,24 +187,10 @@ export function getUserInfo(): UserInfo | null {
     for (const x of lq.long_term_goals) if (x?.trim()) traits.push(`长期目标：${x.trim()}`);
     for (const t of lq.ongoing_tasks) {
       const text = t.task_name?.trim();
-      if (!text) continue;
-      if (t.due_time) {
-        const due = dayjs(t.due_time);
-        const valid = due.isValid();
-        const past = !valid || !due.isAfter(dayjs());
-        events.push({
-          text,
-          due_time: valid ? due.toISOString() : nowIso,
-          created_at: nowIso,
-          status: past ? "caring" : "upcoming",
-          ...(past ? { expired_at: nowIso } : {}),
-        });
-      } else {
-        states.push({ text, created_at: nowIso });
-      }
+      if (text) states.push({ text, created_at: nowIso });
     }
 
-    for (const [k, v] of [["traits", traits], ["states", states], ["events", events]] as const) {
+    for (const [k, v] of [["traits", traits], ["states", states]] as const) {
       const value = JSON.stringify(v);
       db.runSync(
         'INSERT INTO user_info (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
@@ -183,7 +211,6 @@ export function getUserInfo(): UserInfo | null {
     social_graph: safeParse("social_graph", []),
     traits: safeParse("traits", []),
     states: safeParse("states", []),
-    events: safeParse("events", []),
   };
 }
 
@@ -214,7 +241,6 @@ export function setUserInfo(info: UserInfo): void {
     ["social_graph", JSON.stringify(info.social_graph)],
     ["traits", JSON.stringify(info.traits)],
     ["states", JSON.stringify(info.states)],
-    ["events", JSON.stringify(info.events)],
   ];
   for (const [key, value] of entries) {
     db.runSync(
@@ -229,7 +255,7 @@ export function setUserInfo(info: UserInfo): void {
  * 增量 Merge 用户信息 — 对齐 PRD 2.2 节第 4 步
  * 对数组字段执行值去重追加，非数组字段直接覆盖
  * patch 可以是 Partial，缺失字段保持原值
- * @param asOf 本次信息实际发生的时刻（补巩固沿用历史对话时间）；缺省为当前时间
+ * @param asOf 本次信息实际发生的时刻（分批消化时沿用历史对话时间）；缺省为当前时间
  */
 export function mergeUserInfo(patch: ConsolidationResponse["new_info"], asOf?: string): void {
   const nowIso = asOf ?? dayjs().toISOString();
@@ -288,42 +314,11 @@ function mergeUserInfoDelta(
     return Array.from(map.values()).slice(-20);
   };
 
-  // 事件：同一文本更新到期时间；已归档的事件重新提起 → 复活为 upcoming
-  const mergeEvents = (
-    a: EventItem[],
-    b?: Array<{ text: string; due_time: string }>
-  ): EventItem[] => {
-    if (!b || b.length === 0) return a;
-    const map = new Map(a.map((e) => [e.text, e]));
-    for (const raw of b) {
-      const text = raw?.text?.trim();
-      const due = dayjs(raw?.due_time);
-      if (!text || !due.isValid()) continue;
-      const prev = map.get(text);
-      const stillOverdue = !due.isAfter(nowIso);
-      map.delete(text);
-      map.set(text, {
-        text,
-        due_time: due.toISOString(),
-        created_at: prev?.created_at ?? nowIso,
-        // 改期到未来 = 事情还没发生：必须回到 upcoming——残留 caring 会让
-        // buildEventNudges 对未到期事件持续注入「已经过去了」的错误关心；
-        // 仍在过去才保留 caring 与 expired_at（48h 关心窗口从 expired_at 起算）
-        status: prev?.status === "caring" && stillOverdue ? "caring" : "upcoming",
-        ...(prev?.status === "caring" && stillOverdue && prev.expired_at
-          ? { expired_at: prev.expired_at }
-          : {}),
-      });
-    }
-    return Array.from(map.values()).slice(-20);
-  };
-
   const merged: UserInfo = {
     basic_identity: { ...existing.basic_identity, ...patch.basic_identity },
     social_graph: mergeSocialGraph(existing.social_graph, patch.social_graph),
     traits: mergeArray(existing.traits, patch.traits, 30),
     states: mergeStates(existing.states, patch.states),
-    events: mergeEvents(existing.events, patch.events),
   };
 
   return merged;
@@ -335,7 +330,7 @@ function mergeUserInfoDelta(
 
 /**
  * 插入记忆事件，返回自增 ID
- * @param timestamp 事件实际发生时间（补巩固沿用历史对话时间）；缺省为当前时间。
+ * @param timestamp 事件实际发生时间（分批消化时沿用历史对话时间）；缺省为当前时间。
  *                 只影响 [time] 渲染与排序，last_accessed 仍写创建时刻——衰减从「记下时」起算，行为不变
  */
 export function insertEvent(
@@ -343,7 +338,8 @@ export function insertEvent(
   activeWeight: number,
   priority: number = 5,
   kind: MemoryKind = "daily",
-  timestamp?: string
+  timestamp?: string,
+  appointmentStatus: AppointmentStatus = "none"
 ): number {
   if (activeWeight < 1 || activeWeight > 100) {
     throw new Error("active_weight must be between 1 and 100");
@@ -355,13 +351,14 @@ export function insertEvent(
   const now = dayjs().toISOString();
   const ts = timestamp ?? now;
   const result = db.runSync(
-    "INSERT INTO memory_events (event_text, timestamp, active_weight, last_accessed, priority, memory_kind) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO memory_events (event_text, timestamp, active_weight, last_accessed, priority, memory_kind, event_status) VALUES (?, ?, ?, ?, ?, ?, ?)",
     eventText,
     ts,
     activeWeight,
     now,
     priority,
-    kind
+    kind,
+    appointmentStatus
   );
   return Number(result.lastInsertRowId);
 }
@@ -420,8 +417,10 @@ export function findSimilarEvent(text: string, excludeId?: number): MemoryEvent 
   if (target.length < 2) return null;
 
   const db = getDB();
+  // 约定事件（未来才发生）不参与「普通记忆新建时」的相似合并：
+  // 把一条已发生的片段挂到「周五面试」这种约定上，检索时会出现时间错乱
   const rows = db.getAllSync<MemoryEvent>(
-    `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE memory_kind != 'daily'`
+    `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE memory_kind != 'daily' AND event_status = 'none'`
   );
   const targetBigrams = new Set(bigrams(target));
 
@@ -445,6 +444,132 @@ export function findSimilarEvent(text: string, excludeId?: number): MemoryEvent 
     if (score >= 0.5 && (!best || score > best.score)) best = { event: row, score };
   }
   return best?.event ?? null;
+}
+
+/** 别名归一化：去掉空白与标点，「双十一，纠结」和「双十一纠结」算同一条 */
+function normalizeAlias(text: string): string {
+  return text.replace(/[\s\p{P}\p{S}]/gu, "").trim();
+}
+
+/** 写入事件别名（重复忽略） */
+export function addEventAliases(eventId: number, aliases: string[]): void {
+  const db = getDB();
+  for (const raw of aliases) {
+    const alias = normalizeAlias(raw);
+    if (!alias) continue;
+    db.runSync(
+      "INSERT OR IGNORE INTO memory_event_aliases (event_id, alias) VALUES (?, ?)",
+      eventId,
+      alias
+    );
+  }
+}
+
+/**
+ * 批量取事件的别名文本（合并过的旧标题），供检索打分用
+ *
+ * 只命中别名的事件如果仍用 event_text 打分，会被「重合度 > 0」过滤掉，
+ * 所以检索侧必须把别名拼进打分文本。
+ */
+export function getEventAliasText(eventIds: number[]): Map<number, string> {
+  const map = new Map<number, string>();
+  if (eventIds.length === 0) return map;
+  const db = getDB();
+  const placeholders = eventIds.map(() => "?").join(",");
+  const rows = db.getAllSync<{ event_id: number; aliases: string }>(
+    `SELECT event_id, GROUP_CONCAT(alias, ' ') AS aliases
+     FROM memory_event_aliases
+     WHERE event_id IN (${placeholders})
+     GROUP BY event_id`,
+    ...eventIds
+  );
+  for (const row of rows) map.set(row.event_id, row.aliases ?? "");
+  return map;
+}
+
+/** 按别名查事件：合并过的标题再次出现时直接挂靠，不再重复判断 */
+export function getEventByAlias(alias: string): MemoryEvent | null {
+  const norm = normalizeAlias(alias);
+  if (!norm) return null;
+  const db = getDB();
+  const row = db.getFirstSync<{ event_id: number }>(
+    "SELECT event_id FROM memory_event_aliases WHERE alias = ? LIMIT 1",
+    norm
+  );
+  return row ? getEventById(row.event_id) : null;
+}
+
+/**
+ * 合并事件（在巩固事务内调用）
+ *
+ * 片段改挂 keep；被并事件的标题与别名转给 keep；priority/weight 取大、timestamp 取早。
+ * 别名冲突（两个事件有同名别名）直接跳过，不能中断整次巩固。
+ */
+export function mergeEvents(keepId: number, mergeIds: number[], extraAliases: string[] = []): void {
+  const db = getDB();
+  const keep = getEventById(keepId);
+  if (!keep) return;
+
+  const targets = mergeIds
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id) && id > 0 && id !== keepId && !!getEventById(id));
+  if (targets.length === 0) {
+    if (extraAliases.length > 0) addEventAliases(keepId, extraAliases);
+    return;
+  }
+
+  const aliases = [...extraAliases];
+  // 约定状态取「更靠后」的：upcoming > caring > none > archived
+  const statusRank: Record<AppointmentStatus, number> = {
+    upcoming: 3,
+    caring: 2,
+    none: 1,
+    archived: 0,
+  };
+  let priority = keep.priority;
+  let earliest = keep.timestamp;
+  let latest = keep.timestamp;
+  let weight = keep.active_weight;
+  let status: AppointmentStatus = keep.event_status ?? "none";
+  for (const id of targets) {
+    const e = getEventById(id)!;
+    aliases.push(e.event_text);
+    priority = Math.max(priority, e.priority);
+    if (e.timestamp < earliest) earliest = e.timestamp;
+    if (e.timestamp > latest) latest = e.timestamp;
+    weight = Math.max(weight, e.active_weight);
+    const s = e.event_status ?? "none";
+    if (statusRank[s] > statusRank[status]) status = s;
+  }
+  // 约定取更晚的时刻（最近安排的那个），普通记忆取更早（事情实际发生的时间）
+  const timestamp = status === "upcoming" ? latest : earliest;
+
+  const inClause = targets.map(() => "?").join(",");
+  db.runSync(
+    `UPDATE memory_fragments SET "index" = ? WHERE "index" IN (${inClause})`,
+    keepId,
+    ...targets
+  );
+  for (const id of targets) {
+    db.runSync(
+      "UPDATE OR IGNORE memory_event_aliases SET event_id = ? WHERE event_id = ?",
+      keepId,
+      id
+    );
+    db.runSync("DELETE FROM memory_event_aliases WHERE event_id = ?", id);
+    db.runSync("DELETE FROM memory_events WHERE id = ?", id);
+  }
+
+  db.runSync(
+    "UPDATE memory_events SET priority = ?, timestamp = ?, active_weight = ?, last_accessed = ?, event_status = ? WHERE id = ?",
+    priority,
+    timestamp,
+    weight,
+    dayjs().toISOString(),
+    status,
+    keepId
+  );
+  addEventAliases(keepId, aliases);
 }
 
 /**
@@ -498,13 +623,85 @@ export function getTopActive(limit: number): MemoryEvent[] {
   );
 }
 
-/** 获取所有活跃事件（用于衰减计算，排除默认事件） */
+/**
+ * 关键词倒排取候选事件（巩固流用）
+ *
+ * 三个来源：片段内容、事件标题、别名（合并过的旧标题）。
+ * 只靠片段会把「标题说得很准、但片段里没出现这个词」的事件漏掉，
+ * 只靠标题又会漏掉「片段在延续、标题措辞不同」的事件。
+ * 命中不足时用最近被想起的事件补齐；默认事件不参与倒排，由调用方决定是否兜底追加。
+ */
+export function getCandidateEvents(keywords: string[], limit: number = 5): MemoryEvent[] {
+  const db = getDB();
+  const defaultEventId = getDefaultEventId();
+  const excludeDefault = defaultEventId ? `AND e.id != ${defaultEventId}` : "";
+  const picked: MemoryEvent[] = [];
+  const seen = new Set<number>();
+
+  if (keywords.length > 0) {
+    const fragConds = keywords
+      .map(() => "(f.summary LIKE ? OR f.gist LIKE ? OR f.keywords LIKE ?)")
+      .join(" OR ");
+    const titleConds = keywords.map(() => "e.event_text LIKE ?").join(" OR ");
+    const aliasConds = keywords
+      .map(
+        () =>
+          "EXISTS(SELECT 1 FROM memory_event_aliases a WHERE a.event_id = e.id AND a.alias LIKE ?)"
+      )
+      .join(" OR ");
+    // 参数顺序必须与 SQL 中出现顺序一致：JOIN ON（片段）→ WHERE（标题、别名）→ LIMIT
+    const params = [
+      ...keywords.flatMap((k) => [`%${k}%`, `%${k}%`, `%${k}%`]),
+      ...keywords.map((k) => `%${k}%`),
+      ...keywords.map((k) => `%${k}%`),
+    ];
+
+    const rows = db.getAllSync<MemoryEvent>(
+      `SELECT ${EVENT_COLUMNS.split(", ")
+        .map((c) => `e.${c}`)
+        .join(", ")}, COUNT(f.id) AS hits
+       FROM memory_events e
+       LEFT JOIN memory_fragments f
+         ON f."index" = e.id
+        AND LENGTH(f.summary) >= 10
+        AND (${fragConds})
+       WHERE 1 = 1 ${excludeDefault}
+         AND (f.id IS NOT NULL OR (${titleConds}) OR (${aliasConds}))
+       GROUP BY e.id
+       ORDER BY hits DESC, e.last_accessed DESC
+       LIMIT ?`,
+      ...params,
+      limit
+    );
+    for (const e of rows) {
+      picked.push(e);
+      seen.add(e.id);
+    }
+  }
+
+  if (picked.length < limit) {
+    for (const e of getTopActive(limit)) {
+      if (picked.length >= limit) break;
+      if (seen.has(e.id)) continue;
+      picked.push(e);
+      seen.add(e.id);
+    }
+  }
+  return picked;
+}
+
+/**
+ * 获取所有活跃事件（用于衰减计算，排除默认事件）
+ *
+ * 排除 upcoming 约定：还没发生的事不是「回忆」，由状态区的「安排」和时间通道负责，
+ * 混进氛围记忆会让记忆区出现「明天才考试」这种未来时间的记忆行。
+ */
 export function getAllActive(): MemoryEvent[] {
   const db = getDB();
   const defaultEventId = getDefaultEventId();
   const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
   return db.getAllSync<MemoryEvent>(
-    `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE 1 = 1 ${excludeDefault}`
+    `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE 1 = 1 ${excludeDefault} AND event_status != 'upcoming'`
   );
 }
 
@@ -551,10 +748,11 @@ export function updateEventText(eventId: number, newText: string): void {
   );
 }
 
-/** 硬删除事件及其关联片段 */
+/** 硬删除事件及其关联片段与别名（别名不删会挂到复用 id 的新事件上） */
 export function deleteEvent(eventId: number): void {
   const db = getDB();
   db.runSync('DELETE FROM memory_fragments WHERE "index" = ?', eventId);
+  db.runSync("DELETE FROM memory_event_aliases WHERE event_id = ?", eventId);
   db.runSync("DELETE FROM memory_events WHERE id = ?", eventId);
 }
 
@@ -564,7 +762,7 @@ export function deleteEvent(eventId: number): void {
 
 /**
  * 插入记忆片段
- * @param timestamp 片段实际发生时间（补巩固沿用历史对话时间）；缺省为当前时间
+ * @param timestamp 片段实际发生时间（分批消化时沿用历史对话时间）；缺省为当前时间
  */
 export function insertFragment(
   eventIndex: number,
@@ -632,6 +830,8 @@ export function deleteFragment(fragmentId: number): void {
 export function clearAllData(): void {
   const db = getDB();
   db.runSync("DELETE FROM memory_fragments");
+  // 别名指向 memory_events.id：清空事件后必须一起清，否则 id 复用会让旧别名挂到新事件上
+  db.runSync("DELETE FROM memory_event_aliases");
   db.runSync("DELETE FROM memory_events");
   db.runSync("DELETE FROM game_sessions");
   db.runSync("DELETE FROM user_info");

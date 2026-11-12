@@ -15,11 +15,11 @@
 
 ### 核心机制
 
-- **增量补式记忆巩固**：每 10 轮对话触发一次后台 LLM 提取，把近期对话沉淀为「记忆事件 + 记忆片段」，并增量 Merge 进用户画像。会话启动时还会静默**补巩固**上次未巩固的积压历史（后台分批、不阻塞输入）；巩固写入的时间戳**沿用对话消息自身时间**（批末消息时间），不记成巩固执行时刻。
+- **增量补式记忆巩固**：未巩固对话攒到约 10k token、或用户停满 30 分钟且积压不少于 10 轮时触发后台 LLM 提取，把对话沉淀为「记忆事件 + 记忆片段」、增量 Merge 用户画像、更新滚动会话摘要。一次只消化一批（约一个 token 预算），剩余积压由下一个触发点继续消化；写入时间戳**沿用对话消息自身时间**（批末消息时间），不记成巩固执行时刻。
 - **冷记忆扰动（灵光一闪）**：检索时按概率抽一条低活跃度的冷记忆注入上下文，制造"突然想起"的效果；**优先挑与当前输入有弱关联的**（不再是纯随机）。
 - **艾宾浩斯衰减**：记忆活跃权重随时间衰减，权重影响检索排序。
 - **记忆分层（gist / summary）**：每条片段同时存一句话概要 `gist` 与详细描述 `summary`。活跃度高 → 注入完整描述；活跃度低 → 只留一句话印象。详见下文的「记忆分层机制」。
-- **滑动窗口**：只把最近 `context_history_rounds`（默认 **10**）轮对话发给模型，与巩固触发频率解耦。
+- **上下文 = 会话摘要 + 未巩固对话**：已巩固部分由滚动摘要代表，游标之后才发原文；没有摘要时回退最近 `context_history_rounds`（默认 **10**）轮。
 - **冷启动兼容**：空库时套用冷启动模板与默认占位符，首次对话也能自然开场。
 
 ### MVP 边界
@@ -98,7 +98,7 @@ src/
     scheduler.ts        # 周基线表生成 + 当前情境查询（优先当日实况）
     week.ts             # 周/时段换算（scheduler 与 dailyLife 共用，避免循环依赖）
     dailyLife.ts        # 每日实况：生成 / 伪天气 / 深夜状态 / 近 7 天实况
-    eventChecker.ts     # 事件（约定/安排）隐形提醒：临近/过期注入提示词，归档转状态
+    eventChecker.ts     # 未来事件（约定/离职/考试…）隐形提醒：临近/过期注入提示词，归档转状态
   prompt/
     defaultConfig.json  # 默认提示词配置
     config.ts           # 配置读写（AsyncStorage 覆盖层）
@@ -119,10 +119,11 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 
 | 表 | 字段 |
 | --- | --- |
-| `memory_events` | `id` PK、`event_text`、`timestamp`、`active_weight`(1-100)、`last_accessed`、`priority`(1-9)、`memory_kind`(daily/episode)；索引 `idx_events_weight (active_weight DESC)` |
+| `memory_events` | `id` PK、`event_text`、`timestamp`、`active_weight`(1-100)、`last_accessed`、`priority`(1-9)、`memory_kind`(daily/episode)、`event_status`(none/upcoming/caring/archived)；索引 `idx_events_weight (active_weight DESC)`。**未来事件（约定、离职、考试、手术…）就是 `timestamp` 在未来的事件**：`event_status` 标记生命周期，不再有独立的「事件桶」 |
 | `memory_fragments` | `id` PK、`index`（父事件 ID，**列名为 `index` 而非 `event_index`**）、`timestamp`(ISO8601)、`gist`(≤20 字一句话)、`summary`(80-120 字，**含关键细节与情绪**)、`keywords`(逗号分隔，检索用，含同义说法)、`priority`(1-9)；索引 `idx_fragments_index ("index")`。**已无 `emotion` 列**：2026-10-02 下线，迁移时把老内容并进 `summary` 后 `DROP COLUMN` |
-| `system_metadata` | `key` PK、`value`；常用 key：`is_locked`、`turn_counter`、`last_consolidated_id` / `last_consolidated_at`（巩固游标，按消息 id 锚定）、`last_consolidated_index`（旧下标游标，仅兼容与调试）、`default_event_id` |
-| `user_info` | key-value 分片：`basic_identity`、`social_graph`、`traits`、`states`、`events`（属性/状态/事件 三桶，巩固流增量 Merge，见「用户画像」）；**用户称呼的唯一真相源**为 `basic_identity.nickname`。旧键 `preferences`/`psycho_state`/`life_quests` 读到时自动迁移删除 |
+| `system_metadata` | `key` PK、`value`；常用 key：`is_locked`、`turn_counter`、`last_consolidated_id` / `last_consolidated_at`（巩固游标，按消息 id 锚定）、`last_consolidated_index`（旧下标游标，仅兼容与调试）、`default_event_id`、`session_digest` / `session_digest_at`（滚动会话摘要）、`last_request_at`（缓存 TTL 守卫） |
+| `memory_event_aliases` | `event_id`、`alias`，复合主键；事件合并后把被并事件的标题记成别名，新事件命中别名直接挂靠。索引 `idx_event_aliases_alias` |
+| `user_info` | key-value 分片：`basic_identity`、`social_graph`、`traits`、`states`（属性/状态 两桶，巩固流增量 Merge，见「用户画像」）；**用户称呼的唯一真相源**为 `basic_identity.nickname`。旧键 `preferences`/`psycho_state`/`life_quests` 读到时自动迁移删除；旧的 `events` 键已废弃（约定并入 `memory_events`） |
 | `behavior_schedule` | `id` PK、`week_start`、`day_of_week`(0-6)、`time_slot`(0-4)、`activity`、`created_at`；索引 `idx_schedule_week`。**存的是 AI 自己的作息**，用于状态区注入 AI 当前在做什么 |
 | `game_sessions` | `id` PK、`game_type`(twenty_questions/yacht/bomb/truth_or_dare)、`mode`、`status`(playing/won/lost/abandoned)、`secret`、`secret_source`(public/memory)、`question_count`、`turns`(JSON 存各游戏状态机)、`started_at`、`ended_at`、`result_note`(结束摘要，供上下文合并) |
 | `moments` | `id` PK、`author`(user/ai/**friend**)、`content`、`mood`(开心/平静/低落/烦躁/期待)、`created_at`、`friend_id`（好友发帖指向 `friend_personas.id`）；索引 `idx_moments_created`、`idx_moments_friend`。**CHECK 只在建表时写死，旧库靠重建表扩展**（`migrateSocialSchema`） |
@@ -156,7 +157,7 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 
 `gist` 为空时（老数据、手动新增未填）回退为 `summary` 前 24 字，保证分层渲染永远有内容。
 
-**每行带相对日期**（`anchorLine`）：片段行 / 好友记忆行 / 灵光一闪都以 `【3天前】` 开头。文本自带 `[time]` 时由占位符渲染出相对时间、不再加前缀；`gist`、老数据、模型漏写 `[time]` 的由代码补齐——只有「晚上」「下午」这类时段词，模型看不出事件先后。
+**每行带相对日期**（`anchorLine`）：片段行 / 好友记忆行 / 灵光一闪都以 `3天前 ` 开头。文本自带 `[time]` 时由占位符渲染出相对时间、不再加前缀；`gist`、老数据、模型漏写 `[time]` 的由代码补齐——只有「晚上」「下午」这类时段词，模型看不出事件先后。
 
 **写入方**：巩固流（`background.ts` 提取指令）、游戏记忆（`memory.ts`）、20问（`twentyQuestions.ts`）、四款游戏的 `insertEpisode` 调用点（`chat.tsx`）、心情动态记忆（`src/moments/memory.ts`）。后端的 `gist` 缺失兜底统一为 `summary.slice(0, 24)`。
 
@@ -175,6 +176,7 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 - 关键词上限 16，超长输入**均匀抽样**（不是只留句首），避免句尾提到的东西检索不到
 - **排序用「关键词重合度」**（`scoreOverlap`：命中了几个不同关键词），SQL 只做 OR 粗召回，避免命中即算数
 - 片段检索时 `gist`、`summary`、`keywords` 三者都参与匹配
+- **事件检索也匹配别名**：合并过的事件把旧标题存进 `memory_event_aliases`，事件层按「标题或别名」粗召回，打分文本也拼上别名（只命中别名的候选否则会被「重合度 > 0」过滤掉）
 - **被唤起的片段**（`cuedFragmentIds`）：片段内容与当前输入的关键词重合 ≥2 个、或输入很短（关键词 ≤2）时 ≥1 个——只让真正被话题唤起的细节回到「记得很清楚」，单个 bigram 的偶然撞词（如「今天」）不算
 
 **记忆区 Top N 只能用实时权重排序**：`active_weight` 列在建事件（`insertEvent` 传 100）与命中（`updateWeight` 传 100）时都被写成 100，全仓没有任何一处把它写低，按它排序等于不排序，会让候选集退化成「最早创建的事件」，事件数超过上限后新记忆再也进不了记忆区。灵光一闪同理：不能用 `active_weight < 40` 筛冷记忆，改成 `live_weight < COLD_MEMORY_MAX_WEIGHT`（40，冷记忆上限常量，**与详略阈值解耦**——详略阈值调高不会把温记忆抽成灵光一闪）。
@@ -183,9 +185,17 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 
 **写入（巩固流）**
 
-- **触发入口两个**：① 常规——助手回复完成且 `turn_counter` 达阈值；② 启动补巩固——聊天页挂载后静默补上次积压（`runCatchUpConsolidation`：等 chatStore persist 水合、需 API Key、模块级一次性守卫），`runConsolidation(msgs, {catchUp:true})` 从游标补到消息末尾（常规模式同样从游标补到消息末尾，触发即提取刚完成的这几轮，**不给尾部预留固定窗口**——预留会让提取落后一轮、游标滞后时退化成只提取一两条旧消息），每批一个窗口、单次启动最多 5 批，LLM 失败 / 锁被占 / 游标不推进即停，剩余积压下次启动续跑
+- **触发条件**：未巩固对话累计 ≥ `consolidation_token_budget`（默认 10k token），或距上次巩固 ≥ `consolidation_idle_minutes`（默认 30 分钟）；且不少于最小窗口（`consolidation_window_turns` × 2 条）。`turn_counter` 仍自增但不再参与判定
+- **检查点只有三个事件**：助手回复完成、用户发消息、App 回到前台——不依赖后台常驻或定时器（手机端后台不可靠）
+- **请求结构**：`[system] 提取规则 + 输出格式`（固定，可命中前缀缓存）→ `[history] 游标之后的新对话`（只发增量）→ `[user] 当前时间 / 已有数据 / 上次摘要 / 候选事件 / 任务`（动态，放最后）
+- **候选事件**：三个来源——片段内容、事件标题、**别名**（合并过的旧标题）——取 3~5 个，每个给标题 + 最早 1 条 + 最近 2 条片段（`[time]` 已渲染）；默认事件仅作为兜底候选追加
+- **分批消化**：每次触发只处理游标之后、约一个 token 预算的对话；积压长时由后续触发点续跑，没有单独的补巩固入口
+- **末尾未定稿的一轮不提取**（`unsettledTailStart`）：最后一条助手回复可能被「重新生成」替换，它配对的用户消息可能被「编辑后重发」连带删除，巩固进去就记下用户实际没留下的版本。窗口从游标补到「已定稿的末尾」，这一轮等它不再是末尾（有新对话）才提取；但**不能按窗口大小从尾部对齐**（`len-windowSize`）——那会让游标滞后时只圈到一两条旧消息
 - **时间戳沿用对话时间**：事件/片段落库 `timestamp` 取该批最后一条消息的时间（`batchEndTs`），提取提示词「## 当前时间」也用它（本地时区），避免把历史对话巩固成「今天刚发生」；`last_accessed` 仍写创建时刻（衰减从记下时起算，行为不变）
-- 一次巩固可产出**多条片段**（`new_fragments` 数组，上限 5），按话题拆分；旧的单条 `new_fragment` 仍然兼容
+- 一次巩固可产出**多条片段**（`new_fragments` 数组，上限 8），按话题拆分；旧的单条 `new_fragment` 仍然兼容
+- 片段可带 **`happens_at`**（将来才发生的事：约定、离职、考试、手术、搬家…）：独立成一条 `memory_events`（`timestamp = happens_at`、`event_status = upcoming`），不挂到已发生的事件上；同一件事重复提取走 `upsertFutureEvent` 更新时刻，不新建。标题会去掉开头的时间词（「下周三下午面试」→「面试」），避免过期后标题里的时间变成错误信息
+- **事件归并**：模型输出 `event_merges: [{keep, merge:[id], reason}]`，判断「这几条事件其实是同一段经历」；写库先归并（事务）再写片段，`target_event_index` 指向被合并 id 时按 `idMap` 重定向。合并后片段改挂 keep、priority/weight 取大、timestamp 取早，被并事件的标题写进 `memory_event_aliases`，之后新事件命中别名直接挂靠（同一判断不重复做）；`findSimilarEvent` 的 bigram 合并仅作漏判兜底
+- **会话摘要**：同一次调用产出 `session_digest`（200~300 字，旧摘要 + 本批对话滚动压缩，最近具体/更早结论），存 `system_metadata`；空值或失败不覆盖旧摘要；允许「只有摘要、没有片段」的返回
 - 每条片段带 `keywords`（2~6 个检索关键词，**要求写出同义说法**，如 `["妈妈","母亲","我妈"]`），存进 `memory_fragments.keywords`
 - 新建事件前先 `findSimilarEvent()` 查语义重复（bigram 重合率 ≥0.5 或互相包含）：命中就挂靠旧事件，避免「一起玩游戏」和「玩游戏」各建一个
 - `target_event_index` 指向不存在的事件 ID 时回落到兜底，不写进悬空事件
@@ -208,37 +218,47 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 
 **注入**
 
-- 顺序：**检索命中的事件在前**（相关），再补高权重的「氛围记忆」，氛围记忆限量 5 条
+- 顺序：**检索命中的事件在前**（相关），再补 **1 条**高权重的「氛围记忆」（只为保留「还有别的共同经历」的存在感，多了会稀释相关记忆）；**本轮没有检索命中时记忆区整块不出现**（不注入氛围记忆、也不补「日常闲聊」——近期的事已由画像的近况覆盖，硬塞只会占预算并引出无关内容）
 - 命中事件注入片段时**最多 4 条**（最近 3 条 + 最早 1 条，被唤起的必保），避免一个积累几十条的事件一次撑爆预算；命中权重刷新是**事件级**（`updateWeight` 100），但渲染是**片段级**分层——「想起」只增强被唤起的那条细节
 - Token 超限的截断顺序：删灵光一闪 → **低权重记忆块降级**（detail→gist，别直接删）→ 按权重从低到高删块 → 丢最旧历史
 - 灵光一闪注入「事件标题 + 一句 gist」，并**优先挑与当前输入有弱关联的冷记忆**（不再是纯随机），否则 AI 只拿到标题、接不上话
 
-**用户画像（属性/状态/事件 三桶，2026-10-10 重构）**
+**用户画像（属性/状态 两桶）**
 
 | 桶 | 语义 | 时效行为 |
 | --- | --- | --- |
 | `traits` 属性 | 永久有效的事实（喜好/性格/沟通偏好/长期目标…） | 永久注入，合并去重上限 30 |
 | `states` 状态 | 有时效的近况（「[time]开始发烧」「[time]在疯狂加班」），文本带 `[time]` 占位符 | 注入时按 `created_at` 渲染成相对时间（「7天前开始发烧」）；**7 天**（`STATE_EXPIRE_DAYS`）未再被提及即停止注入（数据保留）；同一状态被重提会刷新 `created_at` |
-| `events` 事件 | 有明确到期时间的约定/安排/待办（`due_time` ISO8601），即旧「约定」概念 | 生命周期见下 |
 
-**事件生命周期与隐形提醒**（`src/memory/eventChecker.ts`，取代旧 promiseChecker 的「AI 主动发可见消息」）：
+未来事件（旧「事件桶」）已并入 `memory_events`：巩固时片段带 `happens_at` → 事件 `timestamp = happens_at`、`event_status = upcoming`；同一件事重复提取走 `upsertFutureEvent` 更新时刻，不新建。不限于约定——离职、考试、手术这类重大节点同样走这条链路。
+
+**未来事件生命周期与隐形提醒**（`src/memory/eventChecker.ts`，数据源为 `memory_events` 的 upcoming/caring）：
 
 - 注入形态：**隐形提示词**拼在消息末尾（对局中不注入），AI 在下一次回复里自然提起/关心
-- 到期前 **24h**：注入「事件临近」模板（`event_reminder_template`，`{{event}}`/`{{due_time}}`）
-- 过期且**用户没提起**（用户消息与事件文本 bigram 实质重合，口径同「被唤起」）：注入「事件过期关心」模板（`event_care_template`），持续注入
+- 到点前 **24h**：注入「未来事件临近」模板（`event_reminder_template`，`{{event}}`/`{{due_time}}`）
+- 过期且**用户没提起**（用户消息与事件文本 bigram 实质重合，口径同「被唤起」）：注入「未来事件过期关心」模板（`event_care_template`），持续注入
 - **用户提起** 或 关心满 **48h**（`EVENT_CARE_WINDOW_HOURS`）：归档（`archived`），同时转成一条状态（「[time]面试刚过去」）供后续关心；归档事件重新被提取到会复活为 `upcoming`
 
-合并规则：数组合并去重、往末尾追加裁最旧（traits 30 / states 20 / events 20 / 社交 30）；状态同文本重提=刷新时效；事件同文本=更新 `due_time`。状态/事件的 `created_at` 沿用对话时间（补巩固传批末消息时间）。**旧五块画像**（preferences/psycho_state/life_quests）读到时一次性迁进三桶（存量状态打迁移时刻、存量过期事件直接进 48h 关心流程），旧键随即删除。
+合并规则：数组合并去重、往末尾追加裁最旧（traits 30 / states 20 / 社交 30）；状态同文本重提=刷新时效；未来事件同文本=更新发生时刻（`upsertFutureEvent`，已归档的会被提取复活为 `upcoming`）。状态 `created_at` 沿用对话时间（分批消化传批末消息时间）。**旧五块画像**（preferences/psycho_state/life_quests）读到时迁进两桶（存量状态打迁移时刻），旧键随即删除；旧的 `events` 键直接丢弃。
 
 **尚未做**：语义重复事件只在新建时合并，历史存量未做批量去重。
 
+## 前台上下文构成（缓存友好，2026-11-12）
+
+消息顺序：`[system 人设] → [system 状态区] → [user 会话摘要 + 未巩固历史] → [system 游戏区] → [system 记忆区] → 游戏提示 → 事件提醒`。
+
+- **历史只带游标之后的原文**：`getHistory()` 读 `last_consolidated_id`，已巩固部分由 `session_digest` 代表（`assemblePrompt` 插在历史最前，带 `is_digest` 标记，截断时最后才丢）；没有摘要时回退最近 `context_history_rounds` 轮
+- **记忆区/游戏区后置**：它们随话题变化，放在历史前会让后面整段历史的前缀缓存失效；记忆区只在命中时出现（未命中整块不出现，连这 1200 token 都不付）
+- **TTL 守卫**：距上次请求（`last_request_at`）超过 `consolidation_idle_minutes` 时只带最近几轮——缓存已失效，全量重读长历史更贵
+- **摘要换代**：每次巩固后摘要变化 → 下一次请求前缀分叉一次（约每 10k token 一次），属于设计内开销
+
 ## Prompt 预算与截断
 
-- 预算 8000 token（估算：中日韩字符 ≈ 1 token/字，其余 ≈ 4 字符/token）
-- 预算覆盖「系统人设 + 状态区 + 记忆区 + 历史」四段
+- 预算 `context_token_budget`（默认 14000 token；估算：中日韩字符 ≈ 1 token/字，其余 ≈ 4 字符/token）。未巩固历史最多可到 10k，预算必须覆盖它
+- 预算覆盖「系统人设 + 状态区 + 会话摘要 + 历史 + 记忆区」五段
 - 超限顺序：删灵光一闪 → **低权重记忆块降级**（完整描述 → 一句话，别直接删）→ 按实时权重从低到高删记忆块（事件行连同其片段行整块移除）→ 仍超则丢弃最旧历史（至少保留最后一轮）
 
-**默认事件「日常闲聊」**：巩固流兜底事件，LLM 可把片段挂靠其上。排除在检索与灵光一闪之外；只有当本轮**没有检索命中**时，才会把它连同最近 3 条闲聊片段补进记忆区。
+**默认事件「日常闲聊」**：巩固流兜底事件，LLM 可把没有明确主题的碎片挂靠其上。排除在检索与灵光一闪之外，**也不再在未命中时补进记忆区**。
 
 ## 游戏系统（4 款）
 
@@ -361,12 +381,12 @@ system  : gameHint       游戏回合指令（对局中，置末就近影响本�
 
 - 通用：`[user]`（用户名）、`[now]`（当前时间，如"2026年10月7日（周三）15:30"）、`[today]`（今天是：日期+周几+假期/调休语义，如"今天是2026年10月7日（周三），国庆节假期"；周末/假期/调休才带语义后缀，普通工作日省略）
 - 记忆事件：`[time]`（相对时间，如"前两个月"）
-- 状态区：`{{nickname}}`/`{{occupation}}`/`{{location}}`/`{{social_graph}}`/`{{traits}}`/`{{states}}`/`{{events}}`/`{{current_status}}`/`{{friends}}`（三桶变量自动渲染：states 带 `[time]` 相对时间、events 带到期时间），空字段整行自动隐藏（含空段落标题）；引用旧 12 变量（`{{likes}}` 等）的存量模板自动回退到新版默认模板；`{{current_status}}` 注入的是 **AI 自己的当下处境**（来自当日实况，回退周基线，如「下午，你在常去那家咖啡馆赶稿，隔壁小孩吵得有点烦」），`{{friends}}` 是 AI 自己的熟人圈（「小雨（发小，嘴毒心软）、阿哲（前同事）」）
-- 事件提醒（隐形）：`event_reminder_template`（临近）/`event_care_template`（过期关心），`{{event}}`/`{{due_time}}`，拼在消息末尾
+- 状态区：`{{nickname}}`/`{{occupation}}`/`{{location}}`/`{{social_graph}}`/`{{traits}}`/`{{states}}`/`{{events}}`/`{{current_status}}`/`{{friends}}`（`{{traits}}`/`{{states}}` 来自画像两桶、`{{states}}` 带 `[time]` 相对时间；`{{events}}` 来自 `memory_events` 的 upcoming/caring，带发生时刻），空字段整行自动隐藏（含空段落标题）；引用旧 12 变量（`{{likes}}` 等）的存量模板自动回退到新版默认模板；`{{current_status}}` 注入的是 **AI 自己的当下处境**（来自当日实况，回退周基线，如「下午，你在常去那家咖啡馆赶稿，隔壁小孩吵得有点烦」），`{{friends}}` 是 AI 自己的熟人圈（「小雨（发小，嘴毒心软）、阿哲（前同事）」）
+- 未来事件提醒（隐形）：`event_reminder_template`（临近）/`event_care_template`（过期关心），`{{event}}`/`{{due_time}}`（后者渲染发生时刻），拼在消息末尾
 - 记忆区：`{{event_list}}`、`{{epiphany}}`；底部 `[today]` 时间行（日期+周几+假期/调休语义，刻意不带时刻——精确时刻由消息时间戳负责；模板没放时间变量时代码兜底追加）；历史消息里最后两条用户消息带 `[M/D 周X HH:mm]` 时间戳
 - 上下文模板（`{{{system_prompt}}}` 等三花括号变量）已随「分条发送」改造彻底移除，配置里不再有 `context_template`
 
-设置页区块均可折叠：外观 / API / 模型路由 / 记忆流转阈值 / 提示词设置（含生活与动态）/ 用户画像 / 好友圈 / 事件 / 活跃记忆事件 / 数据管理 / 版本信息，并提供变量选择器、AI 提取人设、数据管理。
+设置页区块均可折叠：外观 / API / 模型路由 / 记忆流转阈值 / 提示词设置（含生活与动态）/ 用户画像 / 好友圈 / 未来事件 / 活跃记忆事件 / 数据管理 / 版本信息，并提供变量选择器、AI 提取人设、数据管理。
 
 ---
 
@@ -383,9 +403,12 @@ system  : gameHint       游戏回合指令（对局中，置末就近影响本�
 **用户称呼不做双写**：唯一真相源是 `user_info.basic_identity.nickname`（SQLite）。`settingsStore.user_nickname` 只是内存镜像，`saveUserNickname()` 写库后同步镜像，启动时把旧的 AsyncStorage `user_nickname` 迁移进画像后即删除该 key。
 
 **阈值配置项**（`prompt/defaultConfig.json` → `thresholds`）：
-- `consolidation_window_turns`（默认 10）：累积多少轮触发一次巩固提取
-- `context_history_rounds`（默认 10）：发送给模型的历史轮数，与巩固触发频率**互不影响**
-- `context_active_events_limit`（默认 10）：记忆区注入的事件总数上限；其中「氛围记忆」（非检索命中的）限量 5 条，命中事件优先占位
+- `consolidation_window_turns`（默认 10）：巩固的**最小窗口**轮数，少于这么多条不触发（避免碎片化）
+- `consolidation_token_budget`（默认 10000）：未巩固对话累计到多少 token 触发巩固
+- `consolidation_idle_minutes`（默认 30）：用户停多久后把不满预算的积压也消化掉；同时作为前台缓存的 TTL 守卫阈值
+- `context_history_rounds`（默认 10）：**没有会话摘要时**的回退窗口轮数
+- `context_token_budget`（默认 14000）：上下文总预算（人设 + 状态区 + 摘要 + 历史 + 记忆区）
+- `context_active_events_limit`（默认 10）：记忆区注入的事件总数上限；其中「氛围记忆」（非检索命中的）限量 **1 条**，**未命中时记忆区整块不出现**，命中事件优先占位
 - `detail_visible_weight`（默认 60）：详细/简略切换权重阈值，实时权重低于它的记忆只注入一句话 gist（命中事件同样降级）；调高=更多记忆变简略
 - `moment_ai_comment_probability`（默认 0.6）：AI 主动评论用户动态的概率
 - `moment_ai_reply_delay_ms`（默认 8000）：AI 评论/回评的随机延迟基准（±50% 抖动：回评约 3~15s，主动评论约 30s~3min）
@@ -414,7 +437,7 @@ system  : gameHint       游戏回合指令（对局中，置末就近影响本�
 
 **做梦流（P6）已下线**：原"前台闲置 180s → LLM 折叠冷事件"机制于 2026-09-29 移除，`src/memory/dreaming.ts` 及其调用、`dream_consolidation_prompt` 配置项、`getColdestEvents` / `softArchiveBatch` 查询函数一并删除。下线原因是它会物理删除被折叠事件下的全部记忆片段，并以高权重插入无片段的概括事件挤占 Top N，净收益为负。若将来重建，核心原则是让片段随事件迁移而非删除。
 
-**近期迭代**：上线游戏系统（20问 / 数字炸弹 / 快艇骰子 / 真心话大冒险）+ 整局卡片化；已结束对局合并进上下文（一条 `[游戏回顾]`）；事件（约定）提醒改为隐形提示词注入（临近/过期由 AI 在回复里自然提起/关心，原「主动发可见消息」流程已下线）；AI 回合加人类反应延迟（`humanDelay`）；流式回复改为在目标对局框内输出（不再「框外打字 → 完成后跳进框」）；20问结束流程改为「框外庆祝提示 → 整局折叠 → 结束感想落在框外且不并入 `[游戏回顾]`」；`emotion` 列下线并并入 `summary`，记忆片段改为 `gist` / `summary` 分层存储与分层注入。并做了一轮隐患审查修复：上下文 system 角色报错、任务失败误删、渲染 key 重复、状态机卡死、退出竞态、定时器闭包过期等。
+**近期迭代**：上线游戏系统（20问 / 数字炸弹 / 快艇骰子 / 真心话大冒险）+ 整局卡片化；已结束对局合并进上下文（一条 `[游戏回顾]`）；未来事件提醒改为隐形提示词注入（临近/过期由 AI 在回复里自然提起/关心，原「主动发可见消息」流程已下线）；AI 回合加人类反应延迟（`humanDelay`）；流式回复改为在目标对局框内输出（不再「框外打字 → 完成后跳进框」）；20问结束流程改为「框外庆祝提示 → 整局折叠 → 结束感想落在框外且不并入 `[游戏回顾]`」；`emotion` 列下线并并入 `summary`，记忆片段改为 `gist` / `summary` 分层存储与分层注入。并做了一轮隐患审查修复：上下文 system 角色报错、任务失败误删、渲染 key 重复、状态机卡死、退出竞态、定时器闭包过期等。
 
 **记忆引擎一轮重构（2026-10-02）**：分词改 bigram + 重合度打分（旧版 6 字切片几乎命中不了）；修掉「记忆区 Top N 锁死在最早创建的事件」（`active_weight` 恒为 100，按它排序等于不排序）与「灵光一闪从来不触发」（筛选条件同样依赖该列）；衰减放慢（0.06/h → 0.02/h）；巩固支持一次产出多条片段并写入 `keywords` 关键词索引；新建事件前查语义重复；Token 超限改为「先降级到一句话再删块」；灵光一闪改为优先联想命中并带上 gist；画像数组加上限。**巩固游标从数组下标改为按消息 id 锚定**（删掉历史里的旧对局卡片会让中间一截对话永久丢失）。
 
@@ -431,4 +454,4 @@ system  : gameHint       游戏回合指令（对局中，置末就近影响本�
 
 **「想起」逐条分层（2026-10-09）**：命中事件不再整块擦亮——只有被当前话题**真正唤起**的片段（关键词实质重合，`cuedFragmentIds`）回到完整 `summary`，其余片段按**各自年龄**过遗忘曲线逐条决定 `summary`/`gist`；`capFragments` 必保唤起条（超额先丢未唤起且更旧的）。纯渲染层改动（retrieval 算唤起、assembler 逐条分层），数据与命中刷新机制不动。
 
-**巩固时间正确性 + 聊天体验四项（2026-10-08）**：① 启动补巩固——聊天页挂载后 `runCatchUpConsolidation` 静默分批补上次未巩固的积压历史（一次性守卫、单次最多 5 批、失败/锁占/游标不推进即停），巩固落库与提取提示词的时间戳统一沿用**批末消息时间**，修复「几天前的对话被巩固成今天刚发生」；② 聊天列表微信式日期分隔条（间隔 ≥5 分钟或跨天显示：今天 HH:mm / 昨天 / 星期X / YYYY年M月D日），纯展示层；③ 记忆区命中片段同样按实时权重降级为一句话 gist（此前命中片段永远全文），详略阈值 40→60 并进设置可调（`detail_visible_weight`），冷记忆线拆出 `COLD_MEMORY_MAX_WEIGHT=40` 保持灵光一闪池语义不变；④ 重新生成加「收起+淡出」过渡动画（`LayoutAnimation` 220ms，动画结束后再发起重答），消除删末尾消息的布局跳变（编辑后重发的跳变按用户选择本次未处理）。
+**巩固时间正确性 + 聊天体验四项（2026-10-08）**：① 巩固落库与提取提示词的时间戳统一沿用**批末消息时间**，修复「几天前的对话被巩固成今天刚发生」；② 聊天列表微信式日期分隔条（间隔 ≥5 分钟或跨天显示：今天 HH:mm / 昨天 / 星期X / YYYY年M月D日），纯展示层；③ 记忆区命中片段同样按实时权重降级为一句话 gist（此前命中片段永远全文），详略阈值 40→60 并进设置可调（`detail_visible_weight`），冷记忆线拆出 `COLD_MEMORY_MAX_WEIGHT=40` 保持灵光一闪池语义不变；④ 重新生成加「收起+淡出」过渡动画（`LayoutAnimation` 220ms，动画结束后再发起重答），消除删末尾消息的布局跳变（编辑后重发的跳变按用户选择本次未处理）。

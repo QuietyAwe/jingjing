@@ -29,7 +29,7 @@ import {
   resetConfigOverride,
   loadConfigOverrides,
 } from "@/prompt/config";
-import { getUserInfo, setUserInfo as persistUserInfo, getTopActive, getActiveCount, clearAllData, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById } from "@/db/queries";
+import { getUserInfo, setUserInfo as persistUserInfo, getTopActive, getActiveCount, clearAllData, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById, getUpcomingEvents } from "@/db/queries";
 import { getWeekStart } from "@/memory/scheduler";
 import { identityNames } from "@/memory/identity";
 import {
@@ -48,7 +48,7 @@ import * as Updates from "expo-updates";
 import { RELEASE_VERSION } from "@/version";
 import type { UserInfo, MemoryEvent, MemoryFragment, ConsolidationResponse, FriendPersona } from "@/types/schema";
 
-/** 人设提取结果（与巩固流 new_info 同构：属性/状态/事件 三桶） */
+/** 人设提取结果（与巩固流 new_info 同构：属性/状态 两桶） */
 type PersonaInfo = ConsolidationResponse["new_info"];
 
 // 替换片段中的 [user] [ai] [time] 占位符
@@ -88,9 +88,12 @@ interface ConfigField {
 }
 
 const THRESHOLD_FIELDS: ConfigField[] = [
-  { key: "consolidation_window_turns", label: "巩固触发轮数", type: "number", description: "累计多少轮对话后触发一次记忆提取（仅控制触发频率）" },
-  { key: "context_history_rounds", label: "上下文轮数上限", type: "number", description: "发送给 AI 的历史对话轮数（与巩固触发频率互不影响）" },
-  { key: "context_active_events_limit", label: "记忆区事件上限", type: "number", description: "上下文中加载的高权重事件数量" },
+  { key: "consolidation_window_turns", label: "巩固最小窗口（轮）", type: "number", description: "少于这么多轮不触发巩固，避免每聊两句就调一次模型（默认 10）" },
+  { key: "consolidation_token_budget", label: "巩固 token 预算", type: "number", description: "未巩固对话攒到这么多 token 就触发巩固（默认 10000，约 50 轮）" },
+  { key: "consolidation_idle_minutes", label: "空闲巩固（分钟）", type: "number", description: "用户停多久后把不足预算的积压也消化掉（默认 30）；同时是上下文缓存的守卫阈值" },
+  { key: "context_history_rounds", label: "无摘要时回退轮数", type: "number", description: "没有会话摘要时（首次使用 / 旧数据）最多带多少轮历史" },
+  { key: "context_token_budget", label: "上下文总预算（token）", type: "number", description: "人设 + 状态区 + 摘要 + 历史 + 记忆区的总预算（默认 14000）" },
+  { key: "context_active_events_limit", label: "记忆区事件上限", type: "number", description: "记忆区最多注入几条事件；本轮没检索命中时不注入记忆" },
   { key: "detail_visible_weight", label: "详细/简略切换权重", type: "number", description: "实时权重低于此值的记忆只显示一句话摘要（默认 60，调高=更多记忆变简略）" },
   { key: "friend_roster_size", label: "好友人数", type: "number", description: "AI 熟人圈的固定人数（默认 5，重建花名册时生效）" },
   { key: "friend_moment_probability", label: "好友每日发帖概率", type: "number", description: "每位好友每天发一条动态的概率（0~1，默认 0.35），太高会抢主角戏份" },
@@ -113,18 +116,18 @@ const PROMPT_GROUPS: PromptGroup[] = [
     description: "按消息发送顺序排列，越靠前缓存命中率越高",
     fields: [
       { key: "system_prompt", label: "① 系统人设", type: "multiline", description: "定义 AI 的角色与人格。此部分作为独立消息发送，缓存命中率最高。" },
-      { key: "state_injection_template", label: "② 状态区注入模板", type: "multiline", description: "定义用户信息的注入格式。此部分在10轮对话内保持稳定，空字段自动隐藏。" },
-      { key: "memory_injection_template", label: "③ 记忆区注入模板", type: "multiline", description: "定义记忆区的整体结构。每次检索可能注入不同事件。" },
+      { key: "state_injection_template", label: "② 状态区注入模板", type: "multiline", description: "定义用户信息的注入格式。两次巩固之间保持稳定，空字段自动隐藏。" },
+      { key: "memory_injection_template", label: "③ 记忆区注入模板", type: "multiline", description: "定义记忆区的整体结构。仅检索命中时注入，未命中整块不出现。" },
       { key: "memory_event_template", label: "└ 记忆事件格式", type: "multiline", description: "定义单条记忆事件的格式。[time] 为相对于事件发生时间的描述。" },
-      { key: "event_reminder_template", label: "事件临近提示", type: "multiline", description: "隐形提示词：事件到期前 24h 注入消息末尾，AI 自然提起。{{event}} 事件内容、{{due_time}} 到期时间。" },
-      { key: "event_care_template", label: "事件过期关心", type: "multiline", description: "隐形提示词：事件过期且用户没提起时注入，AI 找机会关心。{{event}} 事件内容、{{due_time}} 到期时间。" },
+      { key: "event_reminder_template", label: "未来事件临近提示", type: "multiline", description: "隐形提示词：未来事件到点前 24h 注入消息末尾，AI 自然提起。{{event}} 事件内容、{{due_time}} 发生时刻。" },
+      { key: "event_care_template", label: "已过期关心提示", type: "multiline", description: "隐形提示词：事件过去且用户没提起时注入，AI 找机会关心。{{event}} 事件内容、{{due_time}} 发生时刻。" },
     ],
   },
   {
     icon: "🔧",
     title: "后台任务",
     fields: [
-      { key: "extraction_prompt", label: "记忆提取指令", type: "multiline", description: "每10轮对话触发一次，从对话中提取用户信息和记忆片段。" },
+      { key: "extraction_prompt", label: "记忆提取指令", type: "multiline", description: "按 token 预算或空闲触发，从对话中提取片段、更新画像并维护会话摘要。" },
     ],
   },
   {
@@ -204,7 +207,7 @@ export default function SettingsScreen() {
       { label: "社交图谱", value: "{{social_graph}}" },
       { label: "属性（永久）", value: "{{traits}}" },
       { label: "近况（状态）", value: "{{states}}" },
-      { label: "安排（事件）", value: "{{events}}" },
+      { label: "安排（未来事件）", value: "{{events}}" },
       { label: "当前状态", value: "{{current_status}}" },
       { label: "今天是（周几/假期）", value: "[today]" },
     ],
@@ -212,13 +215,13 @@ export default function SettingsScreen() {
       ...COMMON_VARIABLES,
       { label: "相对时间", value: "[time]" },
       { label: "事件内容", value: "{{event}}" },
-      { label: "到期时间", value: "{{due_time}}" },
+      { label: "发生时刻", value: "{{due_time}}" },
     ],
     event_care_template: [
       ...COMMON_VARIABLES,
       { label: "相对时间", value: "[time]" },
       { label: "事件内容", value: "{{event}}" },
-      { label: "到期时间", value: "{{due_time}}" },
+      { label: "发生时刻", value: "{{due_time}}" },
     ],
     memory_injection_template: [
       { label: "事件列表", value: "{{event_list}}" },
@@ -300,13 +303,13 @@ export default function SettingsScreen() {
       setSystemPromptState(getSystemPrompt());
       setThresholds(getThresholds());
       setModelRouting(getModelRouting());
-      const activeEvents = getTopActive(999);
+      const allEvents = getTopActive(999);
       const defaultId = getDefaultEventId();
       if (defaultId) {
         const defaultEvt = getEventById(defaultId);
-        if (defaultEvt) activeEvents.unshift(defaultEvt);
+        if (defaultEvt) allEvents.unshift(defaultEvt);
       }
-      setEvents(activeEvents);
+      setEvents(allEvents);
       setFriends(getAllFriends().filter((f) => !f.is_deleted));
     }, []),
   );
@@ -510,15 +513,14 @@ export default function SettingsScreen() {
     const sg = ui.social_graph;
     const nickname = bi.nickname || "你";
     const graphText = sg.length > 0 ? sg.map((s) => `${s.name}(${s.role})：${s.attitude}`).join("\n* ") : EMPTY;
-    // 近况（状态）带 [time] 相对时间，安排（事件）带到期时间
+    // 近况（状态）带 [time] 相对时间，未来事件带发生时刻
     const statesText = ui.states.length > 0
       ? ui.states.map((s) => replaceFragmentPlaceholder(s.text, s.created_at, nickname, ai_name)).join("\n")
       : EMPTY;
-    const eventsText = ui.events.filter((e) => e.status !== "archived").length > 0
-      ? ui.events
-          .filter((e) => e.status !== "archived")
-          .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf())
-          .map((e) => `${replaceFragmentPlaceholder(e.text, e.created_at, nickname, ai_name)}（${dayjs(e.due_time).format("M/D HH:mm")}）`)
+    const appointments = getUpcomingEvents();
+    const eventsText = appointments.length > 0
+      ? appointments
+          .map((e) => `${replaceFragmentPlaceholder(e.event_text, e.timestamp, nickname, ai_name)}（${dayjs(e.timestamp).format("M/D HH:mm")}）`)
           .join("\n")
       : EMPTY;
     const result = template
@@ -667,23 +669,38 @@ export default function SettingsScreen() {
         return fullSys;
       }
 
-      // ===== 提取指令：展示完整提取 prompt =====
+      // ===== 提取指令：按真实请求结构展示（system 固定段 + 动态块）=====
       case "extraction_prompt": {
-        const events = getTopActive(50);
-        const lines = [editorValue, "", "## 当前用户信息"];
-        lines.push(ui ? JSON.stringify(ui, null, 2) : "（暂无用户信息）");
-        lines.push("", "## 已有索引事件");
-        if (events.length === 0) {
-          lines.push("（暂无索引事件，请为本次对话创建新事件）");
+        const candidates = getTopActive(5);
+        const lines: string[] = [];
+        lines.push("━━━ [system] 固定段（每次一致，可命中前缀缓存）━━━");
+        lines.push(editorValue);
+        lines.push("");
+        lines.push("## 输出格式（严格 JSON）");
+        lines.push('{"new_info": {...}, "new_fragments": [{...}], "event_merges": [{"keep": 数字, "merge": [数字], "reason": "..."}], "session_digest": "..."}');
+        lines.push("");
+        lines.push("━━━ [user] 动态块（放最后，不打断前缀）━━━");
+        lines.push("## 当前时间");
+        lines.push("（本批最后一条消息的时间）");
+        lines.push("");
+        lines.push("## 已有数据（不需要重复提取）");
+        lines.push(`属性：${ui?.traits?.join("、") || "（无）"}`);
+        lines.push(`近况：${ui?.states?.map((s) => s.text).join("、") || "（无）"}`);
+        lines.push(`近期会发生的事：${getUpcomingEvents().map((e) => `${e.event_text}（${dayjs(e.timestamp).format("M/D HH:mm")}）`).join("、") || "（无）"}`);
+        lines.push(`社交关系：${ui?.social_graph?.map((s) => `${s.name}(${s.role})`).join("、") || "（无）"}`);
+        lines.push("");
+        lines.push("## 上次摘要（有则展示，供更新）");
+        lines.push("（上一次巩固生成的 200~300 字摘要）");
+        lines.push("");
+        lines.push("## 候选事件（关键词倒排 3~5 个）");
+        if (candidates.length === 0) {
+          lines.push("（暂无相关事件，请为本次对话创建新事件）");
         } else {
-          for (const e of events) {
+          for (const e of candidates) {
             lines.push(`- [id:${e.id}] ${e.event_text}`);
+            lines.push("  · （最早 1 条 + 最近 2 条片段，自带「昨天 / 3天前」相对时间）");
           }
         }
-        lines.push("", "## 对话快照（最近 10 轮）");
-        lines.push("[用户] （示例：你好）");
-        lines.push("[助手] （示例：你好呀～最近怎么样？）");
-        lines.push("", '请严格输出 JSON，格式：{"new_info": {只写本次新发现的字段, 没有新信息的字段不要输出}, "new_fragments": [{"gist": "...", "summary": "...", "keywords": ["..."], "priority": 数字1-9, "target_event_index": 数字或-1, "new_event_text": ""}]}');
         return lines.join("\n");
       }
 
@@ -745,13 +762,12 @@ export default function SettingsScreen() {
 文本：
 ${text}
 
-输出格式（属性/状态/事件 三桶）：
+输出格式（属性/状态 两桶）：
 {
   "basic_identity": {"nickname":"", "gender":"", "birthday":"", "occupation":"", "location":""},
   "social_graph": [],
   "traits": [],
-  "states": [],
-  "events": []
+  "states": []
 }
 
 规则：
@@ -759,7 +775,7 @@ ${text}
 - 未提到的字段留空字符串或空数组
 - traits（属性，永久有效）：喜好/厌恶/性格/能力/长期目标等，如「喜欢吃番茄炒蛋」
 - states（状态，有时效）：近况文本带 [time] 占位符表示时间，如「[time]开始发烧」
-- events（事件，有到期时间）：形如 {"text":"周五下午面试","due_time":"2026-10-12T14:00:00+08:00"}
+- 未来的约定（如「周五面试」）不用在这里提取，正常聊天时会进记忆
 - social_graph 暂时留空数组
 - 只输出 JSON，不要其他文字`;
 
@@ -873,7 +889,8 @@ ${text}
   const renderUserInfo = () => {
     if (!userInfo) return <Text style={styles.emptyText}>暂无用户数据</Text>;
 
-    const { basic_identity, social_graph, traits, states, events } = userInfo;
+    const { basic_identity, social_graph, traits, states } = userInfo;
+    const appointments = getUpcomingEvents();
 
     const Row = ({ label, value, fieldKey, fieldValue }: { label: string; value: string; fieldKey: string; fieldValue: string }) => (
       <TouchableOpacity style={[styles.editableRow, { borderBottomColor: colors.border }]} onPress={() => openEditField(label, fieldKey, fieldValue)}>
@@ -897,14 +914,12 @@ ${text}
         )}
         <Row label="属性（永久）" value={traits.join("、")} fieldKey="traits" fieldValue={traits.join("、")} />
         <Row label="近况（7 天）" value={states.map((s) => s.text).join("、")} fieldKey="states" fieldValue={states.map((s) => s.text).join("、")} />
-        {events.some((e) => e.status !== "archived") && (
+        {appointments.length > 0 && (
           <View style={[styles.editableRow, { borderBottomColor: colors.border }]}>
             <Text style={[styles.editableLabel, { color: colors.textMuted }]}>安排</Text>
             <Text style={[styles.editableValue, { color: colors.text }]}>
-              {events
-                .filter((e) => e.status !== "archived")
-                .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf())
-                .map((e) => `${e.text}(${dayjs(e.due_time).format("M/D HH:mm")})`)
+              {appointments
+                .map((e) => `${e.event_text}(${dayjs(e.timestamp).format("M/D HH:mm")})`)
                 .join("、")}
             </Text>
           </View>
@@ -914,6 +929,8 @@ ${text}
   };
 
   const thresholdsVal = thresholds as Record<string, number>;
+  // 未来事件就是 timestamp 在未来的记忆事件，渲染时直接查一次
+  const appointmentList = getUpcomingEvents();
   const bgRouting = modelRouting.background_extraction_config;
   const fgRouting = modelRouting.foreground_chat_config;
 
@@ -1260,37 +1277,34 @@ ${text}
         </TouchableOpacity>
       </CollapsibleSection>
 
-      {/* 事件（约定/安排，到期注入隐形提醒） */}
+      {/* 未来事件（约定/离职/考试…到点注入隐形提醒） */}
       <CollapsibleSection
-        title={`事件 (${userInfo?.events?.filter((e) => e.status !== "archived").length || 0})`}
+        title={`未来事件 (${appointmentList.length})`}
         icon="⏰"
         defaultExpanded={true}
       >
-        {!userInfo?.events?.some((e) => e.status !== "archived") ? (
-          <Text style={[styles.emptyText, { color: colors.textMuted, paddingVertical: 16 }]}>暂无事件</Text>
+        {appointmentList.length === 0 ? (
+          <Text style={[styles.emptyText, { color: colors.textMuted, paddingVertical: 16 }]}>暂无未来事件</Text>
         ) : (
-          userInfo.events
-            .filter((e) => e.status !== "archived")
-            .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf())
-            .map((event, index) => {
-              const dueTime = dayjs(event.due_time);
-              const isPast = dueTime.isBefore(dayjs());
-              return (
-                <View key={index} style={[styles.promiseItem, { borderBottomColor: colors.border }]}>
-                  <View style={styles.promiseContent}>
-                    <Text style={[styles.promiseText, { color: isPast ? colors.danger : colors.text }]}>
-                      {event.text}
-                    </Text>
-                    <Text style={[styles.promiseTime, { color: isPast ? colors.danger : colors.textMuted }]}>
-                      {isPast ? "已过期，AI 会找机会关心 " : "到期 "}{dueTime.format("M/D HH:mm")}
-                    </Text>
-                  </View>
-                  <Text style={[styles.promiseStatus, { color: colors.textMuted }]}>
-                    {event.status === "caring" ? "关心中" : "待发生"}
+          appointmentList.map((event) => {
+            const dueTime = dayjs(event.timestamp);
+            const isPast = dueTime.isBefore(dayjs());
+            return (
+              <View key={event.id} style={[styles.promiseItem, { borderBottomColor: colors.border }]}>
+                <View style={styles.promiseContent}>
+                  <Text style={[styles.promiseText, { color: isPast ? colors.danger : colors.text }]}>
+                    {event.event_text}
+                  </Text>
+                  <Text style={[styles.promiseTime, { color: isPast ? colors.danger : colors.textMuted }]}>
+                    {isPast ? "已过期，AI 会找机会关心 " : "约定 "}{dueTime.format("M/D HH:mm")}
                   </Text>
                 </View>
-              );
-            })
+                <Text style={[styles.promiseStatus, { color: colors.textMuted }]}>
+                  {event.event_status === "caring" ? "关心中" : "待发生"}
+                </Text>
+              </View>
+            );
+          })
         )}
       </CollapsibleSection>
 
@@ -2049,16 +2063,6 @@ ${text}
                       <Text style={[styles.infoTitle, { color: colors.text }]}>近况（7 天内有效）</Text>
                       {personaResult.states!.map((s, i) => (
                         <Text key={i} style={[styles.infoLine, { color: colors.textSecondary }]}>· {s}</Text>
-                      ))}
-                    </View>
-                  )}
-
-                  {/* 安排（事件） */}
-                  {(personaResult.events?.length ?? 0) > 0 && (
-                    <View style={[styles.infoBlock, { borderBottomColor: colors.border }]}>
-                      <Text style={[styles.infoTitle, { color: colors.text }]}>安排（到期提醒）</Text>
-                      {personaResult.events!.map((e, i) => (
-                        <Text key={i} style={[styles.infoLine, { color: colors.textSecondary }]}>· {e.text}（{dayjs(e.due_time).format("M/D HH:mm")}）</Text>
                       ))}
                     </View>
                   )}

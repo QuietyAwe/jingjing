@@ -66,7 +66,10 @@ export function getConfigDefault(key: string): string {
 
   const defaults: Record<string, string> = {
     consolidation_window_turns: String(thresholds.consolidation_window_turns),
+    consolidation_token_budget: String(thresholds.consolidation_token_budget),
+    consolidation_idle_minutes: String(thresholds.consolidation_idle_minutes),
     context_history_rounds: String(thresholds.context_history_rounds),
+    context_token_budget: String(thresholds.context_token_budget),
     context_active_events_limit: String(thresholds.context_active_events_limit),
     detail_visible_weight: String(thresholds.detail_visible_weight),
     moment_ai_comment_probability: String(thresholds.moment_ai_comment_probability),
@@ -128,7 +131,7 @@ export async function setCustomSystemPrompt(prompt: string): Promise<void> {
 // ============================================================
 
 /**
- * 旧版（12 变量）状态区模板的废弃变量——画像改三桶后这些变量无数据可填，
+ * 旧版（12 变量）状态区模板的废弃变量——画像改两桶后这些变量无数据可填，
  * 存量覆盖层若还在引用就自动回退到新版默认模板
  */
 const LEGACY_STATE_VARS =
@@ -183,7 +186,10 @@ export function getModelRouting() {
 export function getThresholds() {
   return {
     consolidation_window_turns: getOverride("consolidation_window_turns", config.thresholds.consolidation_window_turns),
+    consolidation_token_budget: getOverride("consolidation_token_budget", config.thresholds.consolidation_token_budget),
+    consolidation_idle_minutes: getOverride("consolidation_idle_minutes", config.thresholds.consolidation_idle_minutes),
     context_history_rounds: getOverride("context_history_rounds", config.thresholds.context_history_rounds),
+    context_token_budget: getOverride("context_token_budget", config.thresholds.context_token_budget),
     context_active_events_limit: getOverride("context_active_events_limit", config.thresholds.context_active_events_limit),
     detail_visible_weight: getOverride("detail_visible_weight", config.thresholds.detail_visible_weight),
     moment_ai_comment_probability: getOverride("moment_ai_comment_probability", config.thresholds.moment_ai_comment_probability),

@@ -7,7 +7,7 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getThresholds } from "@/prompt/config";
-import { getGameSessionById, getUserInfo } from "@/db/queries";
+import { getGameSessionById, getUserInfo, getMeta } from "@/db/queries";
 import { replacePlaceholders } from "@/prompt/assembler";
 import { splitForChat } from "@/utils/text";
 import type { ChatMessage } from "@/types/schema";
@@ -192,9 +192,14 @@ export const useChatStore = create<ChatState>()(
 
       clearDebugLogs: () => set({ debugLogs: [] }),
 
-      /** LLM 上下文：最近 N 轮（滑动窗口，不影响完整消息记录） */
+      /**
+       * LLM 上下文
+       *
+       * 有会话摘要时只带「游标之后还没被摘要覆盖」的对话（摘要由 assemblePrompt 插在历史最前）；
+       * 没有摘要（老数据/首次）时退回最近 N 轮滑动窗口。
+       */
       getHistory: () => {
-        const { context_history_rounds } = getThresholds();
+        const { context_history_rounds, consolidation_idle_minutes } = getThresholds();
         const window = context_history_rounds * 2; // 每轮 = user + assistant
         // 好友私聊是另一个空间：主聊天的上下文与记忆都不该看到它
         const msgs = get().messages.filter((m) => !m.friend_id);
@@ -204,10 +209,49 @@ export const useChatStore = create<ChatState>()(
         // 但游戏摘要是有意进上下文的，标记 is_game_summary 保留。
         // 先过滤再截窗：放在 slice 之后过滤会让 system 消息占掉窗口名额，实际历史不足 N 轮
         const visible = merged.filter((m) => m.role !== "system" || m.is_game_summary);
-        // 最后一条是 user（刚发送，AI 尚未回复）时，多取 1 条确保第一条是 user
-        const lastRole = visible[visible.length - 1]?.role;
-        const len = lastRole === "user" ? window + 1 : window;
-        return visible.slice(-len);
+
+        const digest = getMeta("session_digest");
+        if (!digest) {
+          // 最后一条是 user（刚发送，AI 尚未回复）时，多取 1 条确保第一条是 user
+          const lastRole = visible[visible.length - 1]?.role;
+          const len = lastRole === "user" ? window + 1 : window;
+          return visible.slice(-len);
+        }
+
+        // 摘要覆盖到巩固游标为止：之后的消息才是「还没被压缩过的原文」。
+        // 锚点按 id 定位，消息被删时退化到时间戳
+        const anchorId = getMeta("last_consolidated_id");
+        const anchorAt = getMeta("last_consolidated_at");
+        let pendingStart = 0;
+        const anchorIdx = anchorId ? visible.findIndex((m) => m.id === anchorId) : -1;
+        if (anchorIdx >= 0) {
+          pendingStart = anchorIdx + 1;
+        } else if (anchorAt) {
+          const i = visible.findIndex((m) => m.timestamp > anchorAt);
+          pendingStart = i < 0 ? visible.length : i;
+        }
+        let pending = visible.slice(pendingStart);
+        // 已结束对局的「游戏回顾」本身就是压缩摘要，被游标切掉会让 AI 忘记刚玩过什么。
+        // 只补最近两局，避免历史对局越攒越多
+        const pastGameRecaps = visible
+          .slice(0, pendingStart)
+          .filter((m) => m.is_game_summary)
+          .slice(-2);
+        if (pastGameRecaps.length > 0) pending = [...pastGameRecaps, ...pending];
+
+        // 缓存 TTL 守卫：隔了一段时间没聊，前缀缓存已经失效，
+        // 这时全量重读长历史比只读最近几轮贵得多
+        const lastRequest = getMeta("last_request_at");
+        const idleMinutes = lastRequest ? dayjs().diff(dayjs(lastRequest), "minute") : Infinity;
+        if (idleMinutes >= consolidation_idle_minutes && pending.length > window) {
+          pending = pending.slice(-window);
+        }
+        // 游标刚好在末尾（极少见）：至少带上最后一轮，
+        // 否则「重新生成」会拿不到待重发的用户消息
+        if (pending.length === 0) return visible.slice(-2);
+        // 历史以 user 开头更稳：部分 OpenAI 兼容端点对首条 assistant 的容忍度差
+        if (pending[0]?.role === "assistant") pending = pending.slice(1);
+        return pending;
       },
 
       /** 从 AsyncStorage 重新加载消息（导入备份后调用） */

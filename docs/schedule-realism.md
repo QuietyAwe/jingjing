@@ -94,7 +94,7 @@
 | 机制 | 衔接方式 |
 | --- | --- |
 | `holidays.ts` | 直接作为日生成输入，零改造成本 |
-| `user_info` 三桶 | events/states 作为日生成输入；复用渲染规则，不新增桶 |
+| `user_info` 两桶 + 未来事件 | `states` 与 `memory_events` 的 upcoming/caring 作为日生成输入；复用渲染规则，不新增桶 |
 | `eventChecker` | 约定进实况后，隐形提醒与作息不再各说各话 |
 | 动态引擎 | `postFromPlan` 已取 `getCurrentScene()`，实况越细发帖越真，无需改调用点 |
 | 巩固流 | 无锁冲突：日生成独立 in-flight 护栏（仿 `checkAndGenerateSchedule`），不碰 `is_locked` |

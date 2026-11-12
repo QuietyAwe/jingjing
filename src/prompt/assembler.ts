@@ -6,7 +6,7 @@
 // 超限时按权重从低到高剔除记忆区事件
 // ============================================================
 
-import { getFragmentsByEventIds, getUserInfo, activeStates, activeEvents } from "@/db/queries";
+import { getFragmentsByEventIds, getUserInfo, activeStates, getUpcomingEvents } from "@/db/queries";
 import type {
   UserInfo,
   MemoryEvent,
@@ -21,7 +21,8 @@ import { WEEKDAYS, formatNow, formatTodayLine } from "@/utils/holidays";
 import { formatFriendRoster } from "@/friends/persona";
 import dayjs from "dayjs";
 
-const DEFAULT_TOKEN_BUDGET = 8000; // token 近似值（见 estimateTokens）
+/** 历史消息：摘要条带 is_digest 标记，截断时最后才丢 */
+type HistoryMessage = { role: "user" | "assistant"; content: string; is_digest?: boolean };
 
 /**
  * Token 估算：中日韩字符约 1 token/字，其余按 4 字符 ≈ 1 token
@@ -59,7 +60,7 @@ export interface AssembledPrompt {
   state: string;
   /** 易变部分：记忆区（每次检索可能变化） */
   memory: string;
-  messages: { role: "user" | "assistant"; content: string }[];
+  messages: HistoryMessage[];
 }
 
 /**
@@ -76,9 +77,10 @@ export function assemblePrompt(
   chatHistory: ChatMessage[],
   currentStatus?: string,
   hitFragments?: Map<number, MemoryFragment[]>,
-  tokenBudget: number = DEFAULT_TOKEN_BUDGET,
+  tokenBudget: number = getThresholds().context_token_budget,
   cuedFragmentIds?: Set<number>,
-  friendCard?: FriendCardContext
+  friendCard?: FriendCardContext,
+  sessionDigest?: string
 ): AssembledPrompt {
   const prompts = getPrompts();
   const nickname = getUserNickname(userInfo);
@@ -99,7 +101,7 @@ export function assemblePrompt(
   );
 
   // 3. 转换历史为 API 格式（最后两条用户消息带时间戳，让 AI 感知时间流动）
-  const messages = chatHistory.map((m) => {
+  const historyMessages: HistoryMessage[] = chatHistory.map((m) => {
     // 用户消息：最后两条带时间；AI 消息：不带时间（避免影响输出风格）
     const isUser = m.role === "user";
     const lastTwoUsers = chatHistory.filter((x) => x.role === "user").slice(-2);
@@ -117,6 +119,12 @@ export function assemblePrompt(
       content: timePrefix + m.content,
     };
   });
+
+  // 已巩固的对话由会话摘要代表：放在历史最前面，模型才知道「之前聊过什么」
+  const digest = sessionDigest?.trim();
+  const messages: HistoryMessage[] = digest
+    ? [{ role: "user", content: `[之前聊过] ${digest}`, is_digest: true }, ...historyMessages]
+    : historyMessages;
 
   // 4. 截断：预算覆盖全部四段，先降级/削记忆块，再丢最旧历史
   const fitted = truncateToFit({
@@ -192,13 +200,12 @@ function buildStateSection(
       .map((s) => `- ${replacePlaceholders(s.text, s.created_at, userInfo, currentTime)}`);
     parts.push(`近况：\n${lines.join("\n")}`);
   }
-  const events = activeEvents(userInfo)
-    .slice()
-    .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf());
-  if (events.length > 0) {
-    const lines = events.map(
+  // 未来事件（timestamp 在未来的记忆事件），getUpcomingEvents 已按时刻升序
+  const appointments = getUpcomingEvents();
+  if (appointments.length > 0) {
+    const lines = appointments.map(
       (e) =>
-        `- ${replacePlaceholders(e.text, e.created_at, userInfo, currentTime)}（${dayjs(e.due_time).format("M/D HH:mm")}）`
+        `- ${replacePlaceholders(e.event_text, e.timestamp, userInfo, currentTime)}（${dayjs(e.timestamp).format("M/D HH:mm")}）`
     );
     parts.push(`安排：\n${lines.join("\n")}`);
   }
@@ -255,16 +262,14 @@ function renderStateTemplate(
       : EMPTY;
   result = result.replace(/\{\{states\}\}/g, statesText);
 
-  // 安排（事件）：带到期时间，按到期先后排
-  const events = activeEvents(userInfo)
-    .slice()
-    .sort((a, b) => dayjs(a.due_time).valueOf() - dayjs(b.due_time).valueOf());
+  // 安排（未来事件）：timestamp 在未来，按发生时刻先后排
+  const appointments = getUpcomingEvents();
   const eventsText =
-    events.length > 0
-      ? events
+    appointments.length > 0
+      ? appointments
           .map(
             (e) =>
-              `${replacePlaceholders(e.text, e.created_at, userInfo, now)}（${dayjs(e.due_time).format("M/D HH:mm")}）`
+              `${replacePlaceholders(e.event_text, e.timestamp, userInfo, now)}（${dayjs(e.timestamp).format("M/D HH:mm")}）`
           )
           .join("\n")
       : EMPTY;
@@ -495,6 +500,9 @@ function buildMemorySection(
 function renderMemoryBlocks(blocks: MemoryBlock[]): string {
   const prompts = getPrompts();
   const now = dayjs();
+  // 没有任何命中时不渲染「记忆区」空壳，只保留日期上下文：
+  // 模板里的 [today] 是模型的时间锚点，不能跟着记忆区一起消失
+  if (blocks.length === 0) return formatTodayLine(now);
   const eventList = blocks.filter((b) => !b.isEpiphany);
   const epiphanyBlock = blocks.find((b) => b.isEpiphany);
   const render = (b: MemoryBlock) => (b.degraded ? b.brief : b.detail);
@@ -530,15 +538,27 @@ function renderMemoryBlocks(blocks: MemoryBlock[]): string {
 }
 
 /**
- * 相对日标签：今天 / 昨天 / 3天前 / 上周 / 3周前 / 上个月 / 前3个月 / 去年 / 2年前
+ * 相对日标签：今天 / 昨天 / 3天前 / 上周 / 上个月 / 去年 / 2年前
  *
  * 按自然日差算（与聊天页日期横幅同口径）：昨晚的事今早看是「昨天」。
+ * 约定类事件的 timestamp 在未来，同样要能读出「明天 / 3天后」——
+ * 不能把负数 clamp 成 0，否则「下周三面试」会显示成「今天」。
  */
 export function relativeDayLabel(timestamp: string | undefined, now: dayjs.Dayjs = dayjs()): string {
   if (!timestamp) return "";
   const eventTime = dayjs(timestamp);
   if (!eventTime.isValid()) return "";
-  const diffDays = Math.max(0, now.startOf("day").diff(eventTime.startOf("day"), "day"));
+  const diffDays = now.startOf("day").diff(eventTime.startOf("day"), "day");
+
+  // 未来（约定）：明天 / N天后 / N周后 / N个月后
+  if (diffDays < 0) {
+    const ahead = -diffDays;
+    if (ahead < 2) return "明天";
+    if (ahead < 7) return `${ahead}天后`;
+    if (ahead < 30) return `${Math.floor(ahead / 7)}周后`;
+    if (ahead < 365) return `${Math.floor(ahead / 30)}个月后`;
+    return `${Math.floor(ahead / 365)}年后`;
+  }
 
   if (diffDays < 1) return "今天";
   if (diffDays < 2) return "昨天";
@@ -556,7 +576,7 @@ export function relativeDayLabel(timestamp: string | undefined, now: dayjs.Dayjs
 }
 
 /**
- * 记忆行的相对时间锚点：`【3天前】…`
+ * 记忆行的相对时间锚点：`3天前 …`
  *
  * 文本自带 [time] 时渲染出来就是相对时间，不再加前缀；
  * 没有 [time] 的（gist、老数据、模型漏写）由代码补齐，保证每行都看得出先后。
@@ -565,7 +585,7 @@ export function anchorLine(raw: string, timestamp: string, userInfo: UserInfo | 
   const rendered = replacePlaceholders(raw, timestamp, userInfo, now);
   if (raw.includes("[time]")) return rendered;
   const label = relativeDayLabel(timestamp, now);
-  return label ? `【${label}】${rendered}` : rendered;
+  return label ? `${label} ${rendered}` : rendered;
 }
 
 /**
@@ -617,9 +637,9 @@ function truncateToFit(params: {
   system: string;
   state: string;
   memoryBlocks: MemoryBlock[];
-  messages: { role: "user" | "assistant"; content: string }[];
+  messages: HistoryMessage[];
   budget: number;
-}): { memory: string; messages: { role: "user" | "assistant"; content: string }[] } {
+}): { memory: string; messages: HistoryMessage[] } {
   const { system, state, memoryBlocks, messages, budget } = params;
 
   const systemTokens = estimateTokens(system);
@@ -678,7 +698,9 @@ function truncateToFit(params: {
 
   // 4. 仍超预算：丢弃最旧历史（至少保留最后一轮）
   while (keptMessages.length > 2 && total > budget) {
-    keptMessages = keptMessages.slice(1);
+    // 摘要条目最后才丢：它比等量原文更紧凑，先丢摘要反而损失更大
+    const dropIdx = keptMessages[0]?.is_digest ? 1 : 0;
+    keptMessages = keptMessages.filter((_, i) => i !== dropIdx);
     remeasure();
   }
 

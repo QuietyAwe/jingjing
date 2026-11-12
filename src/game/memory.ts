@@ -33,7 +33,7 @@ const EXTRACT_SYSTEM = `你要把一局「20问」游戏写成一条记忆。
 4. priority：这是共同经历，给 7-9（玩得尽兴/猜中给 8-9，平淡给 7）
 5. new_info：仅当闲聊中明确透露了新的用户信息时才填，否则留空对象 {}
    - 不要把游戏问答本身（"是/不是"）当成用户信息
-   - 结构与既有画像一致（属性/状态/事件 三桶）：basic_identity / social_graph / traits(永久属性) / states(有时效的近况，文本带[time]) / events({text, due_time}，有明确时间的约定)
+   - 结构与既有画像一致（属性/状态 两桶）：basic_identity / social_graph / traits(永久属性) / states(有时效的近况，文本带[time])
 
 严格输出 JSON：
 {"gist":"...","summary":"...","keywords":["..."],"priority":7,"new_info":{}}`;

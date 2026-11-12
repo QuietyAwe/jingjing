@@ -28,10 +28,18 @@ export type MemoryKind =
   /** 共同经历（游戏、深度对话等）：按天衰减且有下限，数月甚至数年后仍可被想起 */
   | "episode";
 
+/**
+ * 约定状态：未来才发生的事就是「约定」，和已发生的记忆共用一张事件表，
+ * 用 `timestamp`（约定时刻）与这个状态区分生命周期。
+ * none=普通记忆；upcoming=还没到；caring=已经过了、还在关心窗口；archived=已归档
+ */
+export type AppointmentStatus = "none" | "upcoming" | "caring" | "archived";
+
 /** 记忆事件表 (memory_events) */
 export interface MemoryEvent {
   id: number;
   event_text: string;
+  /** 事件发生时间；约定类事件即约定时刻（可能在未来） */
   timestamp: string;
   /** 活跃权重 1-100 */
   active_weight: number;
@@ -40,6 +48,8 @@ export interface MemoryEvent {
   priority: number;
   /** 记忆类型，影响衰减模型（旧数据默认 daily） */
   memory_kind: MemoryKind;
+  /** 约定状态；普通记忆为 none */
+  event_status: AppointmentStatus;
 }
 
 // --- 游戏会话 ---
@@ -124,23 +134,9 @@ export interface StateItem {
   created_at: string;
 }
 
-/**
- * 事件（有到期时间的约定/安排/待办）：如「周五下午面试」
- * 生命周期：upcoming（未到期，到期前 24h 注入临近提示）→
- * caring（已过期未被提起，注入关心里；用户提起或满 48h 归档）→
- * archived（归档，同时转成一条状态供后续关心）
- */
-export interface EventItem {
-  text: string;
-  /** 到期时间 ISO8601 */
-  due_time: string;
-  created_at: string;
-  status: "upcoming" | "caring" | "archived";
-  /** 进入 caring 的时刻（48h 自动归档从这算） */
-  expired_at?: string;
-}
 
-/** 用户信息 (user_info 表存储结构) — 属性/状态/事件 三桶 */
+
+/** 用户信息 (user_info 表存储结构) — 属性/状态 两桶（未来事件存在 memory_events） */
 export interface UserInfo {
   basic_identity: BasicIdentity;
   social_graph: SocialGraphEntry[];
@@ -148,8 +144,6 @@ export interface UserInfo {
   traits: string[];
   /** 状态（State）：有时效的事实 */
   states: StateItem[];
-  /** 事件（Event）：有到期时间的约定/安排 */
-  events: EventItem[];
 }
 
 /** 后台模型返回的新记忆片段 */
@@ -165,6 +159,21 @@ export interface NewFragment {
   target_event_index: number;
   /** target_event_index 为 -1 时，新建事件的索引文本 */
   new_event_text: string;
+  /**
+   * 这件事将来才会发生的时候填「发生时刻」（ISO8601），否则空。
+   * 不只是约定/安排：离职、考试、手术、搬家、开庭、出行这类未来节点同样适用。
+   * 落库后事件 timestamp = 该时刻、event_status = upcoming，由时间通道负责到点提醒。
+   */
+  happens_at?: string;
+}
+
+/** 模型给出的「这几条事件其实是同一段经历」的归并决策 */
+export interface EventMerge {
+  /** 保留的事件 id（信息最全、最接近主题的那条） */
+  keep: number;
+  /** 要并进去的事件 id */
+  merge: number[];
+  reason?: string;
 }
 
 /** 后台模型提取响应 — 增量模式 (PRD 4.4) */
@@ -177,13 +186,15 @@ export interface ConsolidationResponse {
     traits?: string[];
     /** 状态（有时效），文本含 [time] 占位符，如「[time]开始发烧」 */
     states?: string[];
-    /** 事件（有到期时间的约定/安排），due_time 为 ISO8601 */
-    events?: Array<{ text: string; due_time: string }>;
   };
   /** 本次提取出的记忆片段（一次巩固可覆盖多个话题，见 B4） */
   new_fragments?: NewFragment[];
   /** 兼容旧结构：单条片段 */
   new_fragment?: NewFragment;
+  /** 模型判断「这几条事件是同一段经历」，由代码在事务内执行 */
+  event_merges?: EventMerge[];
+  /** 滚动会话摘要：旧摘要 + 本批对话压成 200~300 字，只服务前台上下文 */
+  session_digest?: string;
 }
 
 // --- PRD 4.3 配置契约 ---
@@ -197,9 +208,9 @@ export interface PromptsConfig {
   memory_injection_template: string;
   memory_event_template: string;
   schedule_generation_prompt: string;
-  /** 事件临近提示（隐形提示词，注入消息末尾，{{event}}/{{due_time}}） */
+  /** 未来事件临近提示（隐形提示词，注入消息末尾，{{event}}/{{due_time}}；后者渲染发生时刻） */
   event_reminder_template: string;
-  /** 事件过期关心提示（隐形提示词，{{event}}/{{due_time}}） */
+  /** 未来事件过期关心提示（隐形提示词，{{event}}/{{due_time}}；后者渲染发生时刻） */
   event_care_template: string;
   /** AI 发心情动态的文案生成指令 */
   moment_generation_prompt: string;
@@ -223,10 +234,16 @@ export interface DefaultPlaceholders {
 }
 
 export interface ThresholdsConfig {
-  /** 每累计多少轮对话触发一次巩固提取 */
+  /** 巩固的最小窗口轮数：少于这么多轮不触发（避免碎片化） */
   consolidation_window_turns: number;
-  /** 发送给模型的上下文轮数（与巩固触发频率解耦） */
+  /** 未巩固对话累计到多少 token 就触发巩固 */
+  consolidation_token_budget: number;
+  /** 距上次巩固超过多少分钟（且有积压）就触发巩固 */
+  consolidation_idle_minutes: number;
+  /** 摘要不可用时的回退窗口轮数 */
   context_history_rounds: number;
+  /** 上下文总预算（系统人设 + 状态区 + 摘要 + 历史 + 记忆区） */
+  context_token_budget: number;
   /** 记忆区加载的高权重事件数量 */
   context_active_events_limit: number;
   /** 详细/简略切换权重阈值：实时权重低于它的记忆只注入一句话 gist */

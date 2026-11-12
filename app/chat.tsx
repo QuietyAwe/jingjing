@@ -30,7 +30,7 @@ import { useSettingsStore } from "@/store/settingsStore";
 import { buildChatContext } from "@/memory/chatHandler";
 import { streamChat } from "@/llm/foreground";
 import { hasApiKey } from "@/llm/client";
-import { shouldConsolidate, runConsolidation, runCatchUpConsolidation } from "@/memory/consolidation";
+import { shouldConsolidate, runConsolidation } from "@/memory/consolidation";
 import { checkAndGenerateSchedule } from "@/memory/scheduler";
 import { ensureDailyLife } from "@/memory/dailyLife";
 import { checkAndGenerateFriends } from "@/friends/roster";
@@ -591,14 +591,6 @@ export default function ChatScreen() {
     });
   }, [isReady]);
 
-  // 会话启动补巩固：把上次没来得及巩固的历史静默补上（一次性守卫 + 后台分批，不阻塞输入）
-  useEffect(() => {
-    if (!isReady) return;
-    runCatchUpConsolidation().catch((err) => {
-      console.error("[chat] 启动补巩固异常:", err);
-    });
-  }, [isReady]);
-
   // 今日实况：早上第一次进来就后台生成，失败回退周基线（不阻塞输入）
   useEffect(() => {
     if (!isReady) return;
@@ -922,9 +914,8 @@ export default function ChatScreen() {
             console.error("[chat] 好友花名册生成异常:", err),
           );
 
-          const shouldRun = shouldConsolidate();
-          if (shouldRun) {
-            const h = useChatStore.getState().messages;
+          const h = useChatStore.getState().messages;
+          if (shouldConsolidate(h)) {
             runConsolidation(h).catch((err) =>
               console.error("[chat] 巩固流异常:", err),
             );
@@ -1953,15 +1944,26 @@ export default function ChatScreen() {
     // 用户主动发言，视为回到对话底部，后续新气泡可自动滚底
     atBottomRef.current = true;
 
+    // 空闲超过阈值后，用户一开口就把积压巩固掉（后台跑，不阻塞本次回复）。
+    // 不依赖后台常驻/定时器：手机端只有这些事件点能可靠执行
+    const pendingMessages = useChatStore.getState().messages;
+    if (hasApiKey() && shouldConsolidate(pendingMessages, { checkIdle: true })) {
+      runConsolidation(pendingMessages).catch((err) =>
+        console.error("[chat] 巩固流异常:", err),
+      );
+    }
+
     // 上一轮完成（最后一条是 AI 回复）才计数
     const currentHistory = getHistory();
     const lastRole = currentHistory.length > 0 ? currentHistory[currentHistory.length - 1].role : "none";
     if (lastRole === "assistant") {
       incrementTurn();
     }
-    const counter = useMetaStore.getState().turnCounter;
-    const locked = useMetaStore.getState().isLocked;
-    logDebug("轮次计数", `lastRole=${lastRole}, turn_counter=${counter}, is_locked=${locked}`);
+    // 巩固是否触发已改为看「未巩固 token / 空闲时间」，轮次计数只留作调试参考
+    logDebug(
+      "轮次",
+      `lastRole=${lastRole}, 上一轮完成=${lastRole === "assistant"}, is_locked=${useMetaStore.getState().isLocked}`
+    );
 
     // 游戏回合打标记：普通巩固流会跳过，由游戏自己的巩固写入记忆
     const currentGameId =
@@ -2143,9 +2145,8 @@ export default function ChatScreen() {
             console.error("[chat] 好友花名册生成异常:", err),
           );
 
-          const shouldRun = shouldConsolidate();
-          if (shouldRun) {
-            const h = useChatStore.getState().messages;
+          const h = useChatStore.getState().messages;
+          if (shouldConsolidate(h)) {
             runConsolidation(h).catch((err) =>
               console.error("[chat] 巩固流异常:", err),
             );

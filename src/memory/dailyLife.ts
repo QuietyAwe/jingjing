@@ -10,7 +10,7 @@
 // ============================================================
 
 import dayjs from "dayjs";
-import { getDailyLog, upsertDailyLog, getRecentDailyLogs, getUserInfo, activeStates, activeEvents, getWeekSchedule, getMoments } from "@/db/queries";
+import { getDailyLog, upsertDailyLog, getRecentDailyLogs, getUserInfo, activeStates, getUpcomingEvents, getWeekSchedule, getMoments } from "@/db/queries";
 import { generateDailyLife } from "@/llm/background";
 import { hasApiKey } from "@/llm/client";
 import { getPrompts } from "@/prompt/config";
@@ -226,12 +226,12 @@ function buildUserContext(now: dayjs.Dayjs): string {
   const info = getUserInfo();
 
   if (info) {
-    // 今天的约定：今天有面试/复查，实况里就该出现
-    for (const e of activeEvents(info)) {
-      const due = dayjs(e.due_time);
+    // 今天要发生的事：今天有面试/复查，实况里就该出现
+    for (const e of getUpcomingEvents()) {
+      const due = dayjs(e.timestamp);
       if (!due.isValid()) continue;
       if (due.isSame(now, "day")) {
-        lines.push(`今天 [user] 有「${e.text}」（${due.format("HH:mm")}）`);
+        lines.push(`今天 [user] 有「${e.event_text}」（${due.format("HH:mm")}）`);
       }
     }
     for (const s of activeStates(info, now).slice(-2)) {

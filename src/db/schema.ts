@@ -3,7 +3,7 @@ import dayjs from "dayjs";
 
 /** memory_events 的标准列（不含历史遗留的 "index" 与已废弃的 is_archived） */
 export const EVENT_COLUMNS =
-  "id, event_text, timestamp, active_weight, last_accessed, priority, memory_kind";
+  "id, event_text, timestamp, active_weight, last_accessed, priority, memory_kind, event_status";
 
 /**
  * 初始化数据库表结构 — 对齐 PRD 4.1 节
@@ -136,6 +136,15 @@ export function initSchema(): void {
     CREATE INDEX IF NOT EXISTS idx_post_plan_week ON post_plan(week_start);
     CREATE INDEX IF NOT EXISTS idx_fragments_index ON memory_fragments("index");
     CREATE INDEX IF NOT EXISTS idx_events_weight ON memory_events(active_weight DESC);
+
+    -- 事件别名：合并过的标题/关键词记在这里，下次新事件命中别名直接挂靠，
+    -- 同一个「是不是同一段经历」的判断不重复做
+    CREATE TABLE IF NOT EXISTS memory_event_aliases (
+      event_id INTEGER NOT NULL,
+      alias TEXT NOT NULL,
+      PRIMARY KEY (event_id, alias)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_aliases_alias ON memory_event_aliases(alias);
   `);
 
   // 兼容旧表 + 清理已废弃列
@@ -178,6 +187,10 @@ function migrateLegacyColumns(db: ReturnType<typeof getDB>): void {
   } catch {}
   try {
     db.execSync(`ALTER TABLE memory_events ADD COLUMN memory_kind TEXT NOT NULL DEFAULT 'daily'`);
+  } catch {}
+  // 约定状态：timestamp 在未来的事件即「约定」，靠这一列标记生命周期
+  try {
+    db.execSync(`ALTER TABLE memory_events ADD COLUMN event_status TEXT NOT NULL DEFAULT 'none'`);
   } catch {}
 
   const eventCols = getColumns(db, "memory_events");

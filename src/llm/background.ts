@@ -10,13 +10,12 @@ import dayjs from "dayjs";
 import type {
   UserInfo,
   ConsolidationResponse,
-  MemoryEvent,
   NewFragment,
   MomentAuthor,
   PostPlanDraft,
 } from "@/types/schema";
 import { MOOD_TAGS } from "@/types/schema";
-import { activeStates, activeEvents } from "@/db/queries";
+import { activeStates, getUpcomingEvents } from "@/db/queries";
 import type { ScheduleItem } from "@/db/queries";
 import { stripIdentityKeywords } from "@/memory/identity";
 import { ensureTimePlaceholder } from "@/utils/text";
@@ -30,6 +29,9 @@ function normalizeFragment(raw: NewFragment): NewFragment {
   // 一律换回 [time] 占位符（渲染时输出「昨天/前天」等相对时间）
   const summary = ensureTimePlaceholder(raw.summary.trim());
   const priority = Number(raw.priority);
+  // 未来才发生的事：发生时刻合法才保留，否则当普通记忆
+  const rawHappensAt = typeof raw.happens_at === "string" ? raw.happens_at.trim() : "";
+  const happensAt = rawHappensAt ? dayjs(rawHappensAt) : null;
   return {
     summary,
     // gist 缺失时从 summary 截一句，保证分层渲染始终有「一句话」可用
@@ -41,21 +43,43 @@ function normalizeFragment(raw: NewFragment): NewFragment {
     priority: Number.isFinite(priority) && priority >= 1 && priority <= 9 ? priority : 5,
     target_event_index: Number(raw.target_event_index) || -1,
     new_event_text: (raw.new_event_text ?? "").trim(),
+    happens_at: happensAt?.isValid() ? happensAt.toISOString() : undefined,
   };
 }
 
+/** 巩固时展示给模型的候选事件（片段文本已渲染成「昨天 …」，不再是裸 [time]） */
+export interface CandidateEvent {
+  id: number;
+  title: string;
+  snippets: string[];
+}
+
 /**
- * 构建提取消息数组：系统指令 + 对话历史 + 提取请求
- * 对话历史作为独立消息发送，提高缓存命中率
+ * 构建提取消息数组
+ *
+ * - [system] 固定提取规则 + 输出格式：每次完全一致，才能吃到前缀缓存；
+ * - [history] 游标之后的新对话：不重复发已巩固内容；
+ * - [user] 动态块（当前时间 / 已有数据 / 上次摘要 / 候选事件 / 任务）：放最后。
  */
 function buildExtractionMessages(
   userInfo: UserInfo,
   snapshot: Array<{ role: string; content: string }>,
-  existingEvents: MemoryEvent[],
-  eventFragments: Map<number, string[]>,
+  candidates: CandidateEvent[],
+  sessionDigest: string | undefined,
   asOf?: string,
 ): Array<{ role: "system" | "user" | "assistant"; content: string }> {
   const { extraction_prompt } = getPrompts();
+
+  // 固定段：规则 + 输出契约。改这里会让缓存前缀重建一次，别把动态值拼进来
+  const systemPrompt = [
+    extraction_prompt,
+    "",
+    "## 输出格式（严格 JSON）",
+    '{"new_info": {只写本次新发现的字段，没有新信息的字段不要输出},',
+    ' "new_fragments": [{"gist": "...", "summary": "...", "keywords": ["..."], "priority": 数字1-9, "target_event_index": 数字或-1, "new_event_text": "", "happens_at": ""}],',
+    ' "event_merges": [{"keep": 数字, "merge": [数字], "reason": "..."}],',
+    ' "session_digest": "..."}',
+  ].join("\n");
 
   // 对话历史（作为独立消息）
   const historyMessages = snapshot.map((m) => ({
@@ -63,46 +87,45 @@ function buildExtractionMessages(
     content: m.content,
   }));
 
-  // 提取请求（增量模式：只展示已有数组值，避免 LLM 重复提取）
+  // 动态块（增量模式：只展示已有数组值，避免 LLM 重复提取）
   const lines: string[] = [
-    extraction_prompt,
-    "",
     "## 当前时间",
-    // asOf = 这批对话实际发生的时刻（补巩固沿用历史对话时间），
-    // 不传则用当前时间；显示本地时间，LLM 才能正确推断时段与 due_time 日期。
+    // asOf = 这批对话实际发生的时刻（分批消化时沿用历史对话时间），
+    // 不传则用当前时间；显示本地时间，LLM 才能正确推断时段与 happens_at 日期。
     // 否则几天前的对话会被当成「今天刚发生」提取
     dayjs(asOf).format("YYYY-MM-DD HH:mm:ss"),
-    "⚠️ 这个时间只用于你推断相对时间和计算 events 的 due_time。",
+    "⚠️ 这个时间只用于你推断相对时间和计算片段的 happens_at（未来发生时刻）。",
     "gist / summary / states 里的事发时间必须写 [time] 占位符（系统会渲染成「昨天/前天」等相对时间）；绝对不要写「10月10日」这类具体日期，否则记忆过几天就是错的。",
     "",
     "## 已有数据（不需要重复提取）",
     `属性：${userInfo.traits.join("、") || "（无）"}`,
     `近况：${activeStates(userInfo).map((s) => s.text).join("、") || "（无）"}`,
-    `事件：${activeEvents(userInfo)
-      .map((e) => `${e.text}（到期 ${dayjs(e.due_time).format("YYYY-MM-DD HH:mm")}）`)
+    `近期会发生的事：${getUpcomingEvents()
+      .map((e) => `${e.event_text}（${dayjs(e.timestamp).format("YYYY-MM-DD HH:mm")}）`)
       .join("、") || "（无）"}`,
     `社交关系：${userInfo.social_graph.map(s => `${s.name}(${s.role})`).join("、") || "（无）"}`,
-    "",
-    "## 已有索引事件",
   ];
 
-  if (existingEvents.length === 0) {
-    lines.push("（暂无索引事件，请为本次对话创建新事件）");
+  if (sessionDigest?.trim()) {
+    lines.push("", "## 上次摘要（供你更新，不是要提取的内容）", sessionDigest.trim());
+  }
+
+  lines.push("", "## 候选事件（与本轮话题相关，优先挂靠）");
+  if (candidates.length === 0) {
+    lines.push("（暂无相关事件，请为本次对话创建新事件）");
   } else {
-    for (const e of existingEvents) {
-      lines.push(`- [id:${e.id}] ${e.event_text}`);
-      const frags = eventFragments.get(e.id);
-      if (frags) {
-        for (const summary of frags) {
-          lines.push(`  · ${summary}`);
-        }
-      }
+    for (const c of candidates) {
+      lines.push(`- [id:${c.id}] ${c.title}`);
+      for (const snippet of c.snippets) lines.push(`  · ${snippet}`);
     }
   }
 
-  lines.push("");
   lines.push(
-    '请严格输出 JSON，格式：{"new_info": {只写本次新发现的字段, 没有新信息的字段不要输出}, "new_fragments": [{"gist": "...", "summary": "...", "keywords": ["..."], "priority": 数字1-9, "target_event_index": 数字或-1, "new_event_text": ""}]}',
+    "",
+    "## 任务",
+    "按 system 里的规则提取 new_info、new_fragments、event_merges、session_digest。",
+    "候选事件里如果有几条其实是同一段经历，用 event_merges 给出合并（keep 选信息最全的那条）；不确定就留空数组。",
+    "片段优先挂靠候选事件；只有确实是新主题时才填 new_event_text。",
   );
 
   const requestMessage = {
@@ -110,7 +133,7 @@ function buildExtractionMessages(
     content: lines.join("\n"),
   };
 
-  return [...historyMessages, requestMessage];
+  return [{ role: "system" as const, content: systemPrompt }, ...historyMessages, requestMessage];
 }
 
 /**
@@ -119,19 +142,30 @@ function buildExtractionMessages(
 export async function extractConsolidation(
   userInfo: UserInfo,
   snapshot: Array<{ role: string; content: string }>,
-  existingEvents: MemoryEvent[],
-  eventFragments: Map<number, string[]>,
+  candidates: CandidateEvent[],
+  sessionDigest: string | undefined,
   timeoutMs: number = 30000,
   asOf?: string,
 ): Promise<ConsolidationResponse | null> {
-  const requestMessages = buildExtractionMessages(userInfo, snapshot, existingEvents, eventFragments, asOf);
+  const requestMessages = buildExtractionMessages(userInfo, snapshot, candidates, sessionDigest, asOf);
   const routing = getModelRouting();
   const config = routing.background_extraction_config;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  logDebug("巩固请求", `模型: ${config.model}\n温度: ${config.temperature}\n快照: ${snapshot.length} 条\n消息数: ${requestMessages.length}\n\n=== 完整请求 ===\n${requestMessages.map((m, i) => `[${i}] ${m.role.toUpperCase()}\n${m.content.slice(0, 100)}...`).join("\n\n")}`);
+  // 固定段与动态块全文保留（排查「模型为什么这么归并/摘要」全靠它们），
+  // 历史只给条数与首行：整段发出来会刷屏
+  const systemPart = requestMessages[0]?.content ?? "";
+  const dynamicPart = requestMessages[requestMessages.length - 1]?.content ?? "";
+  const historyPart = requestMessages
+    .slice(1, -1)
+    .map((m, i) => `[${i}] ${m.role}: ${m.content.slice(0, 40)}...`)
+    .join("\n");
+  logDebug(
+    "巩固请求",
+    `模型: ${config.model}\n温度: ${config.temperature}\n快照: ${snapshot.length} 条 / 候选事件: ${candidates.length} 个 / 旧摘要: ${sessionDigest ? `${sessionDigest.length} 字` : "无"}\n\n=== system（${systemPart.length} 字）===\n${systemPart}\n\n=== 动态块（${dynamicPart.length} 字）===\n${dynamicPart}\n\n=== 历史 ${requestMessages.length - 2} 条 ===\n${historyPart}`
+  );
 
   try {
     const client = getClient();
@@ -157,9 +191,9 @@ export async function extractConsolidation(
 
     const parsed = JSON.parse(text) as ConsolidationResponse;
 
+    // 只更新摘要（没有新用户信息）也是合法返回，不能因缺 new_info 丢掉整包
     if (!parsed.new_info) {
-      logDebug("巩固返回", `JSON 缺少 new_info\n${text.slice(0, 200)}`);
-      return null;
+      parsed.new_info = {};
     }
 
     // 兼容单条旧结构，统一归一成数组
@@ -169,11 +203,31 @@ export async function extractConsolidation(
     ];
     const fragments = rawList
       .filter((f) => f && typeof f.summary === "string" && f.summary.trim())
-      .slice(0, 5) // 一次巩固最多 5 条，防止 LLM 把对话按句拆开刷爆片段表
+      .slice(0, 8) // 一次巩固最多 8 条：chunk 变大后话题变多，但仍要防止按句拆开刷爆片段表
       .map((f) => normalizeFragment(f));
 
-    if (fragments.length === 0) {
-      logDebug("巩固返回", `没有可用的片段\n${text.slice(0, 200)}`);
+    // 归并决策：只留正整数 id，keep 不能出现在 merge 里，其余一律丢弃
+    parsed.event_merges = (Array.isArray(parsed.event_merges) ? parsed.event_merges : [])
+      .map((m) => {
+        const keep = Number(m?.keep);
+        const merge = (Array.isArray(m?.merge) ? m.merge : [])
+          .map((n) => Number(n))
+          .filter((n) => Number.isFinite(n) && n > 0 && n !== keep);
+        return {
+          keep,
+          merge,
+          reason: typeof m?.reason === "string" ? m.reason : undefined,
+        };
+      })
+      .filter((m) => Number.isFinite(m.keep) && m.keep > 0 && m.merge.length > 0);
+
+    // 会话摘要：空串视为没有（不能拿空值覆盖旧摘要）
+    const digest = typeof parsed.session_digest === "string" ? parsed.session_digest.trim() : "";
+    parsed.session_digest = digest ? digest.slice(0, 400) : undefined;
+
+    // 片段和摘要都没有才算失败：纯闲聊也可能没有可提取的片段，但摘要仍要更新
+    if (fragments.length === 0 && !parsed.session_digest) {
+      logDebug("巩固返回", `没有可用的片段或摘要\n${text.slice(0, 200)}`);
       return null;
     }
     parsed.new_fragments = fragments;
@@ -182,7 +236,10 @@ export async function extractConsolidation(
       parsed.new_info.states = parsed.new_info.states.map(ensureTimePlaceholder);
     }
 
-    logDebug("巩固返回", `片段 ${fragments.length} 条\n${fragments.map((f) => `- ${f.gist}（P${f.priority}）`).join("\n")}`);
+    logDebug(
+      "巩固返回",
+      `片段 ${fragments.length} 条 / 归并 ${parsed.event_merges.length} 组 / 摘要 ${parsed.session_digest ? `${parsed.session_digest.length} 字` : "无"}\n${fragments.map((f) => `- ${f.gist}（P${f.priority}）`).join("\n")}`
+    );
     return parsed;
   } catch (err: unknown) {
     clearTimeout(timer);

@@ -28,6 +28,8 @@ interface BackupData {
     // 好友圈与每日实况（旧备份没有，按空处理）
     friend_personas?: any[];
     daily_log?: any[];
+    // 事件别名（旧备份没有，按空处理）：丢了只会让合并判断重做一次
+    memory_event_aliases?: any[];
   };
 }
 
@@ -55,6 +57,7 @@ export async function exportBackup(): Promise<{ success: boolean; message: strin
     const post_plan = db.getAllSync("SELECT * FROM post_plan");
     const friend_personas = db.getAllSync("SELECT * FROM friend_personas");
     const daily_log = db.getAllSync("SELECT * FROM daily_log");
+    const memory_event_aliases = db.getAllSync("SELECT * FROM memory_event_aliases");
 
     const backup: BackupData = {
       version: BACKUP_VERSION,
@@ -72,6 +75,7 @@ export async function exportBackup(): Promise<{ success: boolean; message: strin
         post_plan,
         friend_personas,
         daily_log,
+        memory_event_aliases,
       },
     };
 
@@ -146,19 +150,22 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
     db.execSync("DELETE FROM behavior_schedule");
     db.execSync("DELETE FROM friend_personas");
     db.execSync("DELETE FROM daily_log");
+    // 别名指向 memory_events.id：不先清会让旧别名挂到恢复后被复用 id 的另一条事件上
+    db.execSync("DELETE FROM memory_event_aliases");
 
     // 恢复 memory_events（旧备份可能仍含 "index" / is_archived，已废弃列不再写入；
     // memory_kind 必须一并恢复，否则 episode 共同经历会退化成 daily、丢失按天衰减与权重下限）
     for (const row of backup.sqlite.memory_events) {
       db.runSync(
-        "INSERT INTO memory_events (id, event_text, timestamp, active_weight, last_accessed, priority, memory_kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO memory_events (id, event_text, timestamp, active_weight, last_accessed, priority, memory_kind, event_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         row.id,
         row.event_text,
         row.timestamp,
         row.active_weight,
         row.last_accessed,
         row.priority ?? 5,
-        row.memory_kind ?? "daily"
+        row.memory_kind ?? "daily",
+        row.event_status ?? "none"
       );
     }
 
@@ -170,6 +177,14 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
       db.runSync(
         'INSERT INTO memory_fragments (id, "index", timestamp, gist, summary, keywords, priority) VALUES (?, ?, ?, ?, ?, ?, ?)',
         row.id, row.index, row.timestamp, row.gist ?? "", summary, row.keywords ?? "", row.priority ?? 5
+      );
+    }
+
+    // 恢复事件别名（旧备份没有这张表，按空处理）
+    for (const row of backup.sqlite.memory_event_aliases ?? []) {
+      db.runSync(
+        "INSERT OR IGNORE INTO memory_event_aliases (event_id, alias) VALUES (?, ?)",
+        row.event_id, row.alias
       );
     }
 

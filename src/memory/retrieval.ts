@@ -7,7 +7,7 @@ import { tokenize, scoreOverlap } from "./tokenize";
 import { blockedWords, isBlockedGram } from "./identity";
 import { calculateWeight, calculateWeights, COLD_MEMORY_MAX_WEIGHT } from "./decay";
 import { getDB } from "@/db/connection";
-import { updateWeight, getAllActive, getFragmentsByEventId, getFragmentsByEventIds, getDefaultEventId } from "@/db/queries";
+import { updateWeight, getAllActive, getFragmentsByEventId, getFragmentsByEventIds, getDefaultEventId, getEventAliasText } from "@/db/queries";
 import { EVENT_COLUMNS } from "@/db/schema";
 import { getThresholds, getWeightDecay } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
@@ -62,24 +62,57 @@ export function retrieve(userInput: string): RetrievalResult {
 
   // 2. 优先检索事件(event_text)，排除默认事件"日常闲聊"
   let hitEvents: MemoryEvent[] = [];
+  /** 只靠别名命中（标题完全没对上）的事件数：排查合并是否让事件变得检索不到 */
+  let aliasOnlyHits = 0;
   const hitEventIds = new Set<number>();
   const db = getDB();
   const defaultEventId = getDefaultEventId();
 
   if (keywords.length > 0) {
-    const eventConditions = keywords.map(() => "event_text LIKE ?").join(" OR ");
-    const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
-    const params = keywords.map((k) => `%${k}%`);
+    // 标题或别名命中都算：事件合并后旧标题存进 memory_event_aliases，
+    // 用户仍可能用旧说法提起它（否则合并反而让这段记忆检索不到了）
+    const eventConditions = keywords
+      .map(
+        () =>
+          "(e.event_text LIKE ? OR EXISTS(SELECT 1 FROM memory_event_aliases a WHERE a.event_id = e.id AND a.alias LIKE ?))"
+      )
+      .join(" OR ");
+    // upcoming 约定不参与记忆检索：它们由状态区的「安排」和时间提醒负责
+    const excludeDefault = [
+      defaultEventId ? `AND e.id != ${defaultEventId}` : "",
+      "AND e.event_status != 'upcoming'",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const params = keywords.flatMap((k) => [`%${k}%`, `%${k}%`]);
 
-    // 多取一些候选，再用「命中了几个关键词」精排——bigram 必然带噪音，不能命中即算数
+    // 多取一些候选，再用「命中了几个关键词」精排——bigram 必然带噪音，不能命中即算数。
+    // 粗排用 last_accessed：active_weight 全仓写死 100，按它排等于按 id 排
     const candidates = db.getAllSync<MemoryEvent>(
-      `SELECT ${EVENT_COLUMNS} FROM memory_events
+      `SELECT ${EVENT_COLUMNS.split(", ")
+        .map((c) => `e.${c}`)
+        .join(", ")}
+       FROM memory_events e
        WHERE 1 = 1 ${excludeDefault} AND (${eventConditions})
-       ORDER BY active_weight DESC
-       LIMIT 10`,
+       ORDER BY e.last_accessed DESC
+       LIMIT 15`,
       ...params
     );
-    hitEvents = rankByOverlap(candidates, (e) => e.event_text, keywords).slice(0, 3);
+    // 别名参与打分：只命中别名的事件若仍用 event_text 打分，会被「重合度 > 0」过滤掉
+    const aliasText = getEventAliasText(candidates.map((e) => e.id));
+    hitEvents = rankByOverlap(
+      candidates,
+      (e) => `${e.event_text} ${aliasText.get(e.id) ?? ""}`,
+      keywords
+    ).slice(0, 3);
+    aliasOnlyHits = hitEvents.filter((e) => {
+      const alias = aliasText.get(e.id) ?? "";
+      return (
+        !!alias &&
+        scoreOverlap(alias, keywords) > 0 &&
+        scoreOverlap(e.event_text, keywords) === 0
+      );
+    }).length;
     hitEvents.forEach((e) => hitEventIds.add(e.id));
   }
 
@@ -89,7 +122,12 @@ export function retrieve(userInput: string): RetrievalResult {
     const fragConditions = keywords
       .map(() => "(f.summary LIKE ? OR f.gist LIKE ? OR f.keywords LIKE ?)")
       .join(" OR ");
-    const excludeDefault = defaultEventId ? `AND e.id != ${defaultEventId}` : "";
+    const excludeDefault = [
+      defaultEventId ? `AND e.id != ${defaultEventId}` : "",
+      "AND e.event_status != 'upcoming'",
+    ]
+      .filter(Boolean)
+      .join(" ");
     const params = keywords.flatMap((k) => [`%${k}%`, `%${k}%`, `%${k}%`]);
 
     const rows = db.getAllSync<MemoryEvent>(
@@ -100,7 +138,7 @@ export function retrieve(userInput: string): RetrievalResult {
        WHERE 1 = 1 ${excludeDefault}
          AND LENGTH(f.summary) >= 10
          AND (${fragConditions})
-       ORDER BY e.active_weight DESC
+       ORDER BY e.last_accessed DESC
        LIMIT 10`,
       ...params
     );
@@ -141,9 +179,10 @@ export function retrieve(userInput: string): RetrievalResult {
     (a, b) => b.live_weight - a.live_weight
   );
   const hitIdSet = new Set(hitEvents.map((e) => e.id));
-  // 记忆区顺序：**检索命中的放前面**（和当前话题相关），再补几条高权重的「氛围记忆」。
-  // 氛围记忆限量，免得把无关记忆灌满上下文、冲淡真正相关的内容
-  const AMBIENT_LIMIT = 5;
+  // 记忆区顺序：**检索命中的放前面**（和当前话题相关），再补 1 条高权重的「氛围记忆」，
+  // 只为了保留「我们还有别的共同经历」的存在感——补多了会稀释相关记忆的注意力；
+  // 本轮无命中时一条都不补：近况（user_info.states）已经覆盖近期的事
+  const AMBIENT_LIMIT = hitEvents.length > 0 ? 1 : 0;
   const ambient = withLiveWeight
     .filter((e) => !hitIdSet.has(e.id))
     .slice(0, Math.max(0, Math.min(context_active_events_limit, AMBIENT_LIMIT)));
@@ -182,24 +221,9 @@ export function retrieve(userInput: string): RetrievalResult {
     }
   }
 
-  // 8. 无强关联时，补充最近的"日常闲聊"片段到 topEvents
-  if (hitEvents.length === 0 && defaultEventId) {
-    const chatFragments = getFragmentsByEventId(defaultEventId);
-    if (chatFragments.length > 0) {
-      // 取最近 3 条闲聊片段
-      const recentChats = chatFragments.slice(-3);
-      hitFragments.set(defaultEventId, recentChats);
-      // 把日常闲聊事件加入 topEvents（这样会被渲染到记忆区）
-      const defaultEvent = db.getFirstSync<MemoryEvent>(
-        `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE id = ?`,
-        defaultEventId
-      );
-      if (defaultEvent) {
-        const live_weight = calculateWeight(defaultEvent.active_weight, defaultEvent.last_accessed, defaultEvent.priority);
-        topEvents.unshift({ ...defaultEvent, live_weight });
-      }
-    }
-  }
+  // 8. 无命中时不注入任何兜底记忆：
+  //    近期的事已经由用户画像的近况（states）覆盖，硬塞「日常闲聊」只会
+  //    占记忆区预算、还可能引出与当前话题无关的内容
 
   // 9. 计算「被唤起的片段」：内容与当前输入有实质重合的片段才算刚想起来
   //
@@ -217,7 +241,14 @@ export function retrieve(userInput: string): RetrievalResult {
     }
   }
 
-  logDebug("检索", `关键词: ${keywords.join(", ") || "无"}\n命中: ${hitEvents.length} 条事件 (${Array.from(hitFragments.values()).reduce((s, f) => s + f.length, 0)} 片段，唤起 ${cuedFragmentIds.size} 条)\nTop${topEvents.length}: ${topEvents.map((e) => e.event_text.slice(0, 20)).join(" | ")}\n灵光一闪: ${epiphany ? epiphany.event_text.slice(0, 30) : "未触发"}`);
+  const topLine =
+    topEvents.length > 0
+      ? `Top${topEvents.length}: ${topEvents.map((e) => e.event_text.slice(0, 20)).join(" | ")}`
+      : "未命中：不注入记忆区";
+  logDebug(
+    "检索",
+    `关键词: ${keywords.join(", ") || "无"}\n命中: ${hitEvents.length} 条事件（别名独中 ${aliasOnlyHits} 条，${Array.from(hitFragments.values()).reduce((s, f) => s + f.length, 0)} 片段，唤起 ${cuedFragmentIds.size} 条）\n${topLine}\n灵光一闪: ${epiphany ? epiphany.event_text.slice(0, 30) : "未触发"}`
+  );
 
   return { hitEvents, hitFragments, topEvents, epiphany, keywords, cuedFragmentIds };
 }
