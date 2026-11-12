@@ -4,6 +4,13 @@
 
 ---
 
+## 〇、协作约定（务必遵守）
+
+- **项目根目录**：本仓库即工作根目录（本环境为 `/workspace/jingjing`），所有命令与相对路径以此为基准，不要在其他目录另起一份副本。
+- **代码注释与文档一律简洁明了**：只写结论、约定、用法和必要上下文；**禁止**写入过程试错、排错日志、调试经过、重复探查记录、失败尝试复盘等无用细节。改文档时顺手删掉这类内容，不要越写越长。
+
+---
+
 ## 一、项目定位
 
 | 项 | 说明 |
@@ -463,7 +470,7 @@ system  : gameHint       游戏回合指令（对局中，置末就近影响本�
 
 ## 十一、部署与 Git 推送认证（HTTPS + PAT，不走 SSH）
 
-> 本文件原名 `CODEBUDDY.md`，已更名为 `agent.md`。`ARCHIVE.md` 与 `docs/` 下历史/评审文档中的 `CODEBUDDY.md` 字样属于留档，保持原样不改。
+> 本文件原名 `CODEBUDDY.md`。`ARCHIVE.md` 与 `docs/` 中的旧名引用属留档，不改。
 
 ### 远端与分支
 
@@ -479,7 +486,7 @@ system  : gameHint       游戏回合指令（对局中，置末就近影响本�
 | `/usr/local/system/bin/git-credential-helper` | 系统级 Go 二进制 | 基础兜底 |
 | `!/root/.git-gh-cred.sh` | 一段 shell 脚本 | **实际提供 token** |
 
-注意：`!` 前缀的 helper 由 git 把动作（`get`/`store`/`erase`）作为**命令行参数 `$1`** 传入，凭据属性（protocol/host 等）走 stdin。脚本必须从 `$1` 取动作，不能读 stdin 首行，否则会出现 `could not read Username ... No such device or address`。
+`!` 前缀 helper：动作（`get`/`store`/`erase`）由 git 作为 `$1` 传入，凭据属性走 stdin；脚本从 `$1` 取动作。
 
 ### token 从哪来
 
@@ -517,4 +524,4 @@ git push -u origin dev
 
 ### 已知坑：443 偶发超时
 
-`github.com:443` 在沙箱里**偶尔连接超时**（曾遇 `curl 28 Failed to connect to github.com port 443`）。发生时**不要反复重试同一条命令**，换一次 `git fetch` / `git push` 重试，通常第二次就通。
+`github.com:443` 在沙箱里**偶尔连接超时**。发生时不要反复重试同一条命令，换一次 `git fetch` / `git push` 重试，通常第二次就通。
