@@ -12,6 +12,7 @@
 import dayjs from "dayjs";
 import {
   hasScheduleForWeek,
+  hasPostPlanForWeek,
   getWeekSchedule,
   getCurrentActivity,
   getEndedActivities,
@@ -46,14 +47,22 @@ export function checkAndGenerateSchedule(): Promise<void> {
 
 async function doCheckAndGenerateSchedule(): Promise<void> {
   const weekStart = getWeekStart();
+  // 作息表与发帖计划分开判定：本周表可能是旧版本（发帖计划上线前）生成的，
+  // 也可能是周中才生成、LLM 把计划排在了已经过去的日子上——只看作息表会让
+  // 这类库整周一条动态都发不出来
+  const needSchedule = !hasScheduleForWeek(weekStart);
+  const needPlan = !hasPostPlanForWeek(weekStart);
+  if (!needSchedule && !needPlan) return;
 
-  if (hasScheduleForWeek(weekStart)) {
-    // 静默跳过：动态引擎每 60s 轮询一次都会走到这里，打日志会无限刷屏；
-    // 只有真正触发生成/失败才记日志
-    return;
-  }
+  const today = getCurrentDayOfWeek();
+  const nowSlot = getCurrentTimeSlot(dayjs().hour());
+  // 只补计划、且本周已经没有可发帖的时段（周日深夜）：不必请求，也不必每 60s 重试
+  if (!needSchedule && !hasRemainingSlot(today, nowSlot)) return;
 
-  logDebug("时间表", `本周(${weekStart})无时间表，开始生成`);
+  logDebug(
+    "时间表",
+    `本周(${weekStart})${needSchedule ? "无时间表" : "有作息表但没有发帖计划"}，开始生成`
+  );
 
   // 获取系统人设提示词
   const { system_prompt } = getPrompts();
@@ -73,26 +82,56 @@ async function doCheckAndGenerateSchedule(): Promise<void> {
   try {
     const result = await generateSchedule(system_prompt, lastWeekSchedule, 30000, lastWeekActuals);
     if (result && result.schedule.length > 0) {
-      insertSchedule(weekStart, result.schedule);
-      // 发帖计划随作息表一并落库；LLM 没给（旧提示词覆盖层）就用兜底计划
-      const plan = result.post_plan.length > 0 ? result.post_plan : getDefaultPostPlan();
-      insertPostPlan(weekStart, plan);
-      logDebug(
-        "时间表",
-        `生成完成，作息 ${result.schedule.length} 条，发帖计划 ${plan.length} 条${lastWeekActuals ? "（参考了上周实况）" : ""}`
-      );
+      if (needSchedule) insertSchedule(weekStart, result.schedule);
+      if (needPlan) {
+        // 发帖计划随作息表一次产出；LLM 没给（旧提示词覆盖层）或全排在过去就用兜底
+        const plan = planForRestOfWeek(result.post_plan, today, nowSlot);
+        insertPostPlan(weekStart, plan);
+        logDebug(
+          "时间表",
+          `发帖计划 ${plan.length} 条${lastWeekActuals ? "（参考了上周实况）" : ""}`
+        );
+      }
     } else {
       logDebug("时间表", "LLM 返回空，使用默认时间表");
-      insertSchedule(weekStart, getDefaultSchedule());
-      insertPostPlan(weekStart, getDefaultPostPlan());
+      if (needSchedule) insertSchedule(weekStart, getDefaultSchedule());
+      if (needPlan) insertPostPlan(weekStart, getDefaultPostPlan(today, nowSlot));
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     logDebug("时间表生成失败", errMsg);
     // 失败时使用默认时间表 + 默认发帖计划
-    insertSchedule(weekStart, getDefaultSchedule());
-    insertPostPlan(weekStart, getDefaultPostPlan());
+    if (needSchedule) insertSchedule(weekStart, getDefaultSchedule());
+    if (needPlan) insertPostPlan(weekStart, getDefaultPostPlan(today, nowSlot));
   }
+}
+
+/** 从当前时刻起，本周是否还有可发帖的时段（早间与深夜不发，可用时段 1~4） */
+function hasRemainingSlot(day: number, slot: number): boolean {
+  if (day < 6) return true;
+  return slot < 4 || dayjs().hour() < 23;
+}
+
+/**
+ * 只保留还没过去的计划：刚过去的时段排进去只会被置 skipped，
+ * 周中补计划时若全落在前几天，等于这周依然一条动态都没有
+ */
+function planForRestOfWeek(
+  plan: PostPlanDraft[],
+  today: number,
+  slot: number
+): PostPlanDraft[] {
+  const kept = plan.filter(
+    (p) => p.day_of_week > today || (p.day_of_week === today && p.time_slot >= Math.max(slot, 0))
+  );
+  if (kept.length === 0) return getDefaultPostPlan(today, slot);
+
+  // 周中才生成本周计划：今天也留一条，否则用户要等好几天才看到第一条动态
+  if (!kept.some((p) => p.day_of_week === today)) {
+    const todayPlan = getDefaultPostPlan(today, slot).slice(0, 1);
+    if (todayPlan.length > 0) kept.push(todayPlan[0]);
+  }
+  return kept;
 }
 
 /**
@@ -209,14 +248,27 @@ const DEFAULT_POST_THEMES = [
   "想摆烂的一天",
 ];
 
-/** 兜底发帖计划：随机 2~4 天、随机白天/晚间时段，每次生成都不同（模仿真人节奏） */
-function getDefaultPostPlan(): PostPlanDraft[] {
-  const days = [0, 1, 2, 3, 4, 5, 6].sort(() => Math.random() - 0.5).slice(0, 2 + Math.floor(Math.random() * 3));
+/** 兜底发帖计划：随机 1~3 条，只排还没过去的日子与时段（模仿真人节奏，每次生成都不同） */
+function getDefaultPostPlan(fromDay = 0, fromSlot = 0): PostPlanDraft[] {
   const themes = [...DEFAULT_POST_THEMES].sort(() => Math.random() - 0.5);
-  return days.map((day, i) => ({
-    day_of_week: day,
-    // 1=上午 2=午 3=下午 4=晚（早间与深夜不发）
-    time_slot: 1 + Math.floor(Math.random() * 4),
-    theme_hint: themes[i % themes.length],
-  }));
+
+  // 1=上午 2=午 3=下午 4=晚（早间与深夜不发）
+  const candidates: Array<{ day: number; slot: number }> = [];
+  for (let day = fromDay; day < 7; day++) {
+    for (const slot of [1, 2, 3, 4]) {
+      if (day === fromDay && slot < Math.max(fromSlot, 0)) continue;
+      candidates.push({ day, slot });
+    }
+  }
+  if (candidates.length === 0) return [];
+
+  const count = 1 + Math.floor(Math.random() * Math.min(3, candidates.length));
+  return candidates
+    .sort(() => Math.random() - 0.5)
+    .slice(0, count)
+    .map((c, i) => ({
+      day_of_week: c.day,
+      time_slot: c.slot,
+      theme_hint: themes[i % themes.length],
+    }));
 }

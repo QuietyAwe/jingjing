@@ -79,6 +79,7 @@ export function getConfigDefault(key: string): string {
     friend_moment_probability: String(thresholds.friend_moment_probability),
     friend_comment_probability: String(thresholds.friend_comment_probability),
     friend_roster_visible_days: String(thresholds.friend_roster_visible_days),
+    recent_moment_recall_weight: String(thresholds.recent_moment_recall_weight),
     ebbinghaus_decay_rate: String(decay.ebbinghaus_decay_rate),
     epiphany_trigger_probability: String(decay.epiphany_trigger_probability),
     background_model: bg.model,
@@ -199,6 +200,7 @@ export function getThresholds() {
     friend_moment_probability: getOverride("friend_moment_probability", config.thresholds.friend_moment_probability),
     friend_comment_probability: getOverride("friend_comment_probability", config.thresholds.friend_comment_probability),
     friend_roster_visible_days: getOverride("friend_roster_visible_days", config.thresholds.friend_roster_visible_days),
+    recent_moment_recall_weight: getOverride("recent_moment_recall_weight", config.thresholds.recent_moment_recall_weight),
   };
 }
 

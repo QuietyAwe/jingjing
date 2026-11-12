@@ -9,10 +9,12 @@ import {
   Alert,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useTheme } from "@/theme/useTheme";
 import { getMoments, getCommentsByMomentIds, getAllFriends, setFriendActive } from "@/db/queries";
 import { notifyMomentUpdates } from "@/moments/bus";
+import { markMomentsSeen } from "@/moments/seen";
 import {
   postUserMoment,
   addComment,
@@ -32,6 +34,7 @@ const PAGE_SIZE = 20;
 export default function MomentsScreen() {
   const colors = useTheme();
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const { ai_name } = useSettingsStore();
 
   const [items, setItems] = useState<Moment[]>([]);
@@ -47,6 +50,8 @@ export default function MomentsScreen() {
   const load = useCallback((count: number) => {
     const moments = getMoments(count);
     setItems(moments);
+    // 记下「用户刚看到这些帖子」：灵光一闪对这些帖子提高触发概率
+    markMomentsSeen(moments.map((m) => m.id));
     const map = getCommentsByMomentIds(moments.map((m) => m.id));
     const nextComments: Record<number, MomentComment[]> = {};
     const nextTyping: Record<number, boolean> = {};
@@ -151,6 +156,7 @@ export default function MomentsScreen() {
             friendMap={friendMap}
             aiTyping={typingMap[item.id]}
             onSendComment={addComment}
+            onOpenFriend={(friendId) => router.push(`/friend/${friendId}`)}
             onBlockFriend={handleBlockFriend}
           />
         )}

@@ -16,7 +16,7 @@ import {
 import { getThresholds } from "@/prompt/config";
 import type { FriendPersona, MemoryFragment } from "@/types/schema";
 
-/** 已登场的好友（停用/未到登场时间的都不算）：feed、私聊入口用 */
+/** 已登场的好友（停用/未到登场时间的都不算）：feed 发帖与评论用 */
 export function listDebutedFriends(now: dayjs.Dayjs = dayjs()): FriendPersona[] {
   return getDebutedFriends(now.toISOString());
 }

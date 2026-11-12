@@ -262,6 +262,8 @@ export interface ThresholdsConfig {
   friend_comment_probability: number;
   /** 花名册行只列最近这么多天有互动（或刚创建）的好友 */
   friend_roster_visible_days: number;
+  /** 每 1× 动态新近度折算的灵光一闪概率（4× → 约 85%） */
+  recent_moment_recall_weight: number;
 }
 
 export interface WeightDecayConfig {

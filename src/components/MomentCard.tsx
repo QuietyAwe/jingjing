@@ -21,6 +21,8 @@ interface Props {
   /** AI 正在写评论（显示三点动效） */
   aiTyping?: boolean;
   onSendComment: (momentId: number, content: string) => void;
+  /** 点好友头像/署名：进私聊（在动态里看到 ta 就想聊，不该先去会话列表翻） */
+  onOpenFriend?: (friendId: number) => void;
   /** 长按好友头像：不让他再出现（快捷入口，不用翻设置） */
   onBlockFriend?: (friendId: number) => void;
 }
@@ -81,6 +83,7 @@ export function MomentCard({
   friendMap,
   aiTyping,
   onSendComment,
+  onOpenFriend,
   onBlockFriend,
 }: Props) {
   const colors = useTheme();
@@ -144,11 +147,14 @@ export function MomentCard({
         },
       ]}
     >
-      {/* 头部：头像 + 名字 + 心情标签 + 时间 */}
+      {/* 头部：头像 + 名字 + 心情标签 + 时间（点好友头像进私聊） */}
       <View style={styles.header}>
         <TouchableOpacity
           activeOpacity={0.8}
-          disabled={!authorFriend || !onBlockFriend}
+          disabled={!authorFriend || (!onOpenFriend && !onBlockFriend)}
+          onPress={() => {
+            if (authorFriend && onOpenFriend) onOpenFriend(authorFriend.id);
+          }}
           onLongPress={() => {
             if (authorFriend && onBlockFriend) onBlockFriend(authorFriend.id);
           }}
@@ -158,9 +164,18 @@ export function MomentCard({
         </TouchableOpacity>
         <View style={styles.headerMain}>
           <View style={styles.headerTop}>
-            <Text style={[styles.name, { color: colors.text }]} numberOfLines={1}>
-              {authorName}
-            </Text>
+            <TouchableOpacity
+              activeOpacity={0.7}
+              disabled={!authorFriend || !onOpenFriend}
+              onPress={() => {
+                if (authorFriend && onOpenFriend) onOpenFriend(authorFriend.id);
+              }}
+              style={styles.nameWrap}
+            >
+              <Text style={[styles.name, { color: colors.text }]} numberOfLines={1}>
+                {authorName}
+              </Text>
+            </TouchableOpacity>
             <View style={styles.moodWrap}>
               <View style={[styles.moodDot, { backgroundColor: moodColor }]} />
               <Text style={[styles.moodText, { color: moodColor }]}>{moment.mood}</Text>
@@ -184,7 +199,10 @@ export function MomentCard({
               <TouchableOpacity
                 key={c.id}
                 activeOpacity={0.8}
-                disabled={!cf || !onBlockFriend}
+                disabled={!cf || (!onOpenFriend && !onBlockFriend)}
+                onPress={() => {
+                  if (cf && onOpenFriend) onOpenFriend(cf.id);
+                }}
                 onLongPress={() => {
                   if (cf && onBlockFriend) onBlockFriend(cf.id);
                 }}
@@ -281,10 +299,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
   },
+  nameWrap: {
+    flexShrink: 1,
+    maxWidth: "55%",
+  },
   name: {
     fontSize: 15,
     fontWeight: "600",
-    maxWidth: "55%",
   },
   moodWrap: {
     flexDirection: "row",

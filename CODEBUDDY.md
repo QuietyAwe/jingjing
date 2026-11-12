@@ -1,6 +1,6 @@
 # Jingjing — 端侧隐私型情感陪伴记忆引擎
 
-基于 React Native (Expo) 的情感陪伴 App，核心是一套**运行在设备本地的记忆引擎**：所有对话记忆存放在端侧 SQLite，不依赖任何服务端存储，通过"短期记忆巩固 + 冷记忆随机扰动"两条异步流模拟人类的记忆演化，让 AI 角色在时间维度上保持连贯的人格与共同经历。
+基于 React Native (Expo) 的情感陪伴 App，核心是一套**运行在设备本地的记忆引擎**：所有对话记忆存放在端侧 SQLite，不依赖任何服务端存储，通过"短期记忆巩固 + 灵光一闪（近期动态优先，冷记忆兜底）"两条异步流模拟人类的记忆演化，让 AI 角色在时间维度上保持连贯的人格与共同经历。
 
 ---
 
@@ -16,7 +16,7 @@
 ### 核心机制
 
 - **增量补式记忆巩固**：未巩固对话攒到约 10k token、或用户停满 30 分钟且积压不少于 10 轮时触发后台 LLM 提取，把对话沉淀为「记忆事件 + 记忆片段」、增量 Merge 用户画像、更新滚动会话摘要。一次只消化一批（约一个 token 预算），剩余积压由下一个触发点继续消化；写入时间戳**沿用对话消息自身时间**（批末消息时间），不记成巩固执行时刻。
-- **冷记忆扰动（灵光一闪）**：检索时按概率抽一条低活跃度的冷记忆注入上下文，制造"突然想起"的效果；**优先挑与当前输入有弱关联的**（不再是纯随机）。
+- **灵光一闪**：每次只注入一条，两条通道——① **近期动态**：概率由新近度权重累加得出 `0.05 + Σ(boost × recent_moment_recall_weight)`（默认权重 0.2：AI 刚发帖/用户刚评论 4× → **0.85**，用户刚发/刚浏览 2.5× → 0.55，好友刚发 1.5× → 0.35，上限 0.9），命中后从近期动态事件里按 boost 抽一条、取**6 小时内最新片段**；② **冷记忆**：没有近期动态、或动态通道没掷中时按 5% 抽一条低活跃度冷记忆（优先弱关联）。**同一条动态只被高概率提一次**：提过即记入 `system_metadata.moment_recall_seen` 并移出候选（记录保留 24 小时，覆盖 6 小时新近度窗口），之后回落普通概率，不会「只要有近期动态就每轮灵光一闪」。
 - **艾宾浩斯衰减**：记忆活跃权重随时间衰减，权重影响检索排序。
 - **记忆分层（gist / summary）**：每条片段同时存一句话概要 `gist` 与详细描述 `summary`。活跃度高 → 注入完整描述；活跃度低 → 只留一句话印象。详见下文的「记忆分层机制」。
 - **上下文 = 会话摘要 + 未巩固对话**：已巩固部分由滚动摘要代表，游标之后才发原文；没有摘要时回退最近 `context_history_rounds`（默认 **10**）轮。
@@ -24,7 +24,7 @@
 
 ### MVP 边界
 
-- **范围内**：本地 SQLite、纯 JS 分词检索（先事件后片段）、衰减、滑动窗口、巩固流、冷启动降级、参数配置解耦、前后台模型路由、游戏系统（4 款）、心情动态（类朋友圈）、AI 熟人圈（好友发帖/评论/私聊）、每日实况（习惯 × 扰动 × 用户在场）。
+- **范围内**：本地 SQLite、纯 JS 分词检索（先事件后片段）、衰减、会话摘要 + 未巩固历史的上下文、巩固流、冷启动降级、参数配置解耦、前后台模型路由、游戏系统（4 款）、心情动态（类朋友圈）、AI 熟人圈（好友发帖/评论/私聊）、每日实况（习惯 × 扰动 × 用户在场）。
 - **范围外**：云端同步、多账号、服务端存储、多模态（语音/图片）记忆、原生 FTS5 分词；动态的点赞/转发/删除编辑（后续迭代）。
 
 ---
@@ -81,7 +81,7 @@ app/                    # expo-router 文件路由
 src/
   components/           # 通用 UI：ChatBubble、InputBar、CollapsibleSection、MomentCard、MomentComposer + 游戏卡片（Bomb / YachtDice / YachtScore / TruthDare）
   db/                   # SQLite 连接、建表（schema.ts）、CRUD（queries.ts）
-  moments/              # 心情动态模块：engine.ts（发帖调度）、service.ts（发帖/评论与 AI 互动）、memory.ts（动态记忆提取）、bus.ts（刷新总线）
+  moments/              # 心情动态模块：engine.ts（发帖调度）、service.ts（发帖/评论与 AI 互动）、memory.ts（动态记忆提取）、events.ts（事件标题与口语别名常量）、seen.ts（浏览记录 + 灵光一闪去重）、bus.ts（刷新总线）
   friends/              # 好友圈：persona.ts（档案/花名册/按名字命中）、roster.ts（生成/错峰登场/重建换人）、service.ts（评论）、chat.ts（私聊提示词与弱痕迹）
   game/                 # 4 款游戏：twentyQuestions（20问）/ bomb（数字炸弹）/ yacht（快艇骰子）/ truthDare（真心话大冒险），各含 engine·ai·prompt
                         # 顶层另有：memory.ts（对局记忆提取）、judge.ts（20问是非判定）、prompt.ts（游戏区 Prompt）、subjectPicker.ts（谜底选取）
@@ -94,7 +94,7 @@ src/
     retrieval.ts        # 检索 + 灵光一闪
     tokenize.ts         # 纯 JS 分词
     decay.ts            # 艾宾浩斯衰减
-    consolidation.ts    # 巩固流（10 轮触发；跳过游戏回合与好友私聊）
+    consolidation.ts    # 巩固流（token 预算/空闲触发，分批消化；跳过游戏回合与好友私聊）
     scheduler.ts        # 周基线表生成 + 当前情境查询（优先当日实况）
     week.ts             # 周/时段换算（scheduler 与 dailyLife 共用，避免循环依赖）
     dailyLife.ts        # 每日实况：生成 / 伪天气 / 深夜状态 / 近 7 天实况
@@ -121,14 +121,14 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 | --- | --- |
 | `memory_events` | `id` PK、`event_text`、`timestamp`、`active_weight`(1-100)、`last_accessed`、`priority`(1-9)、`memory_kind`(daily/episode)、`event_status`(none/upcoming/caring/archived)；索引 `idx_events_weight (active_weight DESC)`。**未来事件（约定、离职、考试、手术…）就是 `timestamp` 在未来的事件**：`event_status` 标记生命周期，不再有独立的「事件桶」 |
 | `memory_fragments` | `id` PK、`index`（父事件 ID，**列名为 `index` 而非 `event_index`**）、`timestamp`(ISO8601)、`gist`(≤20 字一句话)、`summary`(80-120 字，**含关键细节与情绪**)、`keywords`(逗号分隔，检索用，含同义说法)、`priority`(1-9)；索引 `idx_fragments_index ("index")`。**已无 `emotion` 列**：2026-10-02 下线，迁移时把老内容并进 `summary` 后 `DROP COLUMN` |
-| `system_metadata` | `key` PK、`value`；常用 key：`is_locked`、`turn_counter`、`last_consolidated_id` / `last_consolidated_at`（巩固游标，按消息 id 锚定）、`last_consolidated_index`（旧下标游标，仅兼容与调试）、`default_event_id`、`session_digest` / `session_digest_at`（滚动会话摘要）、`last_request_at`（缓存 TTL 守卫） |
+| `system_metadata` | `key` PK、`value`；常用 key：`is_locked`、`turn_counter`、`last_consolidated_id` / `last_consolidated_at`（巩固游标，按消息 id 锚定）、`last_consolidated_index`（旧下标游标，仅兼容与调试）、`default_event_id`、`session_digest` / `session_digest_at`（滚动会话摘要）、`last_request_at`（缓存 TTL 守卫）、`moments_seen`（用户最近浏览的动态 id + 时刻，灵光一闪加权用）、`moment_recall_seen`（已提过的动态片段 id + 时刻，每条只提高概率一次） |
 | `memory_event_aliases` | `event_id`、`alias`，复合主键；事件合并后把被并事件的标题记成别名，新事件命中别名直接挂靠。索引 `idx_event_aliases_alias` |
 | `user_info` | key-value 分片：`basic_identity`、`social_graph`、`traits`、`states`（属性/状态 两桶，巩固流增量 Merge，见「用户画像」）；**用户称呼的唯一真相源**为 `basic_identity.nickname`。旧键 `preferences`/`psycho_state`/`life_quests` 读到时自动迁移删除；旧的 `events` 键已废弃（约定并入 `memory_events`） |
 | `behavior_schedule` | `id` PK、`week_start`、`day_of_week`(0-6)、`time_slot`(0-4)、`activity`、`created_at`；索引 `idx_schedule_week`。**存的是 AI 自己的作息**，用于状态区注入 AI 当前在做什么 |
 | `game_sessions` | `id` PK、`game_type`(twenty_questions/yacht/bomb/truth_or_dare)、`mode`、`status`(playing/won/lost/abandoned)、`secret`、`secret_source`(public/memory)、`question_count`、`turns`(JSON 存各游戏状态机)、`started_at`、`ended_at`、`result_note`(结束摘要，供上下文合并) |
 | `moments` | `id` PK、`author`(user/ai/**friend**)、`content`、`mood`(开心/平静/低落/烦躁/期待)、`created_at`、`friend_id`（好友发帖指向 `friend_personas.id`）；索引 `idx_moments_created`、`idx_moments_friend`。**CHECK 只在建表时写死，旧库靠重建表扩展**（`migrateSocialSchema`） |
 | `moment_comments` | `id` PK、`moment_id`、`author`(user/ai/friend)、`content`、`created_at`、`friend_id`；索引 `idx_comments_moment` |
-| `post_plan` | `id` PK、`week_start`、`day_of_week`(0-6)、`time_slot`(0-4)、`theme_hint`、`status`(pending/posted/skipped)、`created_at`、`author`(ai/friend)、`friend_id`；索引 `idx_post_plan_week`。**发帖计划**：AI 的随作息表同一请求生成，好友的按日掷骰后插入 |
+| `post_plan` | `id` PK、`week_start`、`day_of_week`(0-6)、`time_slot`(0-4)、`theme_hint`、`status`(pending/posted/skipped)、`created_at`、`author`(ai/friend)、`friend_id`；索引 `idx_post_plan_week`。**发帖计划**：AI 的随作息表同一请求生成（本周缺 AI 计划时单独补一份），好友的按日掷骰后插入 |
 | `daily_log` | `day` PK(YYYY-MM-DD)、`slots`(JSON 5 格，空串=留白)、`mood`、`highlight`(今日主线)、`late_night`(当天 0-6 点状态)、`weather`(按日期种子伪天气)、`created_at`、`updated_at`。**当日实况**，只读不回写 |
 | `friend_personas` | `id` PK、`name`、`avatar_emoji`、`summary`(一句关系与态度)、`profile`(自由文本小传，按 `[身份]/[说话方式]/[与[user]的关系]/[你对他们俩的看法]/[你自己的日子]` 分段)、`is_active`、`is_deleted`(删除只让人消失，历史动态仍能署名)、`debut_at`(错峰登场时刻)、`created_at` |
 
@@ -177,6 +177,7 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 - **排序用「关键词重合度」**（`scoreOverlap`：命中了几个不同关键词），SQL 只做 OR 粗召回，避免命中即算数
 - 片段检索时 `gist`、`summary`、`keywords` 三者都参与匹配
 - **事件检索也匹配别名**：合并过的事件把旧标题存进 `memory_event_aliases`，事件层按「标题或别名」粗召回，打分文本也拼上别名（只命中别名的候选否则会被「重合度 > 0」过滤掉）
+- **动态事件带口语别名**：三个动态事件（`[user]的心情动态` / `我的心情动态` / `朋友圈日常`）共用别名「朋友圈」「动态」「帖子」（`moments/events.ts` 的 `MOMENT_EVENT_ALIASES`），用户换哪种说法都能召回；别名在每次写入动态记忆时补写，老库由 `ensureMomentEventAliases()` 启动时补
 - **被唤起的片段**（`cuedFragmentIds`）：片段内容与当前输入的关键词重合 ≥2 个、或输入很短（关键词 ≤2）时 ≥1 个——只让真正被话题唤起的细节回到「记得很清楚」，单个 bigram 的偶然撞词（如「今天」）不算
 
 **记忆区 Top N 只能用实时权重排序**：`active_weight` 列在建事件（`insertEvent` 传 100）与命中（`updateWeight` 传 100）时都被写成 100，全仓没有任何一处把它写低，按它排序等于不排序，会让候选集退化成「最早创建的事件」，事件数超过上限后新记忆再也进不了记忆区。灵光一闪同理：不能用 `active_weight < 40` 筛冷记忆，改成 `live_weight < COLD_MEMORY_MAX_WEIGHT`（40，冷记忆上限常量，**与详略阈值解耦**——详略阈值调高不会把温记忆抽成灵光一闪）。
@@ -221,7 +222,7 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 - 顺序：**检索命中的事件在前**（相关），再补 **1 条**高权重的「氛围记忆」（只为保留「还有别的共同经历」的存在感，多了会稀释相关记忆）；**本轮没有检索命中时记忆区整块不出现**（不注入氛围记忆、也不补「日常闲聊」——近期的事已由画像的近况覆盖，硬塞只会占预算并引出无关内容）
 - 命中事件注入片段时**最多 4 条**（最近 3 条 + 最早 1 条，被唤起的必保），避免一个积累几十条的事件一次撑爆预算；命中权重刷新是**事件级**（`updateWeight` 100），但渲染是**片段级**分层——「想起」只增强被唤起的那条细节
 - Token 超限的截断顺序：删灵光一闪 → **低权重记忆块降级**（detail→gist，别直接删）→ 按权重从低到高删块 → 丢最旧历史
-- 灵光一闪注入「事件标题 + 一句 gist」，并**优先挑与当前输入有弱关联的冷记忆**（不再是纯随机），否则 AI 只拿到标题、接不上话
+- 灵光一闪注入「事件标题 + 一句 gist」。**近期动态优先**：`retrieval.ts` 的 `recentMomentBoost` 算出 6 小时内各动态事件的新近度（AI 刚发/用户刚评论 4×、用户刚发/60 分钟内刚浏览 2.5×、好友刚发 1.5×），概率 = `0.05 + Σ(boost × recent_moment_recall_weight)`（上限 0.9）——**先掷这一枪**，命中就取该事件 6 小时内最新片段（动态刚写进库、实时权重高，正常进不了冷池，但刚发的帖子正该被想起）；没命中才轮到 5% 的冷记忆。**每条动态只走一次高概率通道**（提过即移出候选），所以「刚发过动态」不会变成每轮都在灵光一闪
 
 **用户画像（属性/状态 两桶）**
 
@@ -286,21 +287,22 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 | 用户发帖 | 动态页右上「＋」→ 发帖浮层：心情标签单选胶囊（开心/平静/低落/烦躁/期待）+ 正文；落库 `moments` |
 | AI 发帖 | 发帖计划（`post_plan`）驱动，根布局 60s 轮询执行，节奏三层真人感（见下） |
 | 评论互通 | 用户评论 AI 动态 → AI 约 3~15s 随机延迟回评；AI 以概率主动评论用户动态（延迟约 30s~3min）；**无点赞**（后续迭代） |
+| 进私聊 | 点好友动态的头像/署名、或好友评论 → 进 `/friend/[id]` 私聊；长按仍是「不再让 ta 出现」 |
 | 记忆联动 | 双向进记忆，不等巩固流（见下） |
 
 **导航（微信式两层）**：底部三 Tab「私藏（会话列表）/ 动态 / 设置」；一级会话列表点 AI 会话条 `router.push("/chat")` 进二级聊天页，左上「返回」回列表；聊天页原右上「设置」入口已移除，设置走底部 Tab。会话列表下方留「以后可以添加更多联系人」扩展位。
 
 **AI 发帖真人感三层**（`src/moments/engine.ts` 的 `useMomentsEngine` 挂 `app/_layout.tsx`，任何页面都在跑）：
-1. **计划层**：`generateSchedule` 一次输出 `{schedule, post_plan}`（随作息表同请求生成），每天 0~2 条、**允许整天不发**，`theme_hint` 只给主题方向；
+1. **计划层**：`generateSchedule` 一次输出 `{schedule, post_plan}`（随作息表同请求生成），每天 0~2 条、**允许整天不发**，`theme_hint` 只给主题方向。**作息表与计划分开判定**（`hasScheduleForWeek` / `hasPostPlanForWeek`）：本周有表但没有 AI 计划（旧版本生成、或计划排在了已过去的日子）时补一份计划，只保留**还没过去**的日子与时段，并保证今天有一条；
 2. **执行层**：当前时段内随机时刻触发 + 小概率临场放弃（`moment_post_skip_probability`）；
 3. **放弃层**：错过时段不补发（置 `skipped`）；LLM 失败保留 `pending` 下轮重试，时段结束仍未成功即 `skipped`；深夜 0-6 点不发。
 
 **评论互动**（`src/moments/service.ts`）：回评/主动评论均为「概率 + 随机延迟 + 失败静默放弃」；AI 评论生成期间 UI 显示「正在输入」三点动效；同一互动（momentId+replyTo）有 in-flight 防重。好友评论在同一套范式上旁挂（见「好友圈」）。刷新走 `src/moments/bus.ts`（单独成文件是为了断开 service ↔ friends/service 的循环依赖）。
 
 **记忆联动**（`src/moments/memory.ts`，复用 `game/memory.ts` 提取范式 + `insertEpisode` 同名事件挂片段）：
-- 用户发帖即记「[user]的心情动态」（即使本次无互动，AI 之后也记得用户的心情）；
-- 互动闭环（AI 评论/回评/好友评论落库）后追加片段：用户动态挂「[user]的心情动态」，AI 动态下互动挂「和[user]在动态下的互动」，有好友参与的统一挂「朋友圈日常」（按好友分事件会让事件表膨胀）；
-- AI 自身动态写「我的心情动态」，供检索时自我引用。
+- 事件**按帖子作者**归一个（`src/moments/events.ts` 的 `momentEventOf`）：用户动态 →「[user]的心情动态」、AI 自身动态 →「我的心情动态」、好友动态 →「朋友圈日常」；
+- 帖子本身的记忆与它下面的互动片段挂同一事件，不再单独建「和[user]在动态下的互动」（旧库由 `mergeLegacyMomentInteractionEvent` 一次性改挂合并）；
+- 好友单人动态同样写一条记忆（「朋友圈日常」），AI 之后能记得朋友刷过什么。
 
 **配置**：模板 `moment_generation_prompt` / `moment_comment_prompt`（`schedule_generation_prompt` 已扩展输出 `post_plan` 段）；阈值见「八、配置持久化」。
 
@@ -312,11 +314,11 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 
 **生成与登场**（`src/friends/roster.ts`）
 - 时机：首轮对话完成后生成一次（`chat.tsx` 助手回复落库后调用）；`useMomentsEngine` 的 60s tick 只做兜底，且要求已有聊天记录。**永不自动重掷**。
-- 错峰登场：`debut_at` 按天铺开（首位今天，其余 +1~4 天）。未登场的人不进 feed、不进会话列表、不发帖评论，但**进状态区花名册**（聊天先行伏笔）。
+- 错峰登场：`debut_at` 按天铺开（首位今天，其余 +1~4 天）。未登场的人不发帖评论、不进 feed，但**进状态区花名册**（聊天先行伏笔）。**会话列表的私聊入口要等 ta 在朋友圈露过面**（`hasFriendAppeared`：发过动态或评论，或已经私聊过）——光到登场时间就凭空多出一个陌生联系人太出戏。
 - 偏好「首秀前保存」→ 全部未登场时静默重掷（无关系损失）；「首秀后保存」→ 设置页弹二选一（只影响以后 / 按偏好重建）。
 - 管理：改名（只改称呼）、停用/启用、换一个（下线一位 + 补一位）、删除（`is_deleted=1`，历史动态保留名字）、重建（全体停用 + 新一批）。停用/删除**不洗记忆**。
 
-**发帖**：好友不发周计划，改为每天按 `stableHash(friend_id + 日期)` 掷一次骰（`friend_moment_probability`），命中就插一条 `post_plan(author='friend')`，执行层沿用「时段内随机时刻 + 15% 临场放弃 + 错过即 skipped」。内容由 `friend_moment_generation_prompt` + 小传生成，**好友单人动态不写记忆**（氛围素材）。
+**发帖**：好友不发周计划，改为每天按 `stableHash(friend_id + 日期)` 掷一次骰（`friend_moment_probability`），命中就插一条 `post_plan(author='friend')`，执行层沿用「时段内随机时刻 + 15% 临场放弃 + 错过即 skipped」；掷出的时段已经过去时**顺延到当前时段**（否则刚登场的人第一天就被置 skipped，一条都不发）。内容由 `friend_moment_generation_prompt` + 小传生成，发帖后写一条「朋友圈日常」记忆片段（AI 之后接得上「小雨那条动态」）。
 
 **评论**（`src/friends/service.ts`）：每条动态最多招来一位好友；好友动态之间互不评论（不做群聊）；用户评论好友动态时本人可能被动回评。好友只拿得到「动态 + 已有评论」，**看不到主 AI 与用户的私聊**。
 
@@ -325,7 +327,7 @@ docs/                   # 设计稿（如 prompt-editor-redesign.md）
 **按名字命中档案**（`src/friends/persona.ts` → `assembler` 的 `friendCard`）：输入命中好友名时，记忆区最前面注入档案卡（小传 + 该好友相关片段），权重置顶；档案回答「她是谁」，片段回答「她说过什么」。
 
 **好友私聊**（`app/friend/[id].tsx` + `src/friends/chat.ts`）
-- 会话列表「朋友」区在好友登场后出现，点进二级私聊页；复用 `ChatBubble` / `InputBar`，滑动窗口（无 `friend_threads` 表，MVP 方案）。
+- 会话列表「朋友」区在好友于朋友圈露过面后出现（`hasFriendAppeared`），点进二级私聊页；复用 `ChatBubble` / `InputBar`，滑动窗口（无 `friend_threads` 表，MVP 方案）。
 - 上下文＝好友版 system prompt（固定格式包裹小传）+ 该线程历史 + 近期 feed + 该好友相关记忆；**无状态区/记忆区/灵光一闪/游戏区**。
 - 消息带 `friend_id`：主聊天页与 `chatStore.getHistory()` 全部过滤，`runConsolidation` 跳过（不计 turn_counter）——**私聊内容不进主 AI 记忆**。
 - 离开页面写一条弱痕迹（`insertEpisode("和{名}聊天")`：知道聊过、不知道内容，每好友 6 小时最多一条）。
@@ -417,6 +419,7 @@ system  : gameHint       游戏回合指令（对局中，置末就近影响本�
 - `friend_moment_probability`（默认 0.35）：每位好友每天发帖的概率（按 `好友id+日期` 确定性掷骰，当天不变）
 - `friend_comment_probability`（默认 0.3）：每条动态招来一位好友评论的概率
 - `friend_roster_visible_days`（默认 14）：花名册行只列最近这么多天有互动（或刚建立关系）的好友
+- `recent_moment_recall_weight`（默认 0.2）：每 1× 动态新近度折算的灵光一闪概率，4×（AI 刚发/用户刚评论）→ 约 0.85；调高=更容易提起刚发的帖子
 
 ---
 

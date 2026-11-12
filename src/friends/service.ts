@@ -133,6 +133,6 @@ async function runComment(friend: FriendPersona, momentId: number, replyTo?: str
   insertMomentComment(momentId, "friend", text, friend.id);
   logDebug("动态", `${friend.name} 评论动态 #${momentId}：${text.slice(0, 30)}`);
   notifyMomentUpdates();
-  // 涉及 user/ai 的互动才写记忆；好友单人动态本身不进记忆
+  // 互动片段追加到被评论帖子所属事件（按帖子作者归属）
   recordMomentExchangeMemory(momentId);
 }

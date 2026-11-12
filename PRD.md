@@ -2,7 +2,7 @@
 
 ## 1. 一句话定义与 MVP 范围
 
-一款基于 Expo (React Native) + 本地 SQLite 实现的、具备增量补丁式短期记忆巩固、冷记忆随机扰动（灵光一闪）、轻量纯 JS 分词匹配、前台闲置智能“做梦”与全方位冷启动兼容机制的端侧隐私型情感陪伴记忆引擎。
+一款基于 Expo (React Native) + 本地 SQLite 实现的、具备增量补丁式短期记忆巩固、近期动态优先的「灵光一闪」、轻量纯 JS 分词匹配与全方位冷启动兼容机制的端侧隐私型情感陪伴记忆引擎。
 
 ### IN 范围（开发涉及）
 
@@ -37,20 +37,21 @@
 * 若 `user_info` 各项字段为空（初次打开 App），则拼装层不渲染空标签，直接使用解耦配置中的 `cold_start_template` 注入上下文，引导 AI 主动提问；若部分字段缺失，则采用配置中的 `default_placeholders` 进行安全兜底渲染，防止 JS `undefined` 崩溃。
 
 
-2. **输入与切词**：用户发送消息，系统调用纯 JS 分词函数，剥离停用词，提取至多 3 个核心关键词。
-3. **本地检索（Top 3 匹配）**：
-* 执行 SQL 查询：
+2. **输入与切词**：用户发送消息后，纯 JS 分词对每段连续汉字做 **2 字滑窗（bigram）**，上限 16 个关键词、超长输入均匀抽样；身份名（用户昵称 / AI 名）作为屏蔽词剔除。中文没有空格，硬切词反而会漏召回——bigram 保证「妈妈」这类词必以某个 gram 出现。
+3. **本地检索（先事件、后片段）**：
+* 事件层粗召回（标题或别名命中，排除默认事件「日常闲聊」与未到期的未来事件），SQL 只做 OR 粗筛，排序在 JS 里按「命中了几个不同关键词」（重合度）精排，避免命中即算数：
 ```sql
-SELECT * FROM memory_events 
-WHERE is_archived = 0 
-  AND (event_text LIKE '%词1%' OR event_text LIKE '%词2%' OR event_text LIKE '%词3%')
-ORDER BY active_weight DESC 
-LIMIT 3;
-
+SELECT e.* FROM memory_events e
+WHERE e.id != :default_event_id
+  AND e.event_status != 'upcoming'
+  AND (e.event_text LIKE '%词1%'
+       OR EXISTS(SELECT 1 FROM memory_event_aliases a
+                 WHERE a.event_id = e.id AND a.alias LIKE '%词1%'))
+ORDER BY e.last_accessed DESC
+LIMIT 15;
 ```
-
-
-* 若命中，将命中的事件的 `active_weight` 强制刷新为 100，更新 `last_accessed` 为当前 ISO8601 时间。
+* 事件未命中时再检索片段（`gist` / `summary` / `keywords` 三者都参与），命中片段的父事件即视为命中事件。
+* 命中后把事件的 `active_weight` 刷为 100、更新 `last_accessed`——权重刷新是**事件级**，渲染才是**片段级**分层。
 
 
 
@@ -64,21 +65,17 @@ LIMIT 3;
 
 
 
-5. **“灵光一闪”随机扰动事件抽取**：
-* 为赋予 AI 偶然想起过去的惊喜感，系统执行以下 SQL 随机抽取 1 条非归档、长期未访问的冷记忆：
-```sql
-SELECT * FROM memory_events 
-WHERE is_archived = 0 AND active_weight < 40 
-ORDER BY RANDOM() 
-LIMIT 1;
-
-```
+5. **“灵光一闪”扰动事件抽取**：
+* 每次检索最多注 1 条，两条通道：
+  1. **近期动态优先**：按 6 小时内各动态事件的新近度（AI 刚发帖 / 用户刚评论 4×，用户刚发 / 刚浏览 2.5×，好友刚发 1.5×）累加出概率 `0.05 + Σ(boost × recent_moment_recall_weight)`（默认权重 0.2 → 4× 约 0.85，上限 0.9），命中即取该事件 6 小时内最新片段；
+  2. **冷记忆**：没有近期动态、或动态通道没掷中时，按 `epiphany_trigger_probability`（默认 0.05）从实时权重低于 40 的冷记忆里抽一条，优先与当前输入弱关联的。
+* 每条动态只走一次高概率通道：提过即记入 `system_metadata.moment_recall_seen` 并移出候选，避免「只要有近期动态就每轮灵光一闪」。
 
 
 
 
 6. **Prompt 拼装与截断**：
-* 按照：`系统人设 + 状态区(用户信息/情绪) + 记忆区(Top 10高权重事件 + 1条随机扰动事件) + 15轮历史对话` 顺序拼接。
+* 按照：`系统人设 + 状态区 + 会话摘要 + 未巩固历史 + 记忆区(检索命中事件 + 1 条氛围记忆 + 灵光一闪) + 游戏区` 顺序拼接；记忆区与游戏区后置，避免记忆变化打断历史段的前缀缓存。
 
 
 * 检查总字符长度，若超出配置的 Token 预算限制，则从低到高依次剔除记忆区事件，优先保护当前预算内的未巩固对话与状态区的完整性。
@@ -91,7 +88,7 @@ LIMIT 1;
 1. **计数检测**：前台回复成功，系统将本地轻量存储中的 `turn_counter` 累加 1。当计数满 10 且 `is_locked == false` 时触发。
 
 
-2. **加锁与快照投递**：将本地锁 `is_locked` 置为 `true`。开启 30 秒超时定时器。截取当前 `user_info` 全量 JSON 与当前 10 轮对话快照。
+2. **加锁与快照投递**：将本地锁 `is_locked` 置为 `true`。开启 30 秒超时定时器。截取当前 `user_info` 全量 JSON 与游标之后、约一个 token 预算的对话快照。
 
 
 3. **后台模型推理**：调用后台低成本模型。要求模型严格按照 4.4 节规定的格式输出：包含合并更新后的 `updated_user_info` 以及待生成的 `new_fragment` 实体。
@@ -105,7 +102,7 @@ LIMIT 1;
 * 若 `target_event_text` 为空，则根据语义匹配或直接默认挂靠至最近活跃的事件 ID。
 
 
-* **第三步：写入记忆片段。** 将生成的 `new_event_id`（或匹配到的已有 ID）作为 `index` 字段，把 `summary`、`emotion` 与当前时间戳写入 `memory_fragments` 表。
+* **第三步：写入记忆片段。** 将生成的 `new_event_id`（或匹配到的已有 ID）作为 `index` 字段，把 `gist` / `summary` / `keywords` / `priority` 与当前时间戳写入 `memory_fragments` 表。
 
 
 
@@ -116,15 +113,6 @@ LIMIT 1;
 5. **释放锁**：清除超时定时器，将本地 `turn_counter` 清零，`is_locked` 置为 `false`。
 
 
-
-### 2.3 闲置做梦流
-
-1. **条件触发**：系统检测到 App 处于前台（`AppState == 'active'`），用户无操作满 180 秒，且本地非归档事件数量（`is_archived = 0`）超过 50 条。
-2. **数据打包**：拉取 `active_weight` 最低的 10 条冷数据事件。
-3. **模型折叠**：调用 LLM 进行语义折叠，将琐碎内容合并为 1-2 条高度概括的新事件文本。
-
-
-4. **事务提交与软归档**：开启 SQLite 事务，在 `memory_events` 中插入合并生成的新事件，同时将作为原料的旧 10 条事件的 `is_archived` 字段更新为 1。
 
 ---
 
@@ -144,18 +132,16 @@ LIMIT 1;
 | **CONSOLIDATING** | 后台模型返回 / 30s超时触发 | **IDLE** | 执行增量数据 Merge 与双重关联写入，重置计数，`is_locked = false`。
 
  |
-| **IDLE** | 前台闲置 180s 且未归档事件过量 | **DREAMING** | 提取最低权重冷数据，调用 LLM 折叠，开启 SQLite 事务读写。 |
-| **DREAMING** | 事务提交成功 / 异常捕获 | **IDLE** | 释放做梦期间占用的内存资源。 |
 
 ### 3.2 异常边界与兜底策略
 
 * **持久化死锁与冷启动重置**：在 App 根组件挂载（如 React Native `useEffect`）时，强制执行 `is_locked = false` 的清理操作，确保在任何异常闪退或非正常退出后，下次启动能正常解除锁定。
 
 
-* **巩固中途超时降级**：若异步巩固请求超过 30 秒（超时定时器触发），直接强制修改 `is_locked = false` 并丢弃本次快照，不累加计数，等待下一个 10 轮周期，防止污染本地数据。
+* **巩固中途超时降级**：若异步巩固请求超过 30 秒（超时定时器触发），直接强制修改 `is_locked = false` 并丢弃本次快照，游标不推进，等待下一次触发，防止污染本地数据。
 
 
-* **做梦时系统强杀**：所有做梦和折叠逻辑中的数据库写入必须包裹在标准的 SQLite `TRANSACTION` 中。由于该机制限制在前台闲置时触发，一旦遭遇用户突然退台或系统杀进程，数据将自动 `ROLLBACK`，保证本地数据一致性。
+* **巩固事务原子性**：一次巩固的写库（事件归并 → 事件/片段 → 画像 Merge → 会话摘要）包裹在 SQLite `TRANSACTION` 中，异常时整体 `ROLLBACK`，不会留下半批数据；游标只在提交成功后推进。
 
 ---
 
@@ -164,28 +150,39 @@ LIMIT 1;
 ### 4.1 SQLite 表结构定义
 
 ```sql
--- 表一：记忆片段表
+-- 表一：记忆片段表（一句话 gist + 详细 summary 分层）
 CREATE TABLE IF NOT EXISTS memory_fragments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    "index" INTEGER NOT NULL,          -- 关联的父级记忆事件ID
-    timestamp TEXT NOT NULL,           -- ISO8601 格式
-    summary TEXT NOT NULL,             -- 50字以内概要
-    emotion TEXT NOT NULL              -- 情绪状态描述
+    "index" INTEGER NOT NULL,            -- 父级记忆事件 ID（列名就是 index）
+    timestamp TEXT NOT NULL,             -- ISO8601，沿用事情发生的时间
+    gist TEXT NOT NULL DEFAULT '',       -- ≤20 字一句话印象，记忆变淡后只剩它
+    summary TEXT NOT NULL,               -- 80~120 字：发生了什么 + 关键细节 + 情绪
+    keywords TEXT NOT NULL DEFAULT '',   -- 逗号分隔的检索关键词（含同义说法）
+    priority INTEGER NOT NULL DEFAULT 5  -- 1~9，重大片段衰减更慢
 );
+CREATE INDEX IF NOT EXISTS idx_fragments_index ON memory_fragments("index");
 
 -- 表二：记忆事件表
 CREATE TABLE IF NOT EXISTS memory_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    "index" INTEGER NOT NULL,          -- 索引记忆事件自增ID
     event_text TEXT NOT NULL,
     timestamp TEXT NOT NULL,
     active_weight INTEGER NOT NULL CHECK(active_weight BETWEEN 1 AND 100),
     last_accessed TEXT NOT NULL,
-    is_archived INTEGER NOT NULL DEFAULT 0 -- 0:活跃, 1:软归档
+    priority INTEGER NOT NULL DEFAULT 5,         -- 1~9
+    memory_kind TEXT NOT NULL DEFAULT 'daily',   -- daily / episode
+    event_status TEXT NOT NULL DEFAULT 'none'    -- none / upcoming / caring / archived
 );
-CREATE INDEX IF NOT EXISTS idx_events_archive_weight ON memory_events(is_archived, active_weight);
+CREATE INDEX IF NOT EXISTS idx_events_weight ON memory_events(active_weight DESC);
 
--- 表三：系统元数据表 (用于持久化计数与锁状态)
+-- 表三：事件别名表（合并过的旧标题，检索时按「标题或别名」召回）
+CREATE TABLE IF NOT EXISTS memory_event_aliases (
+    event_id INTEGER NOT NULL,
+    alias TEXT NOT NULL,
+    PRIMARY KEY (event_id, alias)
+);
+
+-- 表四：系统元数据表（巩固游标 / 锁 / 会话摘要 / 浏览与提过记录）
 CREATE TABLE IF NOT EXISTS system_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -195,7 +192,7 @@ CREATE TABLE IF NOT EXISTS system_metadata (
 
 ### 4.2 记忆衰减数学公式
 
-活跃权重采用**小时级**惰性求值，读取时计算。设 $W_{last}$ 为最后一次调用时的权重，$t_{\Delta}$ 为当前时间与 `last_accessed` 的**小时数差值**（浮点数），$d$ 为艾宾浩斯衰减系数（默认值 `0.06`）：
+活跃权重采用**小时级**惰性求值，读取时计算。设 $W_{last}$ 为最后一次调用时的权重，$t_{\Delta}$ 为当前时间与 `last_accessed` 的**小时数差值**（浮点数），$d$ 为艾宾浩斯衰减系数（默认值 `0.02`）：
 
 $$W_{now} = \max\left(1, \left\lfloor W_{last} \cdot e^{-d \cdot t_{\Delta}} \right\rfloor\right)$$
 
@@ -207,7 +204,6 @@ $$W_{now} = \max\left(1, \left\lfloor W_{last} \cdot e^{-d \cdot t_{\Delta}} \ri
     "system_prompt": "你是一个温柔的情感陪伴助手...",
     "extraction_prompt": "提取后台记忆与用户信息...",
     "state_injection_template": "基础信息：{{nickname}}，所在地{{location}}...",
-    "dream_consolidation_prompt": "折叠以下琐碎记忆...",
     "cold_start_template": "## [系统指引]\n你与[user]刚刚相识。你的数据库中目前没有任何关于[user]的信息。请用充满好奇、温柔、体贴的态度，在接下来的对话中，引导[user]慢慢向你介绍自己。"
   },
   "default_placeholders": {
@@ -218,10 +214,11 @@ $$W_{now} = \max\left(1, \left\lfloor W_{last} \cdot e^{-d \cdot t_{\Delta}} \ri
   },
   "thresholds": {
     "consolidation_window_turns": 10,
-    "context_active_events_limit": 10
+    "context_active_events_limit": 10,
+    "recent_moment_recall_weight": 0.2
   },
   "weight_decay": {
-    "ebbinghaus_decay_rate": 0.06,
+    "ebbinghaus_decay_rate": 0.02,
     "epiphany_trigger_probability": 0.05
   },
   "model_routing": {
@@ -295,7 +292,7 @@ $$W_{now} = \max\left(1, \left\lfloor W_{last} \cdot e^{-d \cdot t_{\Delta}} \ri
 * **Given**: 数据库内 `user_info` 的 `social_graph` 已有实体 `"name": "布丁"`。当前对话计数为 9，`is_locked` 为 `false`。
 
 
-* **When**: 用户发送第 10 轮消息（完全未提及布丁）。生成前台回复后，触发异步提取，模型返回 4.4 节格式的数据，其中包含新提取的 `new_fragment` 且 `target_event_text` 字段有内容。
+* **When**: 未巩固对话达到 token 预算或空闲阈值（完全未提及布丁）。生成前台回复后触发异步提取，模型返回 4.4 节格式的数据，其中包含新提取的片段且 `target_event_index` 字段有内容。
 
 
 * **Then**:
@@ -314,16 +311,15 @@ $$W_{now} = \max\left(1, \left\lfloor W_{last} \cdot e^{-d \cdot t_{\Delta}} \ri
 
 
 
-### AC 2: “灵光一闪”扰动事件的过滤抽取与 Token 截断
+### AC 2: “灵光一闪”扰动事件的抽取、去重与截断
 
-* **Given**: 数据库内存有一条被标记为活跃、权重为 20（低活跃度）的事件 `A`，和一条已归档的事件 `B`（`is_archived = 1`）。
-* **When**: 用户发送消息。系统拼装上下文。
+* **Given**: 用户 10 分钟前评论过 AI 的一条动态（对应事件「我的心情动态」新增一条互动片段，且该片段未被提起过），聊天输入与该动态无关。
+* **When**: 用户发送消息，系统拼装上下文。
 * **Then**:
-1. 系统检索非归档高权重事件的同时，通过“灵光一闪” SQL 命中了冷记忆事件 `A`，成功排除了归档事件 `B`。
-2. 该事件被作为随机扰动项注入上下文的记忆区。
-
-
-3. 若拼装时检测到字数超标，系统能自动剔除其他非命中的低权重活跃事件，优先确保事件 `A` 及当前预算内的未巩固对话在总字数限制内。
+1. 近期动态通道概率 = 0.05 + 4 × 0.2 = 0.85，命中时注入该事件「6 小时内最新片段」的一行印象，并把片段 id 记入 `moment_recall_seen`；
+2. 该片段此后不再参与高概率候选（每条动态只提高概率一次），同一条帖子不会被反复提起；
+3. 没有近期动态（或动态通道未掷中）时走冷记忆通道：按 `epiphany_trigger_probability` 从实时权重 < 40 的事件里抽一条，优先与当前输入弱关联的；
+4. 若拼装时 Token 超标，灵光一闪与低权重记忆块会被优先剔除，未巩固对话不受影响。
 
 
 
@@ -352,7 +348,7 @@ $$W_{now} = \max\left(1, \left\lfloor W_{last} \cdot e^{-d \cdot t_{\Delta}} \ri
 
 * 用户手写发帖：正文（纯文字、可含 emoji）+ 心情标签单选（开心 / 平静 / 低落 / 烦躁 / 期待）。v1 不含图片（多模态在 MVP 范围外）。
 * AI 发帖按「真人感三层」节奏，杜绝机械感：
-  1. **计划层**：发帖计划随每周作息表在同一次 LLM 请求中生成（输出 `{schedule, post_plan}`），每天 0~2 条、允许整天不发，主题（`theme_hint`）只给方向不给正文；
+  1. **计划层**：发帖计划随每周作息表在同一次 LLM 请求中生成（输出 `{schedule, post_plan}`），每天 0~2 条、允许整天不发，主题（`theme_hint`）只给方向不给正文；作息表与计划分开判定，本周有表但没有 AI 计划时补一份，只排还没过去的日子与时段；
   2. **执行层**：`useMomentsEngine` 挂根布局 60s 轮询，命中当前时段的待办后在时段内随机时刻触发，并有小概率「临场放弃」（`moment_post_skip_probability`）；
   3. **放弃层**：错过时段不补发（计划置 `skipped`）；LLM 生成失败保留 `pending` 下轮重试，时段结束仍未成功即 `skipped`。
 
@@ -364,9 +360,9 @@ $$W_{now} = \max\left(1, \left\lfloor W_{last} \cdot e^{-d \cdot t_{\Delta}} \ri
 
 **记忆联动（双向进记忆，不等巩固流）**
 
-* 用户发帖即写记忆事件「[user]的心情动态」——AI 之后记得用户的心情（即使本次没有互动）。
-* 互动闭环（AI 评论/回评落库）后追加片段：用户动态 →「[user]的心情动态」，AI 动态下互动 →「和[user]在动态下的互动」。
-* AI 自身动态写入「我的心情动态」，供检索时自我引用。
+* 事件按**帖子作者**归一个：用户动态 →「[user]的心情动态」、AI 自身动态 →「我的心情动态」、好友动态 →「朋友圈日常」；帖子本身的记忆与它下面的互动片段挂同一事件，不再单独建「和[user]在动态下的互动」（旧库启动时改挂合并）。
+* 用户发帖即写记忆（即使本次没有互动，AI 之后也记得用户的心情）；好友单人动态同样写一条「朋友圈日常」片段。
+* 灵光一闪**近期动态优先**：概率 = `0.05 + Σ(动态新近度 × recent_moment_recall_weight)`（AI 刚发/用户刚评论 4× → 0.85），没命中才按 5% 抽冷记忆；每条动态只提高概率一次。
 * 遵守记忆片段规范（gist ≤20 字 / summary 80~120 字含 [time] 与情绪 / keywords 含同义说法），`insertEpisode` 同名事件只建一次、之后挂片段。
 
 **导航（微信式两层）**
@@ -412,5 +408,5 @@ CREATE TABLE IF NOT EXISTS post_plan (
 
 * **AC 1 发帖节奏**：本周作息表生成后 `post_plan` 同步落库；同一天可为 0 条；到时段后随机时刻发出（非整点）；手动把设备时间拨过时段后，pending 计划变 `skipped` 而不补发。
 * **AC 2 评论互通**：用户评论 AI 动态后数秒~十几秒出现 AI 回评（带「正在输入」动效）；用户动态收到 AI 评论为概率事件；关掉 API Key 时不产生任何 AI 评论。
-* **AC 3 记忆联动**：用户发帖后 `memory_events` 出现「[user]的心情动态」事件及片段（gist/summary/keywords 齐全）；AI 发帖后出现「我的心情动态」；互动闭环后片段包含评论内容。
+* **AC 3 记忆联动**：用户发帖后 `memory_events` 出现「[user]的心情动态」事件及片段（gist/summary/keywords 齐全）；AI 发帖后出现「我的心情动态」；好友发帖后出现「朋友圈日常」；互动闭环后片段追加到对应帖子作者的事件下并包含评论内容。
 * **AC 4 导航**：会话列表点 AI 会话条进入聊天页，左上返回回列表；底部三 Tab 可达会话列表/动态/设置；聊天页无右上设置入口。

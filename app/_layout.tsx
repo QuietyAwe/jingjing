@@ -3,7 +3,11 @@ import { AppState } from "react-native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { initSchema } from "@/db/schema";
-import { mergeEpisodeDuplicates } from "@/db/queries";
+import {
+  mergeEpisodeDuplicates,
+  mergeLegacyMomentInteractionEvent,
+  ensureMomentEventAliases,
+} from "@/db/queries";
 import { useMetaStore } from "@/store/metaStore";
 import { useChatStore } from "@/store/chatStore";
 import { useSettingsStore } from "@/store/settingsStore";
@@ -18,6 +22,12 @@ initSchema();
 
 // 自愈历史数据：同名 episode 事件合并（早期版本每次对局都新建事件）
 mergeEpisodeDuplicates();
+
+// 自愈历史数据：旧的「和[user]在动态下的互动」事件并入「[user]的心情动态」
+mergeLegacyMomentInteractionEvent();
+
+// 自愈历史数据：给动态事件补口语别名（「朋友圈」「动态」「帖子」）
+ensureMomentEventAliases();
 
 // 冷启动重置锁 — 对齐 PRD 3.2 节持久化死锁兜底
 useMetaStore.getState().load();

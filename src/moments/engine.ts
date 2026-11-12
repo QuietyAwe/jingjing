@@ -38,7 +38,7 @@ import { ensureDailyLife, dayKey, stableHash } from "@/memory/dailyLife";
 import { checkAndGenerateFriends } from "@/friends/roster";
 import { friendName } from "@/friends/persona";
 import { notifyMomentUpdates } from "@/moments/service";
-import { recordAiMomentMemory } from "@/moments/memory";
+import { recordAiMomentMemory, recordFriendMomentMemory } from "@/moments/memory";
 import { logDebug } from "@/store/chatStore";
 import { useSettingsStore } from "@/store/settingsStore";
 
@@ -194,7 +194,11 @@ async function postFromPlan(plan: PostPlanItem): Promise<boolean> {
  * 每位好友每天只掷一次骰（确定性哈希：同一天多次轮询结果一致、重启也不会重复），
  * 掷中就插一条 pending 计划，交给执行层按时段随机触发；掷不中就是今天不发。
  */
-function ensureFriendPlansForToday(weekStart: string, dayOfWeek: number): void {
+function ensureFriendPlansForToday(
+  weekStart: string,
+  dayOfWeek: number,
+  currentSlot: number
+): void {
   const friends = getDebutedFriends();
   if (friends.length === 0) return;
 
@@ -208,7 +212,10 @@ function ensureFriendPlansForToday(weekStart: string, dayOfWeek: number): void {
     if (roll >= friend_moment_probability) continue;
 
     // 1=上午 2=午 3=下午 4=晚（早间与深夜不发，和 AI 的节奏一致）
-    const slot = 1 + (stableHash(`${friend.id}#${today}#slot`) % 4);
+    const rolled = 1 + (stableHash(`${friend.id}#${today}#slot`) % 4);
+    // 掷到今天已经过去的时段：顺延到当前时段——刚落库就被置 skipped，
+    // 会让刚登场的人第一天完全不发声
+    const slot = Math.max(rolled, currentSlot);
     insertPostPlan(weekStart, [
       {
         day_of_week: dayOfWeek,
@@ -229,7 +236,7 @@ export async function checkAndPostFriendMoments(): Promise<void> {
   const slot = getCurrentTimeSlot(dayjs().hour());
   if (slot < 0) return;
 
-  ensureFriendPlansForToday(weekStart, day);
+  ensureFriendPlansForToday(weekStart, day, slot);
 
   const due = getPendingPlanForSlot(weekStart, day, slot, "friend");
   if (due.length === 0) return;
@@ -260,7 +267,7 @@ export async function checkAndPostFriendMoments(): Promise<void> {
   }
 }
 
-/** 按计划行发布一条好友动态；好友单人动态只做氛围素材，不写记忆 */
+/** 按计划行发布一条好友动态；发帖后写一条「朋友圈日常」记忆 */
 async function postFriendFromPlan(plan: PostPlanItem): Promise<boolean> {
   if (friendPosting) return false;
   friendPosting = true;
@@ -296,10 +303,12 @@ async function postFriendFromPlan(plan: PostPlanItem): Promise<boolean> {
       return false;
     }
 
-    insertMoment("friend", draft.content, draft.mood, friend.id);
+    const momentId = insertMoment("friend", draft.content, draft.mood, friend.id);
     updatePostPlanStatus(plan.id, "posted");
     logDebug("动态", `${friend.name} 发布动态（${draft.mood}）：${draft.content.slice(0, 30)}`);
     notifyMomentUpdates();
+    // 进「朋友圈日常」：AI 之后能记得朋友刷过什么
+    recordFriendMomentMemory(momentId);
     return true;
   } finally {
     friendPosting = false;

@@ -3,13 +3,16 @@
 // 流程: 分词 → 检索事件 → 未命中则检索片段 → 衰减排序 → TopN + 灵光一闪
 // ============================================================
 
+import dayjs from "dayjs";
 import { tokenize, scoreOverlap } from "./tokenize";
 import { blockedWords, isBlockedGram } from "./identity";
 import { calculateWeight, calculateWeights, COLD_MEMORY_MAX_WEIGHT } from "./decay";
 import { getDB } from "@/db/connection";
-import { updateWeight, getAllActive, getFragmentsByEventId, getFragmentsByEventIds, getDefaultEventId, getEventAliasText } from "@/db/queries";
+import { updateWeight, getAllActive, getFragmentsByEventId, getFragmentsByEventIds, getDefaultEventId, getEventAliasText, getMomentsByIds, getRecentMomentAuthors, getRecentUserCommentedMomentAuthors } from "@/db/queries";
 import { EVENT_COLUMNS } from "@/db/schema";
 import { getThresholds, getWeightDecay } from "@/prompt/config";
+import { getMomentsSeen, getRecentlyRecalledFragmentIds, markMomentRecalled } from "@/moments/seen";
+import { momentEventOf } from "@/moments/events";
 import { logDebug } from "@/store/chatStore";
 import type { MemoryEvent, MemoryFragment } from "@/types/schema";
 
@@ -47,6 +50,86 @@ function rankByOverlap<T extends { active_weight: number }>(
     .map((x) => x.item);
 }
 
+/** 动态新近度窗口：超过这个时长，帖子不再算「刚发生」 */
+const MOMENT_RECENCY_HOURS = 6;
+/** 「用户刚浏览过」的有效时长 */
+const MOMENT_SEEN_WINDOW_MINUTES = 60;
+/** 近期动态通道的概率上限：留一点不确定性，避免「每轮必提一句」的机械感 */
+const RECALL_PROBABILITY_CAP = 0.9;
+
+/**
+ * 动态新近度 → 灵光一闪的事件权重倍数
+ *
+ * 刚发/刚被用户评论的帖子 4× > 用户刚发的、用户刚浏览过的 2.5× > 其他好友刚发的 1.5×。
+ * 事件按帖子作者归属（见 moments/events.ts），同一事件取最高倍数。
+ */
+function recentMomentBoost(now: dayjs.Dayjs = dayjs()): Map<string, number> {
+  const boost = new Map<string, number>();
+  const bump = (event: string, times: number) => {
+    boost.set(event, Math.max(boost.get(event) ?? 1, times));
+  };
+  const sinceIso = now.subtract(MOMENT_RECENCY_HOURS, "hour").toISOString();
+
+  for (const author of getRecentMomentAuthors(sinceIso)) {
+    bump(momentEventOf(author), author === "ai" ? 4 : author === "user" ? 2.5 : 1.5);
+  }
+  // 用户刚在帖子下评论：那个帖子（按作者归事件）大幅提高
+  for (const author of getRecentUserCommentedMomentAuthors(sinceIso)) {
+    bump(momentEventOf(author), 4);
+  }
+  // 用户刚在动态页刷到的帖子：中等提高
+  const seen = getMomentsSeen();
+  if (seen && now.diff(dayjs(seen.at), "minute") <= MOMENT_SEEN_WINDOW_MINUTES) {
+    for (const m of getMomentsByIds(seen.ids)) bump(momentEventOf(m.author), 2.5);
+  }
+  return boost;
+}
+
+/** 近期动态的灵光一闪候选 */
+interface RecentRecall {
+  event: MemoryEvent & { live_weight: number };
+  boost: number;
+  fragment: MemoryFragment;
+}
+
+/**
+ * 近期动态候选：只取「6 小时内、还没被提过」的最新片段。
+ * 已被检索命中注入（topIds）或去重窗口内提过的事件都不算——同一句话不该连着说两遍。
+ */
+function recentMomentRecallCandidates(
+  events: (MemoryEvent & { live_weight: number })[],
+  topIds: Set<number>
+): RecentRecall[] {
+  const boostMap = recentMomentBoost();
+  if (boostMap.size === 0) return [];
+
+  const recalled = getRecentlyRecalledFragmentIds();
+  const cutoff = dayjs().subtract(MOMENT_RECENCY_HOURS, "hour");
+  const out: RecentRecall[] = [];
+  for (const e of events) {
+    const boost = boostMap.get(e.event_text);
+    if (!boost || topIds.has(e.id)) continue;
+    // getFragmentsByEventId 按 timestamp 升序，最后一条就是最近的
+    const frags = getFragmentsByEventId(e.id).filter(
+      (f) => !recalled.has(f.id) && dayjs(f.timestamp).isAfter(cutoff)
+    );
+    const fragment = frags[frags.length - 1];
+    if (fragment) out.push({ event: e, boost, fragment });
+  }
+  return out;
+}
+
+/** 按权重随机抽一个 */
+function pickWeighted<T>(items: T[], weights: number[]): T {
+  const total = weights.reduce((s, w) => s + w, 0);
+  let r = Math.random() * total;
+  for (let i = 0; i < items.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return items[i];
+  }
+  return items[items.length - 1];
+}
+
 /**
  * 完整本地检索流程
  *
@@ -60,7 +143,7 @@ export function retrieve(userInput: string): RetrievalResult {
   const blocked = blockedWords();
   const keywords = tokenize(userInput, 16, (g) => isBlockedGram(g, blocked));
 
-  // 2. 优先检索事件(event_text)，排除默认事件"日常闲聊"
+  // 2. 优先检索事件（标题或别名），排除默认事件"日常闲聊"与未到期的未来事件
   let hitEvents: MemoryEvent[] = [];
   /** 只靠别名命中（标题完全没对上）的事件数：排查合并是否让事件变得检索不到 */
   let aliasOnlyHits = 0;
@@ -197,12 +280,33 @@ export function retrieve(userInput: string): RetrievalResult {
   }));
   const topEvents = [...hitWeighted, ...ambient].slice(0, context_active_events_limit);
 
-  // 6. 灵光一闪：概率触发，从「当前实时权重低的冷记忆」里随机抽 1 条
-  // （原来在 SQL 里筛 active_weight < 40，该列恒为 100，所以这条链路从来没触发过）
+  // 6. 灵光一闪：两条通道，只注入一条
+  //    ① 近期动态：概率由新近度权重累加得出（用户刚评论/自己刚发帖 ≈ 0.85）
+  //    ② 冷记忆：没有新鲜事时的偶然想起，概率 epiphany_trigger_probability
   const { epiphany_trigger_probability } = getWeightDecay();
+  const { recent_moment_recall_weight } = getThresholds();
+  const topIds = new Set(topEvents.map((e) => e.id));
   let epiphany: (MemoryEvent & { gist: string }) | null = null;
-  if (Math.random() < epiphany_trigger_probability) {
-    const topIds = new Set(topEvents.map((e) => e.id));
+  let epiphanyNote = "未触发";
+
+  const recent = recentMomentRecallCandidates(withLiveWeight, topIds);
+  const pRecent =
+    recent.length > 0
+      ? Math.min(
+          RECALL_PROBABILITY_CAP,
+          epiphany_trigger_probability +
+            recent.reduce((sum, c) => sum + c.boost * recent_moment_recall_weight, 0)
+        )
+      : 0;
+
+  if (recent.length > 0 && Math.random() < pRecent) {
+    const picked = pickWeighted(recent, recent.map((c) => c.boost));
+    markMomentRecalled(picked.fragment.id);
+    // 注入一句话印象，否则 AI 只拿到事件标题、根本没法接话
+    epiphany = { ...picked.event, gist: picked.fragment.gist || picked.event.event_text };
+    epiphanyNote = `${picked.event.event_text.slice(0, 30)}（近期动态 x${picked.boost}, P=${pRecent.toFixed(2)}）`;
+  } else if (Math.random() < epiphany_trigger_probability) {
+    // 冷记忆通道：动态通道没掷中，或根本没有近期动态
     const cold = withLiveWeight.filter(
       (e) => e.live_weight < COLD_MEMORY_MAX_WEIGHT && !topIds.has(e.id)
     );
@@ -214,10 +318,10 @@ export function retrieve(userInput: string): RetrievalResult {
         .sort((a, b) => b.s - a.s);
       const pool = scored.length > 0 ? scored.slice(0, 3).map((x) => x.e) : cold;
       const picked = pool[Math.floor(Math.random() * pool.length)];
-      // 注入一句话印象，否则 AI 只拿到事件标题、根本没法接话
       const gist =
         getFragmentsByEventId(picked.id).slice(-1)[0]?.gist || picked.event_text;
       epiphany = { ...picked, gist };
+      epiphanyNote = `${picked.event_text.slice(0, 30)}（冷记忆）`;
     }
   }
 
@@ -247,7 +351,7 @@ export function retrieve(userInput: string): RetrievalResult {
       : "未命中：不注入记忆区";
   logDebug(
     "检索",
-    `关键词: ${keywords.join(", ") || "无"}\n命中: ${hitEvents.length} 条事件（别名独中 ${aliasOnlyHits} 条，${Array.from(hitFragments.values()).reduce((s, f) => s + f.length, 0)} 片段，唤起 ${cuedFragmentIds.size} 条）\n${topLine}\n灵光一闪: ${epiphany ? epiphany.event_text.slice(0, 30) : "未触发"}`
+    `关键词: ${keywords.join(", ") || "无"}\n命中: ${hitEvents.length} 条事件（别名独中 ${aliasOnlyHits} 条，${Array.from(hitFragments.values()).reduce((s, f) => s + f.length, 0)} 片段，唤起 ${cuedFragmentIds.size} 条）\n${topLine}\n灵光一闪: ${epiphanyNote}`
   );
 
   return { hitEvents, hitFragments, topEvents, epiphany, keywords, cuedFragmentIds };

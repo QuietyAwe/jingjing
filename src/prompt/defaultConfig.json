@@ -36,7 +36,8 @@
     "friend_roster_size": 5,
     "friend_moment_probability": 0.35,
     "friend_comment_probability": 0.3,
-    "friend_roster_visible_days": 14
+    "friend_roster_visible_days": 14,
+    "recent_moment_recall_weight": 0.2
   },
   "weight_decay": {
     "ebbinghaus_decay_rate": 0.02,

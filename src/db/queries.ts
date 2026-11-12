@@ -1,6 +1,12 @@
 import { getDB } from "./connection";
 import { EVENT_COLUMNS } from "./schema";
 import { bigrams } from "@/memory/tokenize";
+import {
+  EVENT_USER_MOMENT,
+  EVENT_AI_MOMENT,
+  EVENT_FRIEND_FEED,
+  MOMENT_EVENT_ALIASES,
+} from "@/moments/events";
 import type {
   SystemMetadata,
   UserInfo,
@@ -603,6 +609,59 @@ export function mergeEpisodeDuplicates(): void {
   }
 }
 
+/**
+ * 自愈历史数据：旧版把动态互动单独记成「和[user]在动态下的互动」事件，
+ * 现在互动片段并入帖子作者对应的事件（见 moments/events.ts）。
+ * 这里把片段改挂过去、删掉旧事件，幂等。
+ */
+export function mergeLegacyMomentInteractionEvent(): void {
+  const LEGACY_EVENT = "和[user]在动态下的互动";
+  const db = getDB();
+  const legacy = db.getFirstSync<{ id: number }>(
+    "SELECT id FROM memory_events WHERE event_text = ?",
+    LEGACY_EVENT
+  );
+  if (!legacy) return;
+
+  const target = db.getFirstSync<{ id: number }>(
+    "SELECT id FROM memory_events WHERE event_text = ?",
+    EVENT_USER_MOMENT
+  );
+  if (!target) {
+    // 目标事件还不存在：直接改名，片段不用动
+    db.runSync(
+      "UPDATE memory_events SET event_text = ? WHERE id = ?",
+      EVENT_USER_MOMENT,
+      legacy.id
+    );
+    return;
+  }
+
+  db.runSync('UPDATE memory_fragments SET "index" = ? WHERE "index" = ?', target.id, legacy.id);
+  db.runSync(
+    "UPDATE OR IGNORE memory_event_aliases SET event_id = ? WHERE event_id = ?",
+    target.id,
+    legacy.id
+  );
+  db.runSync("DELETE FROM memory_event_aliases WHERE event_id = ?", legacy.id);
+  db.runSync("DELETE FROM memory_events WHERE id = ?", legacy.id);
+}
+
+/**
+ * 自愈历史数据：给已存在的动态事件补口语别名（别名机制上线前的库没有）。
+ * 幂等。
+ */
+export function ensureMomentEventAliases(): void {
+  const db = getDB();
+  const rows = db.getAllSync<{ id: number }>(
+    "SELECT id FROM memory_events WHERE event_text IN (?, ?, ?)",
+    EVENT_USER_MOMENT,
+    EVENT_AI_MOMENT,
+    EVENT_FRIEND_FEED
+  );
+  for (const row of rows) addEventAliases(row.id, MOMENT_EVENT_ALIASES);
+}
+
 /** 根据 ID 获取单个事件 */
 export function getEventById(eventId: number): MemoryEvent | null {
   const db = getDB();
@@ -1137,6 +1196,42 @@ export function getMoments(limit: number, beforeId?: number): Moment[] {
   );
 }
 
+/** 最近一段时间内发布过的动态作者（灵光一闪新近度加权用） */
+export function getRecentMomentAuthors(sinceIso: string): MomentAuthor[] {
+  const db = getDB();
+  return db
+    .getAllSync<{ author: MomentAuthor }>(
+      "SELECT author FROM moments WHERE created_at >= ? ORDER BY id DESC",
+      sinceIso
+    )
+    .map((r) => r.author);
+}
+
+/** 最近被用户评论过的动态作者（同一帖子多轮评论只算一次） */
+export function getRecentUserCommentedMomentAuthors(sinceIso: string): MomentAuthor[] {
+  const db = getDB();
+  return db
+    .getAllSync<{ author: MomentAuthor }>(
+      `SELECT DISTINCT m.author AS author
+       FROM moment_comments c
+       JOIN moments m ON m.id = c.moment_id
+       WHERE c.author = 'user' AND c.created_at >= ?`,
+      sinceIso
+    )
+    .map((r) => r.author);
+}
+
+/** 按 ID 批量取动态（用户刚浏览过的帖子 → 灵光一闪加权） */
+export function getMomentsByIds(ids: number[]): Moment[] {
+  if (ids.length === 0) return [];
+  const db = getDB();
+  const placeholders = ids.map(() => "?").join(",");
+  return db.getAllSync<Moment>(
+    `SELECT id, author, content, mood, created_at, friend_id FROM moments WHERE id IN (${placeholders})`,
+    ...ids
+  );
+}
+
 /** 按 ID 获取单条动态 */
 export function getMomentById(momentId: number): Moment | null {
   const db = getDB();
@@ -1221,11 +1316,14 @@ export function deletePostPlanForWeek(weekStart: string): void {
   db.runSync("DELETE FROM post_plan WHERE week_start = ?", weekStart);
 }
 
-/** 检查本周是否已有发帖计划 */
+/**
+ * 检查本周是否已有 AI 的发帖计划（好友计划另算：它们按天掷骰插入，
+ * 不能用来证明「主角这周的计划已经生成过」）
+ */
 export function hasPostPlanForWeek(weekStart: string): boolean {
   const db = getDB();
   const row = db.getFirstSync<{ cnt: number }>(
-    "SELECT COUNT(*) as cnt FROM post_plan WHERE week_start = ?",
+    "SELECT COUNT(*) as cnt FROM post_plan WHERE week_start = ? AND author = 'ai'",
     weekStart
   );
   return (row?.cnt ?? 0) > 0;
@@ -1390,7 +1488,23 @@ export function getAllFriends(): FriendPersona[] {
   );
 }
 
-/** 已启用且已登场的好友（没到登场时间的人不出现在 feed / 花名册 / 会话列表） */
+/**
+ * 好友是否已在朋友圈露过面（发过动态或评论过）。
+ * 会话列表的私聊入口等 ta 露面后再出现——凭空多出一个不认识的联系人太出戏。
+ */
+export function hasFriendAppeared(friendId: number): boolean {
+  const db = getDB();
+  const row = db.getFirstSync<{ cnt: number }>(
+    `SELECT
+       (SELECT COUNT(*) FROM moments WHERE author = 'friend' AND friend_id = ?)
+     + (SELECT COUNT(*) FROM moment_comments WHERE author = 'friend' AND friend_id = ?) AS cnt`,
+    friendId,
+    friendId
+  );
+  return (row?.cnt ?? 0) > 0;
+}
+
+/** 已启用且已登场的好友（没到登场时间的人不出现在 feed / 会话列表） */
 export function getDebutedFriends(nowIso: string = dayjs().toISOString()): FriendPersona[] {
   const db = getDB();
   return db.getAllSync<FriendPersona>(

@@ -1,9 +1,11 @@
 // ============================================================
 // 心情动态记忆提取（互动闭环 → 记忆事件，不等巩固流）
 //
-// 双向进记忆：
-// - 用户动态/互动 → 「[user]的心情动态」「和[user]在动态下的互动」（AI 之后记得用户的心情）
+// 按帖子作者归三个事件（见 moments/events.ts）：帖子本身与它下面的互动
+// 都追加到同一个事件里，不另建细碎事件。
+// - 用户动态 → 「[user]的心情动态」（AI 之后记得用户的心情）
 // - AI 自身动态 → 「我的心情动态」（存档，供检索时自我引用）
+// - 好友动态 → 「朋友圈日常」（AI 记得朋友刷过什么）
 //
 // 复用 game/memory.ts 的提取范式：后台模型 JSON mode 提取 gist/summary/keywords，
 // insertEpisode 同名事件只建一次、之后追加片段。
@@ -16,10 +18,12 @@ import { ensureTimePlaceholder } from "@/utils/text";
 import { logDebug } from "@/store/chatStore";
 import {
   insertEpisode,
+  addEventAliases,
   getMomentById,
   getMomentComments,
 } from "@/db/queries";
 import { friendName } from "@/friends/persona";
+import { momentEventOf, MOMENT_EVENT_ALIASES } from "@/moments/events";
 import type { Moment, MomentComment } from "@/types/schema";
 
 export interface MomentMemoryExtraction {
@@ -37,13 +41,15 @@ export type MomentMemoryKind =
   /** 动态下的互动闭环（评论/回复来往） */
   | "exchange"
   /** AI 自己发的动态（存档自我引用） */
-  | "ai_moment";
+  | "ai_moment"
+  /** 好友发的动态（朋友圈见闻） */
+  | "friend_moment";
 
 const EXTRACT_SYSTEM = `你要把一次「心情动态」（类似朋友圈）里发生的事写成一条记忆。
 
 要求：
-1. gist：20 字以内的一句话概要，必须包含 [time]，并包含 [user]（用户发的/互动的）或 [ai]（AI 自己发的），只留最核心的印象
-2. summary：80~120 字，必须包含 [time] 占位符，并视内容带上 [user]/[ai]。写清三件事：① 谁发了什么/说了什么 ② 关键细节（原话关键词、提到的人事物）③ 当时的情绪与态度。像人真正会记住的那样写，别写成干巴巴的标题
+1. gist：20 字以内的一句话概要，必须包含 [time]，并视来源带上 [user]（用户发的/互动的）、[ai]（你自己发的）或好友的名字（朋友发的），只留最核心的印象
+2. summary：80~120 字，必须包含 [time] 占位符，并视内容带上 [user]/[ai]/好友名字。写清三件事：① 谁发了什么/说了什么 ② 关键细节（原话关键词、提到的人事物）③ 当时的情绪与态度。像人真正会记住的那样写，别写成干巴巴的标题
 3. keywords: 2~6 个检索用关键词，覆盖关键实体与情绪词，**同时写出同义说法**（如 ["难过","低落","心情不好"]）；不要写用户或你自己的名字/称呼（每条记忆都有，检索无区分度）
 4. priority: 1-9（日常流水 3-5，情绪明显波动或重要心事 6-8）
 
@@ -74,7 +80,9 @@ async function extractMomentMemory(
       ? "只记录这条心情动态本身（用户此刻的心情与心事）"
       : kind === "ai_moment"
         ? "记录你自己发的这条动态（存档，方便以后自我引用）"
-        : "记录这次动态互动：动态内容 + 评论区的来往";
+        : kind === "friend_moment"
+          ? "记录朋友发的这条动态（你在朋友圈刷到的见闻，一句话印象即可，别写成评论）"
+          : "记录这次动态互动：动态内容 + 评论区的来往";
 
   const userPrompt = [
     `## 任务类型`,
@@ -125,15 +133,15 @@ async function extractMomentMemory(
   }
 }
 
-/** 记忆事件标题（同名事件只建一次，之后追加片段） */
-function eventTextFor(moment: Moment, kind: MomentMemoryKind, comments: MomentComment[]): string {
-  if (kind === "ai_moment") return "我的心情动态";
-  if (kind === "user_moment") return "[user]的心情动态";
-  // 好友参与的互动统一挂一个事件：按好友分事件会让事件表迅速膨胀
-  if (moment.author === "friend" || comments.some((c) => c.author === "friend")) {
-    return "朋友圈日常";
-  }
-  return moment.author === "ai" ? "和[user]在动态下的互动" : "[user]的心情动态";
+/**
+ * 记忆事件标题（同名事件只建一次，之后追加片段）
+ *
+ * 只按**帖子作者**归一个事件：帖子本身的记忆和它下面的互动词片段都挂在同一处。
+ * 互动再单独建「和[user]在动态下的互动」之类的细碎事件，只会把同一件事拆散、
+ * 让检索和灵光一闪都更难命中。
+ */
+function eventTextFor(moment: Moment): string {
+  return momentEventOf(moment.author);
 }
 
 /**
@@ -151,13 +159,15 @@ async function writeMomentMemory(momentId: number, kind: MomentMemoryKind): Prom
     return;
   }
 
-  insertEpisode(
-    eventTextFor(moment, kind, comments),
+  const eventId = insertEpisode(
+    eventTextFor(moment),
     extraction.gist,
     extraction.summary,
     extraction.priority,
     (extraction.keywords ?? []).join(",")
   );
+  // 事件标题是「我的心情动态」这种书面说法，用户嘴上说的是「朋友圈/动态」
+  addEventAliases(eventId, MOMENT_EVENT_ALIASES);
   logDebug("动态记忆", `已写入记忆: #${momentId}（${kind}）→ ${extraction.gist}`);
 }
 
@@ -178,6 +188,13 @@ export function recordMomentExchangeMemory(momentId: number): void {
 /** AI 自身动态存档：供检索时自我引用 */
 export function recordAiMomentMemory(momentId: number): void {
   writeMomentMemory(momentId, "ai_moment").catch((err) =>
+    console.error("[moments] 动态记忆写入异常:", err)
+  );
+}
+
+/** 好友动态落记忆：AI 之后能记得「朋友圈里谁发过什么」 */
+export function recordFriendMomentMemory(momentId: number): void {
+  writeMomentMemory(momentId, "friend_moment").catch((err) =>
     console.error("[moments] 动态记忆写入异常:", err)
   );
 }

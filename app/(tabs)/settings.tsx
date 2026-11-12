@@ -99,6 +99,7 @@ const THRESHOLD_FIELDS: ConfigField[] = [
   { key: "friend_moment_probability", label: "好友每日发帖概率", type: "number", description: "每位好友每天发一条动态的概率（0~1，默认 0.35），太高会抢主角戏份" },
   { key: "friend_comment_probability", label: "好友评论概率", type: "number", description: "每条动态招来一位好友评论的概率（0~1，默认 0.3）" },
   { key: "friend_roster_visible_days", label: "花名册活跃窗口", type: "number", description: "只把最近这么多天有互动（或刚建立关系）的好友写进状态区，默认 14 天" },
+  { key: "recent_moment_recall_weight", label: "近期动态回想权重", type: "number", description: "每 1× 动态新近度折算的灵光一闪概率（默认 0.2）：用户刚评论/自己刚发帖 = 4× → 约 85%" },
 ];
 
 // 提示词分组配置

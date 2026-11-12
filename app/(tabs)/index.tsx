@@ -7,7 +7,7 @@ import dayjs from "dayjs";
 import { useChatStore } from "@/store/chatStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useTheme } from "@/theme/useTheme";
-import { getDebutedFriends } from "@/db/queries";
+import { getDebutedFriends, hasFriendAppeared } from "@/db/queries";
 import { friendAvatarText } from "@/friends/persona";
 
 /** 按时段打招呼（只给时段感，不报精确时间） */
@@ -64,8 +64,13 @@ export default function ConversationListScreen() {
   const mainMessages = messages.filter((m) => !m.friend_id);
   const lastMessage = mainMessages.length > 0 ? mainMessages[mainMessages.length - 1] : null;
 
-  // 好友入口：登场之后才出现，按最近一条私聊排序（没聊过的排在后面）
+  // 好友入口：先在朋友圈见过这个人（ta 发过动态/评论），或已经私聊过，才进会话列表——
+  // 光到登场时间就凭空多出一个陌生联系人太出戏
+  const chattedFriendIds = new Set(
+    messages.filter((m) => m.friend_id).map((m) => m.friend_id as number)
+  );
   const friendRows = getDebutedFriends()
+    .filter((f) => chattedFriendIds.has(f.id) || hasFriendAppeared(f.id))
     .map((f) => {
       const thread = messages.filter((m) => m.friend_id === f.id);
       return { friend: f, last: thread.length > 0 ? thread[thread.length - 1] : null };
@@ -135,7 +140,7 @@ export default function ConversationListScreen() {
           </View>
         </Pressable>
 
-        {/* 好友：登场之后才出现在会话列表；点头像进私聊 */}
+        {/* 好友：在朋友圈见过之后才出现在会话列表；点头像进私聊 */}
         {friendRows.length > 0 ? (
           <>
             <Text style={[styles.sectionLabel, { color: colors.textMuted }]}>朋友</Text>
