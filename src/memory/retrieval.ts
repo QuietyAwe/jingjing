@@ -31,6 +31,14 @@ export interface RetrievalResult {
   keywords: string[];
 }
 
+/** 相对截断：与最相关候选分数差距过大的不再注入，避免噪音凑数 */
+const HIT_SCORE_RATIO = 0.5;
+
+/** 命中门槛：短输入要求关键词全部命中，长输入至少 2 个不同关键词命中 */
+function minHitScore(keywords: string[]): number {
+  return keywords.length <= 2 ? keywords.length : 2;
+}
+
 /**
  * 按「关键词重合度」给候选事件排序
  *
@@ -43,11 +51,13 @@ function rankByOverlap<T extends { active_weight: number }>(
   pick: (item: T) => string,
   keywords: string[]
 ): T[] {
-  return candidates
+  const min = minHitScore(keywords);
+  const ranked = candidates
     .map((item) => ({ item, score: scoreOverlap(pick(item), keywords) }))
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score || b.item.active_weight - a.item.active_weight)
-    .map((x) => x.item);
+    .filter((x) => x.score >= min)
+    .sort((a, b) => b.score - a.score || b.item.active_weight - a.item.active_weight);
+  const top = ranked[0]?.score ?? 0;
+  return ranked.filter((x) => x.score >= top * HIT_SCORE_RATIO).map((x) => x.item);
 }
 
 /** 动态新近度窗口：超过这个时长，帖子不再算「刚发生」 */
@@ -238,7 +248,7 @@ export function retrieve(userInput: string): RetrievalResult {
     hitEvents.forEach((e) => hitEventIds.add(e.id));
   }
 
-  // 4. 刷新命中事件权重为 100 + 更新 last_accessed + 批量获取关联片段
+  // 4. 仅达标命中才刷新权重（写库）+ 批量获取关联片段
   const hitFragments = new Map<number, MemoryFragment[]>();
   if (hitEvents.length > 0) {
     for (const event of hitEvents) {
@@ -305,7 +315,7 @@ export function retrieve(userInput: string): RetrievalResult {
     // 注入一句话印象，否则 AI 只拿到事件标题、根本没法接话
     epiphany = { ...picked.event, gist: picked.fragment.gist || picked.event.event_text };
     epiphanyNote = `${picked.event.event_text.slice(0, 30)}（近期动态 x${picked.boost}, P=${pRecent.toFixed(2)}）`;
-  } else if (Math.random() < epiphany_trigger_probability) {
+  } else if (keywords.length > 0 && Math.random() < epiphany_trigger_probability) {
     // 冷记忆通道：动态通道没掷中，或根本没有近期动态
     const cold = withLiveWeight.filter(
       (e) => e.live_weight < COLD_MEMORY_MAX_WEIGHT && !topIds.has(e.id)
@@ -314,7 +324,7 @@ export function retrieve(userInput: string): RetrievalResult {
       // 优先挑「和当前输入有弱关联」的冷记忆——真实的突然想起是被什么触发的，不是掷骰子
       const scored = cold
         .map((e) => ({ e, s: scoreOverlap(e.event_text, keywords) }))
-        .filter((x) => x.s > 0)
+        .filter((x) => x.s >= minHitScore(keywords))
         .sort((a, b) => b.s - a.s);
       const pool = scored.length > 0 ? scored.slice(0, 3).map((x) => x.e) : cold;
       const picked = pool[Math.floor(Math.random() * pool.length)];
