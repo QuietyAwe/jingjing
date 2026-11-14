@@ -80,6 +80,8 @@ export interface ConsolidationMessage {
   role: string;
   content: string;
   timestamp?: string;
+  /** 情境旁白：不标时刻、也不推进分段计时游标 */
+  is_state_note?: boolean;
 }
 
 /**
@@ -94,6 +96,10 @@ function stampHistory(
   const anchorDay = dayjs(asOf);
   let last: dayjs.Dayjs | null = null;
   return snapshot.map((m) => {
+    // 情境旁白不标时刻，也不推进游标：让紧随其后的真实消息承担段首
+    if (m.is_state_note) {
+      return { role: m.role as "user" | "assistant", content: m.content };
+    }
     const t = m.timestamp ? dayjs(m.timestamp) : null;
     let content = m.content;
     if (t?.isValid()) {

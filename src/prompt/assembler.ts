@@ -119,7 +119,8 @@ export function assemblePrompt(
   //    前缀缓存从那条起全部失效。每条固定带时间，历史渲染结果就永不随轮次变化
   const historyMessages: HistoryMessage[] = chatHistory.map((m) => {
     const isUser = m.role === "user";
-    const showTime = isUser && m.timestamp;
+    // 情境旁白不带时刻：它是背景注记，不是用户在该时刻说的话
+    const showTime = isUser && m.timestamp && !m.is_state_note;
     const stamp = showTime ? dayjs(m.timestamp) : null;
     // 当天只写时刻（日期已由前置的「今天是…」说明）；更早的补日期，跨天也分得清。
     // 跨天那一刻前缀正好跟着日期锚点一起变，不额外多付一次缓存失效

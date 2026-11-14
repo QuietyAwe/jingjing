@@ -806,6 +806,11 @@ export default function ChatScreen() {
           onConfirm: () => {
             if (!target) return;
             skipScrollRef.current = true;
+            // 连带删掉紧挨在前、由这条消息触发的情境注记，避免残留孤立旁白
+            const all = useChatStore.getState().messages;
+            const i = all.findIndex((m) => m.id === target.id);
+            const prev = i > 0 ? all[i - 1] : undefined;
+            if (prev && prev.is_state_note) deleteMessage(prev.id);
             deleteMessage(target.id);
             setActionTarget(null);
           },

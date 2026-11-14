@@ -244,6 +244,7 @@ export async function runConsolidation(
     content: string;
     game_id?: number;
     friend_id?: number;
+    is_state_note?: boolean;
   }>
 ): Promise<boolean> {
   const cursorBefore = resolveCursor(recentMessages);
@@ -294,7 +295,7 @@ export async function runConsolidation(
     // 注意：被跳过的只是「不参与提取」，游标仍会推进——否则一整段对局会让巩固反复空转
     const snapshot = windowMessages
       .filter((m) => !m.game_id && !m.friend_id)
-      .map((m) => ({ role: m.role, content: m.content, timestamp: m.timestamp }));
+      .map((m) => ({ role: m.role, content: m.content, timestamp: m.timestamp, is_state_note: m.is_state_note }));
     // 批末消息时间 = 这批对话实际发生的时刻：提取提示词与落库时间戳都用它，
     // 避免把历史对话当成「现在」巩固（否则几天前的事被写成「今天」）
     const batchEndTs =
