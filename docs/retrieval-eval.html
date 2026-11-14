@@ -1,0 +1,472 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>记忆检索召回评估 — jingjing</title>
+<style>
+:root{--bg:#faf9f7;--fg:#252321;--mut:#7a746c;--line:#e6e1da;--acc:#4a6fa5;--red:#c0392b;--green:#2e7d52;--amber:#b8860b}
+*{box-sizing:border-box}body{margin:0;padding:32px 28px;background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1400px;margin:0 auto}h1{font-size:24px;margin:0 0 6px}h2{font-size:17px;margin:34px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+.meta{color:var(--mut);font-size:13px;margin-bottom:24px}.cards{display:flex;gap:16px;flex-wrap:wrap}
+.card{flex:1;min-width:250px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:18px 20px}
+.lab{color:var(--mut);font-size:12px;letter-spacing:.04em}.big{font-size:34px;font-weight:700;margin:6px 0 0;color:var(--acc)}
+.sub{color:var(--mut);font-size:12px;margin-bottom:14px}.kv{display:flex;justify-content:space-between;padding:5px 0;border-top:1px solid #f1eee9;font-size:13px}
+.kv span{color:var(--mut)}.bad{color:var(--red)}.good{color:var(--green)}
+table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--line);border-radius:8px;overflow:hidden;font-size:12.5px}
+th{background:#f4f1ec;text-align:left;padding:9px 10px;font-weight:600;color:#55504a;white-space:nowrap}
+td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{background:#fcfbf9}
+.grp{color:var(--mut);white-space:nowrap}.q{font-weight:600;min-width:150px}.kw{color:var(--mut);font-size:11.5px;max-width:210px}
+.old{color:#a0988c}.new{color:var(--fg);font-weight:600}.note{color:var(--mut);font-size:11.5px}
+.ok{color:var(--green);font-weight:600}.err{color:var(--red);font-weight:600}.warn{color:var(--amber);font-weight:600}
+.box{background:#fff;border:1px solid var(--line);border-left:3px solid var(--acc);border-radius:6px;padding:14px 18px;margin:14px 0;font-size:13px}
+.box b{color:var(--acc)}ul{margin:8px 0 0;padding-left:20px}li{margin:5px 0}code{background:#f1eee9;padding:1px 5px;border-radius:4px;font-size:12px}
+#findings{white-space:pre-wrap}
+</style></head><body><div class="wrap">
+<h1>记忆检索召回评估</h1>
+<div class="meta">jingjing · dev 6a40fff · 44 条真实陪伴场景用例 · 13 条模拟往事 · 分词与打分函数取自真实源码</div>
+
+<h2>总体指标（改动前 / 改动后）</h2>
+<div class="cards">
+  <div class="card">
+    <div class="lab">V0 改动前 score&gt;0</div>
+    <div class="big">68.2%</div><div class="sub">逐例完全正确 30/44</div>
+    <div class="kv"><span>Precision</span><b>64.9%</b></div>
+    <div class="kv"><span>Recall</span><b>80.0%</b></div>
+    <div class="kv"><span>副作用误触发</span><b class="bad">8 例</b></div>
+    <div class="kv"><span>TP / FP / FN</span><b>24 / 13 / 6</b></div>
+  </div>
+  <div class="card">
+    <div class="lab">V1 当前改动 minHitScore+截断</div>
+    <div class="big">54.5%</div><div class="sub">逐例完全正确 24/44</div>
+    <div class="kv"><span>Precision</span><b>75.0%</b></div>
+    <div class="kv"><span>Recall</span><b>40.0%</b></div>
+    <div class="kv"><span>副作用误触发</span><b class="bad">4 例</b></div>
+    <div class="kv"><span>TP / FP / FN</span><b>12 / 4 / 18</b></div>
+  </div></div>
+<div class="box"><b>指标口径</b>：逐例「完全正确」= 命中集合与理想集合完全一致；Precision = 正确命中 / 全部命中；Recall = 正确命中 / 全部应命中；「副作用误触发」= 本不该命中却命中（会写库刷权重、补氛围记忆、擦亮片段）。理想集合按真实陪伴语义人工标注。</div>
+
+<h2>修正方案对照</h2>
+<table><thead><tr><th>方案</th><th>逐例完全正确</th><th>Precision</th><th>Recall</th><th>副作用误触发</th><th>TP / FP / FN</th></tr></thead><tbody><tr><td>V0 改动前 score&gt;0</td><td><b>30/44</b> (68.2%)</td><td>64.9%</td><td>80.0%</td><td class="bad">8 例</td><td>24 / 13 / 6</td></tr><tr><td>V1 当前改动 minHitScore+截断</td><td><b>24/44</b> (54.5%)</td><td>75.0%</td><td>40.0%</td><td class="bad">4 例</td><td>12 / 4 / 18</td></tr><tr><td>V2 短输入严格 / 长输入 ≥1 + 截断</td><td><b>30/44</b> (68.2%)</td><td>67.6%</td><td>76.7%</td><td class="bad">7 例</td><td>23 / 11 / 7</td></tr><tr><td>V3 短输入严格 / 长输入 ≥1 / 不截断</td><td><b>30/44</b> (68.2%)</td><td>66.7%</td><td>73.3%</td><td class="bad">7 例</td><td>22 / 11 / 8</td></tr></tbody></table>
+<div class="box">V2/V3 为验证根因的候选修正：仅对短输入（关键词 ≤2）要求全部命中，长输入放宽回 ≥1，其余不变。</div>
+
+<h2>分组表现</h2>
+<table><thead><tr><th>场景组</th><th>改动前正确</th><th>改动后正确</th><th>改动后仍误命中</th></tr></thead><tbody><tr><td>A 寒暄</td><td>5/9</td><td>6/9</td><td>3</td></tr><tr><td>B 短实词</td><td>5/6</td><td>5/6</td><td>0</td></tr><tr><td>C 换说法</td><td>6/6</td><td>2/6</td><td>0</td></tr><tr><td>D 情绪</td><td>1/5</td><td>1/5</td><td>0</td></tr><tr><td>E 闲聊</td><td>4/5</td><td>5/5</td><td>0</td></tr><tr><td>F 身份名</td><td>2/3</td><td>0/3</td><td>1</td></tr><tr><td>G 长句</td><td>2/3</td><td>1/3</td><td>0</td></tr><tr><td>H 时间</td><td>3/3</td><td>1/3</td><td>0</td></tr><tr><td>I 边界</td><td>2/4</td><td>3/4</td><td>0</td></tr></tbody></table>
+
+<h2>逐例明细</h2>
+<table><thead><tr><th>组</th><th>用户输入</th><th>分词结果</th><th>理想命中</th><th>改动前命中</th><th>改动后命中</th><th>判定</th><th>考察点</th></tr></thead><tbody><tr>
+    <td class="grp">A 寒暄</td>
+    <td class="q">晚上好</td>
+    <td class="kw">晚上好 / 上好</td>
+    <td>—</td>
+    <td class="old">早安问候</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">问候（改动前误命中 3 条）</td>
+  </tr><tr>
+    <td class="grp">A 寒暄</td>
+    <td class="q">早上好</td>
+    <td class="kw">早上好 / 早上 / 上好</td>
+    <td>—</td>
+    <td class="old">早安问候</td>
+    <td class="new">早安问候</td>
+    <td><span class="err">✗ 误命中</span></td>
+    <td class="note">问候，库里恰有同名记忆</td>
+  </tr><tr>
+    <td class="grp">A 寒暄</td>
+    <td class="q">早安</td>
+    <td class="kw">早安</td>
+    <td>—</td>
+    <td class="old">早安问候</td>
+    <td class="new">早安问候</td>
+    <td><span class="err">✗ 误命中</span></td>
+    <td class="note">问候</td>
+  </tr><tr>
+    <td class="grp">A 寒暄</td>
+    <td class="q">晚安</td>
+    <td class="kw">晚安</td>
+    <td>—</td>
+    <td class="old">睡前晚安</td>
+    <td class="new">睡前晚安</td>
+    <td><span class="err">✗ 误命中</span></td>
+    <td class="note">道别，库里恰有同名记忆</td>
+  </tr><tr>
+    <td class="grp">A 寒暄</td>
+    <td class="q">在吗</td>
+    <td class="kw">在吗</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">开场</td>
+  </tr><tr>
+    <td class="grp">A 寒暄</td>
+    <td class="q">嗯嗯</td>
+    <td class="kw">嗯嗯</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">应答</td>
+  </tr><tr>
+    <td class="grp">A 寒暄</td>
+    <td class="q">哈哈哈</td>
+    <td class="kw">哈哈哈 / 哈哈</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">笑声</td>
+  </tr><tr>
+    <td class="grp">A 寒暄</td>
+    <td class="q">谢谢啦</td>
+    <td class="kw">谢谢啦 / 谢谢 / 谢啦</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">致谢</td>
+  </tr><tr>
+    <td class="grp">A 寒暄</td>
+    <td class="q">拜拜</td>
+    <td class="kw">拜拜</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">道别</td>
+  </tr><tr>
+    <td class="grp">B 短实词</td>
+    <td class="q">吃面</td>
+    <td class="kw">吃面</td>
+    <td>巷口面馆</td>
+    <td class="old">巷口面馆</td>
+    <td class="new">巷口面馆</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">两字实词</td>
+  </tr><tr>
+    <td class="grp">B 短实词</td>
+    <td class="q">加班</td>
+    <td class="kw">加班</td>
+    <td>加班到很晚</td>
+    <td class="old">加班到很晚</td>
+    <td class="new">加班到很晚</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">两字实词</td>
+  </tr><tr>
+    <td class="grp">B 短实词</td>
+    <td class="q">团子</td>
+    <td class="kw">团子</td>
+    <td>团子橘猫</td>
+    <td class="old">团子橘猫</td>
+    <td class="new">团子橘猫</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">宠物名</td>
+  </tr><tr>
+    <td class="grp">B 短实词</td>
+    <td class="q">咖啡</td>
+    <td class="kw">咖啡</td>
+    <td>手冲咖啡</td>
+    <td class="old">手冲咖啡</td>
+    <td class="new">手冲咖啡</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">两字实词</td>
+  </tr><tr>
+    <td class="grp">B 短实词</td>
+    <td class="q">猫</td>
+    <td class="kw">无</td>
+    <td>团子橘猫</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">单字（分词会丢弃）</td>
+  </tr><tr>
+    <td class="grp">B 短实词</td>
+    <td class="q">大理</td>
+    <td class="kw">大理</td>
+    <td>打算去大理</td>
+    <td class="old">打算去大理</td>
+    <td class="new">打算去大理</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">地名</td>
+  </tr><tr>
+    <td class="grp">C 换说法</td>
+    <td class="q">还记得那家吃面的地方吗</td>
+    <td class="kw">还记 / 记得 / 得那 / 那家 / 家吃 / 吃面 / 面的 / 的地 / 地方 / 方吗</td>
+    <td>巷口面馆</td>
+    <td class="old">巷口面馆</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">不用原标题</td>
+  </tr><tr>
+    <td class="grp">C 换说法</td>
+    <td class="q">我妈做的番茄炒蛋</td>
+    <td class="kw">我妈 / 妈做 / 做的 / 的番 / 番茄 / 茄炒 / 炒蛋</td>
+    <td>妈妈做的番茄炒蛋</td>
+    <td class="old">妈妈做的番茄炒蛋</td>
+    <td class="new">妈妈做的番茄炒蛋</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">我妈</td>
+  </tr><tr>
+    <td class="grp">C 换说法</td>
+    <td class="q">我母亲最近身体还好吗</td>
+    <td class="kw">我母 / 母亲 / 亲最 / 近身 / 身体 / 体还 / 还好 / 好吗</td>
+    <td>妈妈做的番茄炒蛋</td>
+    <td class="old">妈妈做的番茄炒蛋</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">母亲</td>
+  </tr><tr>
+    <td class="grp">C 换说法</td>
+    <td class="q">老妈的拿手菜</td>
+    <td class="kw">老妈 / 妈的 / 的拿 / 拿手 / 手菜</td>
+    <td>妈妈做的番茄炒蛋</td>
+    <td class="old">妈妈做的番茄炒蛋</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">老妈</td>
+  </tr><tr>
+    <td class="grp">C 换说法</td>
+    <td class="q">老板又否了我的方案</td>
+    <td class="kw">老板 / 板又 / 又否 / 否了 / 了我 / 我的 / 的方 / 方案</td>
+    <td>被领导批评</td>
+    <td class="old">被领导批评</td>
+    <td class="new">被领导批评</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">老板/否了</td>
+  </tr><tr>
+    <td class="grp">C 换说法</td>
+    <td class="q">上次那只小橘猫</td>
+    <td class="kw">上次 / 次那 / 那只 / 只小 / 小橘 / 橘猫</td>
+    <td>团子橘猫</td>
+    <td class="old">团子橘猫</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">橘猫</td>
+  </tr><tr>
+    <td class="grp">D 情绪</td>
+    <td class="q">今天好累啊</td>
+    <td class="kw">天好 / 好累 / 累啊</td>
+    <td>加班到很晚</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">纯情绪，无实词</td>
+  </tr><tr>
+    <td class="grp">D 情绪</td>
+    <td class="q">被老板骂了，心里难受</td>
+    <td class="kw">被老 / 老板 / 板骂 / 骂了 / 心里 / 里难 / 难受</td>
+    <td>被领导批评</td>
+    <td class="old">被领导批评</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">情绪 + 事件线索</td>
+  </tr><tr>
+    <td class="grp">D 情绪</td>
+    <td class="q">压力好大，睡不着</td>
+    <td class="kw">压力 / 力好 / 好大 / 睡不着 / 睡不 / 不着</td>
+    <td>加班到很晚</td>
+    <td class="old">巷口面馆、加班到很晚</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">情绪，无线索</td>
+  </tr><tr>
+    <td class="grp">D 情绪</td>
+    <td class="q">有点想家</td>
+    <td class="kw">有点 / 点想 / 想家</td>
+    <td>妈妈做的番茄炒蛋、童年外婆家</td>
+    <td class="old">妈妈做的番茄炒蛋、感冒发烧</td>
+    <td class="new">妈妈做的番茄炒蛋</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">情绪，多关联</td>
+  </tr><tr>
+    <td class="grp">D 情绪</td>
+    <td class="q">心情低落</td>
+    <td class="kw">心情 / 情低 / 低落</td>
+    <td>—</td>
+    <td class="old">感冒发烧</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">无对应记忆</td>
+  </tr><tr>
+    <td class="grp">E 闲聊</td>
+    <td class="q">今天天气真好</td>
+    <td class="kw">天天 / 天气 / 气真 / 真好</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">无记忆相关</td>
+  </tr><tr>
+    <td class="grp">E 闲聊</td>
+    <td class="q">你在干嘛呢</td>
+    <td class="kw">你在 / 在干 / 干嘛 / 嘛呢</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">无记忆相关</td>
+  </tr><tr>
+    <td class="grp">E 闲聊</td>
+    <td class="q">讲个笑话吧</td>
+    <td class="kw">讲个 / 个笑 / 笑话 / 话吧</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">无记忆相关</td>
+  </tr><tr>
+    <td class="grp">E 闲聊</td>
+    <td class="q">你觉得呢</td>
+    <td class="kw">你觉 / 觉得 / 得呢</td>
+    <td>—</td>
+    <td class="old">巷口面馆、被领导批评、周末去西山</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">无记忆相关</td>
+  </tr><tr>
+    <td class="grp">E 闲聊</td>
+    <td class="q">随便聊聊</td>
+    <td class="kw">随便 / 便聊 / 聊聊</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">无记忆相关</td>
+  </tr><tr>
+    <td class="grp">F 身份名</td>
+    <td class="q">私藏你还记得我妈吗</td>
+    <td class="kw">藏你 / 你还 / 还记 / 记得 / 得我 / 我妈 / 妈吗</td>
+    <td>妈妈做的番茄炒蛋</td>
+    <td class="old">妈妈做的番茄炒蛋</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">AI 名应被屏蔽</td>
+  </tr><tr>
+    <td class="grp">F 身份名</td>
+    <td class="q">阿柚今天又加班了</td>
+    <td class="kw">柚今 / 天又 / 又加 / 加班 / 班了</td>
+    <td>加班到很晚</td>
+    <td class="old">加班到很晚</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">昵称应被屏蔽</td>
+  </tr><tr>
+    <td class="grp">F 身份名</td>
+    <td class="q">私藏，晚安</td>
+    <td class="kw">晚安</td>
+    <td>—</td>
+    <td class="old">睡前晚安</td>
+    <td class="new">睡前晚安</td>
+    <td><span class="err">✗ 误命中</span></td>
+    <td class="note">带名字的问候</td>
+  </tr><tr>
+    <td class="grp">G 长句</td>
+    <td class="q">昨天加班到很晚，回来路上又去巷口面馆吃了碗面，还想起我妈做的番茄炒蛋</td>
+    <td class="kw">天加 / 加班 / 到很 / 回来 / 路上 / 上又 / 去巷 / 口面 / 馆吃 / 吃了 / 碗面 / 想起 / 我妈 / 妈做 / 的番 / 茄炒</td>
+    <td>加班到很晚、巷口面馆、妈妈做的番茄炒蛋</td>
+    <td class="old">妈妈做的番茄炒蛋、加班到很晚、巷口面馆</td>
+    <td class="new">妈妈做的番茄炒蛋、加班到很晚</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">三主题</td>
+  </tr><tr>
+    <td class="grp">G 长句</td>
+    <td class="q">最近压力大，团子还生病了，都没好好吃饭</td>
+    <td class="kw">近压 / 压力 / 力大 / 团子 / 子还 / 还生 / 生病 / 病了 / 都没 / 没好 / 好好 / 好吃</td>
+    <td>加班到很晚、团子橘猫、感冒发烧</td>
+    <td class="old">团子橘猫</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">三主题，表述模糊</td>
+  </tr><tr>
+    <td class="grp">G 长句</td>
+    <td class="q">周末想去爬山，顺便把大理的机票订了</td>
+    <td class="kw">周末 / 末想 / 想去 / 去爬 / 爬山 / 顺便 / 便把 / 把大 / 大理 / 理的 / 的机 / 机票 / 票订 / 订了</td>
+    <td>周末去西山、打算去大理</td>
+    <td class="old">周末去西山、打算去大理</td>
+    <td class="new">周末去西山、打算去大理</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">双主题</td>
+  </tr><tr>
+    <td class="grp">H 时间</td>
+    <td class="q">昨天说的那个爬山</td>
+    <td class="kw">天说 / 说的 / 的那 / 个爬 / 爬山</td>
+    <td>周末去西山</td>
+    <td class="old">周末去西山</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">时间词被停用</td>
+  </tr><tr>
+    <td class="grp">H 时间</td>
+    <td class="q">下周三的面试</td>
+    <td class="kw">下周 / 周三 / 三的 / 的面 / 面试</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">upcoming 由状态区负责，不进记忆检索</td>
+  </tr><tr>
+    <td class="grp">H 时间</td>
+    <td class="q">上周感冒好点没</td>
+    <td class="kw">上周 / 周感 / 感冒 / 冒好 / 好点 / 点没</td>
+    <td>感冒发烧</td>
+    <td class="old">感冒发烧</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">时间词被停用</td>
+  </tr><tr>
+    <td class="grp">I 边界</td>
+    <td class="q">晚上好啊，今天好累</td>
+    <td class="kw">上好 / 好啊 / 天好 / 好累</td>
+    <td>加班到很晚</td>
+    <td class="old">早安问候</td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
+    <td class="note">寒暄 + 实质</td>
+  </tr><tr>
+    <td class="grp">I 边界</td>
+    <td class="q">不是吃面，是火锅</td>
+    <td class="kw">不是 / 是吃 / 吃面 / 是火锅 / 是火 / 火锅</td>
+    <td>—</td>
+    <td class="old">巷口面馆</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">否定句</td>
+  </tr><tr>
+    <td class="grp">I 边界</td>
+    <td class="q">😂😂</td>
+    <td class="kw">无</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">纯表情</td>
+  </tr><tr>
+    <td class="grp">I 边界</td>
+    <td class="q">嗯…那个…我想说</td>
+    <td class="kw">我想说 / 我想 / 想说</td>
+    <td>—</td>
+    <td class="old">—</td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
+    <td class="note">纯语气词</td>
+  </tr></tbody></table>
+
+<h2>评估边界</h2>
+<div class="box"><ul>
+<li>分词（<code>tokenize.ts</code>）、屏蔽词（<code>isBlockedGram</code>）、门槛与打分（<code>minHitScore</code> / <code>rankByOverlap</code>）均取自真实源码并实际执行；SQL 粗召回用等价的字符串包含模拟。</li>
+<li>不含权重衰减、灵光一闪概率通道、Prompt 拼装；未模拟别名表与真实多片段库（每条事件用 2 条片段拼接），真实库的片段更多，召回可能略高于本评估。</li>
+<li>理想命中按「真实陪伴场景下什么算恰当」人工标注，情绪类用例带有语义期待，纯字符串检索天然难以满足——这正是评估要暴露的。</li>
+<li>复跑：<code>node --experimental-strip-types tests/retrieval.eval.mjs</code>，会重新生成本报告。</li>
+</ul></div>
+
+<h2>结论</h2>
+<div class="box" id="findings">1. 当前改动（V1）是净负收益。Precision 64.9% → 75.0%，但 Recall 80.0% → 40.0%，逐例完全正确 68.2% → 54.5%。副作用误触发 8 → 4 例确有改善，代价是 44 条里多错 6 条。
+
+2. 回归集中在最核心的场景：换说法 6/6 → 2/6、时间词 3/3 → 1/3、身份名 2/3 → 0/3、多主题长句 2/3 → 1/3；改善只落在寒暄 5/9 → 6/9、闲聊 4/5 → 5/5、边界 2/4 → 3/4。也就是「不翻旧账」变好了，「想起往事」明显变差——后者才是陪伴 App 的主功能。
+
+3. 根因：minHitScore 把门槛绑在「输入关键词总数」上。bigram 枚举让长句必然带一堆噪音 bigram，而一条真正相关的记忆往往只共享 1 个实词；长输入被要求 ≥2 分，「我母亲最近身体还好吗」「阿柚今天又加班了」「上周感冒好点没」全被挡掉。相对截断又进一步丢掉多主题长句里的次相关事件。
+
+4. 单纯放宽回不去：V2/V3 把 Recall 恢复到 76.7%、完全正确回到 68.2%，但副作用误触发回升到 7 例。「早上好 / 早安 / 晚安」是真实词且库里有同名记忆，属于触发时机问题，与打分门槛无关。
+
+5. 建议换判据，而不是继续调数值：① 命中只认关键字段（event_text / alias / keywords），summary / gist 的模板话不算实质命中——等于复用写入时 LLM 已做过的语义判断；② 单词问候交给会话开场信号；③ 单字「猫」被分词层丢弃，单独处理。三者都不需要词表。
+
+6. 固有短板：情绪倾诉 D 组改动前后都是 1/5，纯字符串检索无法从「今天好累」联想到「加班到很晚」，属架构限制，不是本次改动引入。</div>
+</div></body></html>
