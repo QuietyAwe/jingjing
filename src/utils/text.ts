@@ -26,7 +26,7 @@ export function revealTotalMsForText(text: string): number {
 }
 
 /**
- * 兜底：把 summary/states 里写死的事发日期换回 [time] 占位符。
+ * 兜底：把 gist/summary 里写死的事发日期换回 [time] 占位符。
  *
  * 提取指令要求事发时间用 [time]（渲染成「昨天/前天」这类相对时间），
  * 但模型看到「当前时间」后有时会直接写「10月10日」——那种日期过几天就成了错误信息。

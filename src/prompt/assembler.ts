@@ -6,7 +6,13 @@
 // 超限时按权重从低到高剔除记忆区事件
 // ============================================================
 
-import { getFragmentsByEventIds, getUserInfo, activeStates, getUpcomingEvents } from "@/db/queries";
+import {
+  getUserInfo,
+  getActiveConditions,
+  isConditionStale,
+  getUpcomingEvents,
+  getMeta,
+} from "@/db/queries";
 import type {
   UserInfo,
   MemoryEvent,
@@ -17,8 +23,8 @@ import type {
 import { getPrompts, getPlaceholders, getThresholds } from "./config";
 import { DETAIL_VISIBLE_WEIGHT, calculateWeight } from "@/memory/decay";
 import { useSettingsStore } from "@/store/settingsStore";
-import { WEEKDAYS, formatNow, formatTodayLine } from "@/utils/holidays";
-import { formatFriendRoster } from "@/friends/persona";
+import { formatNow, formatTodayLine } from "@/utils/holidays";
+import { listNameMatchFriends, matchFriendInText } from "@/friends/persona";
 import dayjs from "dayjs";
 
 /** 历史消息：摘要条带 is_digest 标记，截断时最后才丢 */
@@ -56,11 +62,18 @@ function getUserNickname(userInfo?: UserInfo | null): string {
 export interface AssembledPrompt {
   /** 稳定部分：系统人设（不常变化，高缓存命中） */
   system: string;
-  /** 易变部分：状态区（每次巩固可能变化） */
+  /**
+   * 今天的时间锚点（日期 + 周几 + 假期/调休语义，不带时刻）
+   * 同一天内恒定，作为独立 system 消息紧跟人设，让它在缓存前缀里
+   */
+  today: string;
+  /** 状态区：只有用户那一侧的画像（两次巩固之间稳定） */
   state: string;
   /** 易变部分：记忆区（每次检索可能变化） */
   memory: string;
   messages: HistoryMessage[];
+  /** 裁剪结果：降级/删了多少记忆块，以及裁完仍超出预算多少 token（历史不裁） */
+  trimmed: { degradedBlocks: number; droppedBlocks: number; overBudget: number };
 }
 
 /**
@@ -75,41 +88,45 @@ export function assemblePrompt(
   topEvents: (MemoryEvent & { live_weight: number })[],
   epiphany: (MemoryEvent & { gist: string }) | null,
   chatHistory: ChatMessage[],
-  currentStatus?: string,
   hitFragments?: Map<number, MemoryFragment[]>,
   tokenBudget: number = getThresholds().context_token_budget,
   cuedFragmentIds?: Set<number>,
-  friendCard?: FriendCardContext,
+  friendMention?: FriendMentionContext,
   sessionDigest?: string
 ): AssembledPrompt {
   const prompts = getPrompts();
-  const nickname = getUserNickname(userInfo);
   const now = dayjs(); // 预计算当前时间，复用
 
-  // 1. 稳定部分：系统人设（替换 [user]）
-  const systemPromptText = prompts.system_prompt.replace(/\[user\]/gi, nickname);
+  // 1. 稳定部分：系统人设（替换 [user] [ai]）+ 当天日期锚点
+  const systemPromptText = applyIdentityPlaceholders(prompts.system_prompt, userInfo);
+  // 日期只到「天」，放在最前面不会随时间变化而破坏缓存；时刻交给消息时间戳
+  const todayText = formatTodayLine(now);
 
-  // 2. 易变部分：状态区 + 记忆区（分开返回，便于缓存优化排列）
-  const stateText = buildStateSection(userInfo, currentStatus, now);
+  // 2. 状态区：只有用户那一侧（相对稳定）；AI 自己的情境由历史里的状态注记提供
+  const stateText = buildStateSection(userInfo, now);
+
   const memoryBlocks = buildMemorySection(
     userInfo,
     topEvents,
     epiphany,
     hitFragments,
     cuedFragmentIds,
-    friendCard
+    friendMention
   );
 
-  // 3. 转换历史为 API 格式（最后两条用户消息带时间戳，让 AI 感知时间流动）
+  // 3. 转换历史为 API 格式（用户消息一律带时间戳，AI 消息不带）
+  //    不能只给「最后 N 条」带：上一轮的最末一条下一轮就变回无前缀，等于改写历史中段，
+  //    前缀缓存从那条起全部失效。每条固定带时间，历史渲染结果就永不随轮次变化
   const historyMessages: HistoryMessage[] = chatHistory.map((m) => {
-    // 用户消息：最后两条带时间；AI 消息：不带时间（避免影响输出风格）
     const isUser = m.role === "user";
-    const lastTwoUsers = chatHistory.filter((x) => x.role === "user").slice(-2);
-    const showTime = isUser && m.timestamp && lastTwoUsers.some((x) => x.id === m.id);
-    // 带周几（「10/7 周三 15:30」）：让 AI 知道这条消息发生在工作日还是周末
+    const showTime = isUser && m.timestamp;
     const stamp = showTime ? dayjs(m.timestamp) : null;
+    // 当天只写时刻（日期已由前置的「今天是…」说明）；更早的补日期，跨天也分得清。
+    // 跨天那一刻前缀正好跟着日期锚点一起变，不额外多付一次缓存失效
     const timePrefix = stamp
-      ? `[${stamp.format("M/D")} ${WEEKDAYS[stamp.day()]} ${stamp.format("HH:mm")}] `
+      ? stamp.isSame(now, "day")
+        ? `[${stamp.format("HH:mm")}] `
+        : `[${stamp.format("M/D HH:mm")}] `
       : "";
     return {
       // getHistory 会把已结束对局合并成一条 role:"system" 的 [游戏回顾] 摘要；
@@ -120,15 +137,23 @@ export function assemblePrompt(
     };
   });
 
-  // 已巩固的对话由会话摘要代表：放在历史最前面，模型才知道「之前聊过什么」
+  // 已巩固的对话由会话摘要代表：放在历史最前面，模型才知道「之前聊过什么」。
+  // 占位符和完整日期都在注入时才渲染，库里保留原文供下次滚动压缩
   const digest = sessionDigest?.trim();
-  const messages: HistoryMessage[] = digest
-    ? [{ role: "user", content: `[之前聊过] ${digest}`, is_digest: true }, ...historyMessages]
+  const digestText = digest
+    ? renderDigestDates(
+        replacePlaceholders(digest, getMeta("session_digest_at") ?? now.toISOString(), userInfo, now),
+        now
+      )
+    : "";
+  const messages: HistoryMessage[] = digestText
+    ? [{ role: "user", content: `[之前聊过] ${digestText}`, is_digest: true }, ...historyMessages]
     : historyMessages;
 
   // 4. 截断：预算覆盖全部四段，先降级/削记忆块，再丢最旧历史
   const fitted = truncateToFit({
     system: systemPromptText,
+    today: todayText,
     state: stateText,
     memoryBlocks,
     messages,
@@ -137,19 +162,52 @@ export function assemblePrompt(
 
   return {
     system: systemPromptText,
+    today: todayText,
     state: stateText,
     memory: fitted.memory,
     messages: fitted.messages,
+    trimmed: fitted.trimmed,
   };
 }
 
 /**
+ * 替换只认半角方括号，中文输入法却容易打出【user】：
+ * 先把「全角括号 + 纯 ASCII 名字」归一成半角，中文解释性的【】原样保留
+ */
+export function normalizePlaceholders(text: string): string {
+  return text.replace(/【([A-Za-z_]+)】/g, "[$1]");
+}
+
+/**
+ * 身份占位符替换：[user] [ai]（系统人设、冷启动模板、状态区、好友小传共用）
+ *
+ * 凡是把可能含占位符的文本塞进提示词的地方都要过这一层：
+ * 用户自定义的人设、模型写的好友小传里都带 [user]，不过滤就会原样泄漏给模型。
+ */
+export function applyIdentityPlaceholders(text: string, userInfo?: UserInfo | null): string {
+  const nickname = getUserNickname(userInfo);
+  const aiName = useSettingsStore.getState().ai_name || "私藏";
+  return normalizePlaceholders(text)
+    .replace(/\[user\]/gi, () => nickname)
+    .replace(/\[ai\]/gi, () => aiName);
+}
+
+/**
+ * 运行时占位符替换：[user] [ai] [now] [today]
+ * 模板由用户自己编辑，这四种写法都必须生效，漏一种就会原样漏进提示词
+ */
+function applyRuntimePlaceholders(text: string, userInfo: UserInfo | null, now: dayjs.Dayjs): string {
+  return applyIdentityPlaceholders(text, userInfo)
+    .replace(/\[now\]/g, () => formatNow(now))
+    .replace(/\[today\]/g, () => formatTodayLine(now));
+}
+
+/**
  * 构建状态区 — 使用 state_injection_template 模板
- * 对齐原始文档：基础信息 + 偏好 + 社交图谱 + 心理状态 + 生活主线 + 当前状态
+ * 结构：基础信息 + 社交图谱 + 属性 + 当前处境 + 安排
  */
 function buildStateSection(
   userInfo: UserInfo | null,
-  currentStatus: string | undefined,
   now?: dayjs.Dayjs
 ): string {
   if (!userInfo) return "";
@@ -160,19 +218,11 @@ function buildStateSection(
 
   // 如果模板存在且包含 {{}} 占位符，使用模板渲染
   if (template && template.includes("{{")) {
-    let result = renderStateTemplate(template, userInfo, currentStatus, currentTime);
-    // 替换通用变量 [user]（状态区里指代用户，例如「被[user]叫醒了」）
-    if (result.includes("[user]")) {
-      result = result.replace(/\[user\]/g, getUserNickname(userInfo));
-    }
-    // 替换通用变量 [now] / [today]
-    if (result.includes("[now]")) {
-      result = result.replace(/\[now\]/g, formatNow(currentTime));
-    }
-    if (result.includes("[today]")) {
-      result = result.replace(/\[today\]/g, formatTodayLine(currentTime));
-    }
-    return result;
+    return applyRuntimePlaceholders(
+      renderStateTemplate(template, userInfo, currentTime),
+      userInfo,
+      currentTime
+    );
   }
 
   // 降级：手动拼接（兼容）
@@ -192,13 +242,9 @@ function buildStateSection(
   if (userInfo.traits.length > 0) {
     parts.push(`属性：${userInfo.traits.join("、")}`);
   }
-  const states = activeStates(userInfo, currentTime);
-  if (states.length > 0) {
-    const lines = states
-      .slice()
-      .sort((a, b) => dayjs(b.created_at).valueOf() - dayjs(a.created_at).valueOf())
-      .map((s) => `- ${replacePlaceholders(s.text, s.created_at, userInfo, currentTime)}`);
-    parts.push(`近况：\n${lines.join("\n")}`);
+  const conditionsText = formatConditions(userInfo, currentTime);
+  if (conditionsText) {
+    parts.push(`当前处境：\n${conditionsText}`);
   }
   // 未来事件（timestamp 在未来的记忆事件），getUpcomingEvents 已按时刻升序
   const appointments = getUpcomingEvents();
@@ -209,15 +255,34 @@ function buildStateSection(
     );
     parts.push(`安排：\n${lines.join("\n")}`);
   }
-  if (currentStatus) {
-    parts.push(`当前状态：${currentStatus}`);
-  }
-
   return `## [用户信息]\n\n${parts.join("\n")}`;
 }
 
 /** 空值占位符，用于标记空字段以便后续整行移除 */
 const EMPTY = "__EMPTY__";
+
+/** 处境块最多注入几条：它是「影响此刻怎么说话」的少量信息，不是事件清单 */
+const CONDITION_INJECT_LIMIT = 5;
+
+/**
+ * 当前处境（仍在持续的 condition 事件）：标签 + 从什么时候开始。
+ * 超过耐心期限没再被提起的补一句「可能已经过去了」——数据还在，只是别当成一定还在
+ */
+function formatConditions(userInfo: UserInfo, now: dayjs.Dayjs): string {
+  const conditions = getActiveConditions();
+  if (conditions.length === 0) return "";
+  return conditions
+    .slice(0, CONDITION_INJECT_LIMIT)
+    .map((c) => {
+      const label = replacePlaceholders(c.event_text, c.timestamp, userInfo, now);
+      const notes: string[] = [];
+      const started = relativeDayLabel(c.timestamp, now);
+      if (started) notes.push(`${started}开始的`);
+      if (isConditionStale(c, now)) notes.push("可能已经过去了");
+      return notes.length > 0 ? `- ${label}（${notes.join("，")}）` : `- ${label}`;
+    })
+    .join("\n");
+}
 
 /**
  * 使用 state_injection_template 模板渲染状态区
@@ -226,7 +291,6 @@ const EMPTY = "__EMPTY__";
 function renderStateTemplate(
   template: string,
   userInfo: UserInfo,
-  currentStatus: string | undefined,
   now: dayjs.Dayjs
 ): string {
   const bi = userInfo.basic_identity;
@@ -239,9 +303,9 @@ function renderStateTemplate(
     .replace(/\{\{occupation\}\}/g, bi.occupation || p.occupation)
     .replace(/\{\{location\}\}/g, bi.location || p.location)
     .replace(/\{\{traits\}\}/g, userInfo.traits.length > 0 ? userInfo.traits.join("、") : EMPTY)
-    .replace(/\{\{current_status\}\}/g, currentStatus || EMPTY)
-    // 自己的熟人圈（不是用户的社交图谱）：低成本的在场感，让 AI 聊得起来
-    .replace(/\{\{friends\}\}/g, formatFriendRoster(now) || EMPTY);
+    // 老模板里可能还留着这两个变量：渲染成空行清掉，不漏原样文本
+    .replace(/\{\{current_status\}\}/g, EMPTY)
+    .replace(/\{\{friends\}\}/g, EMPTY);
 
   // 社交图谱
   const graphText =
@@ -250,17 +314,8 @@ function renderStateTemplate(
       : EMPTY;
   result = result.replace(/\{\{social_graph\}\}/g, graphText);
 
-  // 近况（状态）：文本自带 [time] 占位符，按各自时间渲染成相对时间（「7天前开始发烧」）
-  const states = activeStates(userInfo, now);
-  const statesText =
-    states.length > 0
-      ? states
-          .slice()
-          .sort((a, b) => dayjs(b.created_at).valueOf() - dayjs(a.created_at).valueOf())
-          .map((s) => replacePlaceholders(s.text, s.created_at, userInfo, now))
-          .join("\n")
-      : EMPTY;
-  result = result.replace(/\{\{states\}\}/g, statesText);
+  // 当前处境（仍在持续的 condition 事件）
+  result = result.replace(/\{\{conditions\}\}/g, formatConditions(userInfo, now) || EMPTY);
 
   // 安排（未来事件）：timestamp 在未来，按发生时刻先后排
   const appointments = getUpcomingEvents();
@@ -320,7 +375,7 @@ function cleanEmptyLines(text: string): string {
 }
 
 /**
- * 记忆区的一个「块」：事件标题 + 它下面的片段行
+ * 记忆区的一个「块」：同一个事件下的若干片段行
  *
  * 每个块都备着 detail / brief 两个版本，Token 超预算时先降级再删除
  * （否则「要么全给要么全不给」，截断体验很硬）。
@@ -336,11 +391,8 @@ export interface MemoryBlock {
   degraded: boolean;
 }
 
-/** 用户输入命中好友名时，前置注入的档案卡素材 */
-export interface FriendCardContext {
-  name: string;
-  /** 人物小传（唯一定义，口吻/关系/看法都在里面） */
-  profile: string;
+/** 用户输入命中好友名时，前置注入的最近几条相关记忆 */
+export interface FriendMentionContext {
   fragments: Array<{ summary: string; timestamp: string }>;
 }
 
@@ -379,13 +431,10 @@ function detailThreshold(priority: number): number {
 }
 
 /**
- * 构建记忆区 — 使用 memory_injection_template + memory_event_template 模板
- * 替换 [user] [time] 占位符
+ * 构建记忆区：只给本轮命中事件的片段，替换 [user] [time] 占位符
  *
- * 分层（模拟「记得很清楚」vs「只记得大概发生过这么件事」）：
- * - 命中事件**逐条**分层：被当前话题唤起的片段给完整 summary（刚想起来的细节），
- *   其余片段按各自年龄过遗忘曲线决定 summary/gist——想起一件事不会把整段往事全部擦亮
- * - 未命中事件按事件实时权重决定最新一条给 summary 还是 gist（整体熟悉感）
+ * 命中事件逐条分层：被当前话题唤起的片段给完整 summary，其余按各自年龄
+ * 过遗忘曲线决定 summary/gist——想起一件事不会把整段往事全部擦亮
  */
 function buildMemorySection(
   userInfo: UserInfo | null,
@@ -393,82 +442,66 @@ function buildMemorySection(
   epiphany: (MemoryEvent & { gist: string }) | null,
   hitFragments?: Map<number, MemoryFragment[]>,
   cuedFragmentIds?: Set<number>,
-  friendCard?: FriendCardContext
+  friendMention?: FriendMentionContext
 ): MemoryBlock[] {
-  const prompts = getPrompts();
-  const eventTpl = prompts.memory_event_template;
   const now = dayjs(); // 预计算当前时间，复用
 
-  // 一次取回所有缺失片段，避免逐事件查询（N+1）
-  const missingIds = topEvents
-    .filter((e) => (hitFragments?.get(e.id)?.length ?? 0) === 0)
-    .map((e) => e.id);
-  const fallbackFragments = getFragmentsByEventIds(missingIds);
+  // 片段里第一次出现某位好友时，把一句关系接在名字后面；本轮不重复
+  const nameMatchFriends = listNameMatchFriends();
+  const hinted = new Set<string>();
+  const withFriendHint = (line: string): string => {
+    const hit = matchFriendInText(line, nameMatchFriends);
+    if (!hit?.summary || hinted.has(hit.name)) return line;
+    hinted.add(hit.name);
+    return line.replace(hit.name, `${hit.name}（${hit.summary}）`);
+  };
 
   const blocks: MemoryBlock[] = [];
 
-  // 按名字命中的好友档案卡：回答「她是谁」用档案，回答「她说过什么」用片段，
-  // 两者各司其职，不让记忆里的人和设定里的不是同一个人。
-  // 权重置顶：档案是这一轮对话的前提，截断时最后才轮到它。
-  if (friendCard) {
-    // 小传是写给「好友自己」的第二人称文本，直接塞给主角会让人误以为是自己的想法：
-    // 换掉人称段落标题，并明确「以下是 ta 的档案」
-    const profile = replacePlaceholders(friendCard.profile, now.toISOString(), userInfo, now)
-      .replace(/\[你对他们俩的看法\]/g, "[ta对他们俩的看法]")
-      .replace(/\[你自己的日子\]/g, "[ta自己的日子]")
-      .replace(/\[你的日子\]/g, "[ta的日子]");
-    const fragLines = friendCard.fragments.map(
-      (f) => `  · ${anchorLine(f.summary, f.timestamp, userInfo, now)}`
-    );
-    const detail = [
-      `【关于${friendCard.name}】以下是 ta 的档案，不是你的想法（档案里的「你」指 ta 自己）`,
-      profile,
-      ...(fragLines.length > 0 ? ["相关记忆：", ...fragLines] : []),
-    ].join("\n");
-    const brief = `【关于${friendCard.name}】${profile.replace(/\s+/g, " ").slice(0, 60)}`;
-    blocks.push({ weight: 100, isEpiphany: false, detail, brief, degraded: false });
+  // 按名字命中：最近 4 条相关记忆，与其余记忆行同形（关系接在名字后面）
+  // 权重置顶：这是这一轮对话的前提，截断时最后才轮到它
+  if (friendMention) {
+    const detail = friendMention.fragments
+      .map((f) => `  · ${withFriendHint(anchorLine(f.summary, f.timestamp, userInfo, now))}`)
+      .join("\n");
+    if (detail) blocks.push({ weight: 100, isEpiphany: false, detail, brief: detail, degraded: false });
   }
 
+  // 仍在持续的处境：处境块里已经有一行标签，这里只在被本轮话题命中时补细节
+  const activeConditionIds = new Set(getActiveConditions().map((c) => c.id));
+
   for (const event of topEvents) {
-    const text = replacePlaceholders(event.event_text, event.timestamp, userInfo, now);
-    const head = eventTpl
-      .replace(/\{\{weight\}\}/g, String(event.live_weight))
-      .replace(/\{\{event_text\}\}/g, text);
+    const hasHits = (hitFragments?.get(event.id)?.length ?? 0) > 0;
+    if (activeConditionIds.has(event.id) && !hasHits) continue;
 
-    const detailLines: string[] = [head];
-    const briefLines: string[] = [head];
-    let startDegraded = false;
-
+    const detailLines: string[] = [];
+    const briefLines: string[] = [];
     // 命中事件：逐条分层——被唤起的片段给完整 summary（刚想起来的细节），
     // 其余按各自年龄过遗忘曲线决定 summary/gist（想起一件事不会把整段往事全部擦亮）。
     // detail 已是逐条分层结果，整块不再降级；budget 截断时仍可退到全 gist 的 brief
     const fragments = hitFragments?.get(event.id);
-    if (fragments && fragments.length > 0) {
-      for (const frag of capFragments(fragments, cuedFragmentIds)) {
-        const cued = cuedFragmentIds?.has(frag.id) ?? false;
-        // 片段自身年龄权重：写入时刻≈经历时刻，priority 参与阈值（重大细节保持更久）
-        const fragLive = calculateWeight(
-          event.active_weight,
-          frag.timestamp,
-          frag.priority,
-          event.memory_kind ?? "daily"
-        );
-        const vivid = cued || fragLive >= detailThreshold(frag.priority);
-        const shortText = frag.gist || frag.summary.slice(0, 24);
-        detailLines.push(
-          `  · ${anchorLine(vivid ? frag.summary : shortText, frag.timestamp, userInfo, now)}`
-        );
-        briefLines.push(`  · ${anchorLine(shortText, frag.timestamp, userInfo, now)}`);
-      }
-    } else {
-      const eventFragments = fallbackFragments.get(event.id);
-      const latest = eventFragments?.[eventFragments.length - 1];
-      if (!latest) continue;
-      startDegraded = event.live_weight < detailThreshold(latest.priority);
-      detailLines.push(`  · ${anchorLine(latest.summary, latest.timestamp, userInfo, now)}`);
-      briefLines.push(
-        `  · ${anchorLine(latest.gist || latest.summary.slice(0, 24), latest.timestamp, userInfo, now)}`
+    if (!fragments || fragments.length === 0) continue;
+    for (const frag of capFragments(fragments, cuedFragmentIds)) {
+      const cued = cuedFragmentIds?.has(frag.id) ?? false;
+      // 片段自身年龄权重：写入时刻≈经历时刻，priority 参与阈值（重大细节保持更久）
+      const fragLive = calculateWeight(
+        event.active_weight,
+        frag.timestamp,
+        frag.priority,
+        event.memory_kind ?? "daily"
       );
+      const vivid = cued || fragLive >= detailThreshold(frag.priority);
+      const shortText = frag.gist || frag.summary.slice(0, 24);
+      detailLines.push(
+        `  · ${withFriendHint(anchorLine(vivid ? frag.summary : shortText, frag.timestamp, userInfo, now))}`
+      );
+      briefLines.push(`  · ${withFriendHint(anchorLine(shortText, frag.timestamp, userInfo, now))}`);
+    }
+
+    // 已结束的处境：标题不显示时，把标注挂在首行片段
+    if (event.memory_kind === "condition" && event.closed_at && detailLines.length > 0) {
+      detailLines[0] += "（已经过去了）";
+      briefLines[0] += "（已经过去了）";
     }
 
     blocks.push({
@@ -476,17 +509,15 @@ function buildMemorySection(
       isEpiphany: false,
       detail: detailLines.join("\n"),
       brief: briefLines.join("\n"),
-      degraded: startDegraded,
+      degraded: false,
     });
   }
 
-  // 灵光一闪：连同一句印象一起注入，否则 AI 只拿到事件标题、接不上话
+  // 偶然想起的往事：只给一句印象，不带事件标题与机制标签
   if (epiphany) {
-    const text = anchorLine(epiphany.event_text, epiphany.timestamp, userInfo, now);
-    const gist = epiphany.gist
-      ? anchorLine(epiphany.gist, epiphany.timestamp, userInfo, now)
-      : "";
-    const line = `- [灵光一闪·冷记忆] ${text}${gist && gist !== text ? `（${gist}）` : ""}`;
+    const text = replacePlaceholders(epiphany.event_text, epiphany.timestamp, userInfo, now);
+    const gist = epiphany.gist && epiphany.gist !== epiphany.event_text ? epiphany.gist : text;
+    const line = `  · ${withFriendHint(anchorLine(gist, epiphany.timestamp, userInfo, now))}`;
     blocks.push({ weight: 0, isEpiphany: true, detail: line, brief: line, degraded: false });
   }
 
@@ -500,9 +531,8 @@ function buildMemorySection(
 function renderMemoryBlocks(blocks: MemoryBlock[]): string {
   const prompts = getPrompts();
   const now = dayjs();
-  // 没有任何命中时不渲染「记忆区」空壳，只保留日期上下文：
-  // 模板里的 [today] 是模型的时间锚点，不能跟着记忆区一起消失
-  if (blocks.length === 0) return formatTodayLine(now);
+  // 没有可注入的记忆时整块不出现
+  if (blocks.length === 0) return "";
   const eventList = blocks.filter((b) => !b.isEpiphany);
   const epiphanyBlock = blocks.find((b) => b.isEpiphany);
   const render = (b: MemoryBlock) => (b.degraded ? b.brief : b.detail);
@@ -510,31 +540,21 @@ function renderMemoryBlocks(blocks: MemoryBlock[]): string {
   const eventText = eventList.map(render).join("\n");
   const epiphanyText = epiphanyBlock ? render(epiphanyBlock) : "";
 
-  const template = prompts.memory_injection_template;
+  const template = normalizePlaceholders(prompts.memory_injection_template);
   if (template && template.includes("{{")) {
-    let result = template
-      .replace(/\{\{event_list\}\}/g, eventText || "（暂无记忆事件）")
-      .replace(/\{\{epiphany\}\}/g, epiphanyText);
-    // 替换通用变量 [today] / [now]
-    result = result
+    // [today] 仍可用（老模板里写着就照样渲染），但日期已经前置注入，
+    // 默认模板不再放它，避免同一天两段一模一样的日期
+    return template
+      .replace(/\{\{event_list\}\}/g, eventText)
+      .replace(/\{\{epiphany\}\}/g, epiphanyText)
       .replace(/\[today\]/g, formatTodayLine(now))
-      .replace(/\[now\]/g, formatNow(now));
-    // 兜底：存量覆盖模板没放时间变量的，末尾补一行时间上下文——
-    // 「今天是周几、放不放假」每轮都要让模型看到（模板自带 [now] 的尊重用户排版）
-    if (!template.includes("[today]") && !template.includes("[now]")) {
-      result += `\n\n---\n${formatTodayLine(now)}`;
-    }
-    return result;
+      .replace(/\[now\]/g, formatNow(now))
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
   }
 
-  // 降级：无模板时硬编码
-  const lines: string[] = [];
-  if (eventText) {
-    lines.push("## 记忆区");
-    lines.push(eventText);
-  }
-  if (epiphanyText) lines.push(epiphanyText);
-  return lines.join("\n");
+  // 降级：无模板时只给内容
+  return [eventText, epiphanyText].filter(Boolean).join("\n");
 }
 
 /**
@@ -576,21 +596,43 @@ export function relativeDayLabel(timestamp: string | undefined, now: dayjs.Dayjs
 }
 
 /**
+ * 会话摘要里的完整日期在注入时换成相对说法，库里原文不动。
+ * 只认「26年11月14日」这种带两位年份、写到日的写法；月份写法和不带年份的日期不碰。
+ */
+export function renderDigestDates(text: string, now: dayjs.Dayjs = dayjs()): string {
+  return text.replace(
+    /(\d{2})年(\d{1,2})月(\d{1,2})日/g,
+    (match, yy: string, mm: string, dd: string, offset: number, whole: string) => {
+      // 四位年份里截出来的两位年份不是目标写法
+      if (offset > 0 && /\d/.test(whole[offset - 1])) return match;
+      const year = Math.floor(now.year() / 100) * 100 + Number(yy);
+      const month = Number(mm);
+      const day = Number(dd);
+      const date = dayjs(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
+      if (!date.isValid() || date.month() + 1 !== month || date.date() !== day) return match;
+      return relativeDayLabel(date.format("YYYY-MM-DD"), now) || match;
+    }
+  );
+}
+
+/**
  * 记忆行的相对时间锚点：`3天前 …`
  *
  * 文本自带 [time] 时渲染出来就是相对时间，不再加前缀；
  * 没有 [time] 的（gist、老数据、模型漏写）由代码补齐，保证每行都看得出先后。
  */
 export function anchorLine(raw: string, timestamp: string, userInfo: UserInfo | null, now: dayjs.Dayjs = dayjs()): string {
-  const rendered = replacePlaceholders(raw, timestamp, userInfo, now);
-  if (raw.includes("[time]")) return rendered;
+  const text = normalizePlaceholders(raw);
+  const rendered = replacePlaceholders(text, timestamp, userInfo, now);
+  if (text.includes("[time]")) return rendered;
   const label = relativeDayLabel(timestamp, now);
   return label ? `${label} ${rendered}` : rendered;
 }
 
 /**
- * 替换 [user]、[time]、[now] 占位符（记忆区与游戏回顾共用）
+ * 替换 [user]、[ai]、[time]、[now] 占位符（记忆区、状态区、游戏回顾共用）
  * [user] → 用户昵称
+ * [ai] → AI 名称
  * [time] → 相对时间描述（如"前两个月"、"上周"）
  * [now] → 当前时间（如"2026年7月17日（周五）15:30"）
  */
@@ -600,16 +642,16 @@ export function replacePlaceholders(
   userInfo: UserInfo | null,
   now?: dayjs.Dayjs
 ): string {
-  let result = text;
+  let result = normalizePlaceholders(text);
   const currentTime = now || dayjs();
 
   // [user] → 昵称
   const nickname = userInfo?.basic_identity?.nickname || "用户";
-  result = result.replace(/\[user\]/g, nickname);
+  result = result.replace(/\[user\]/gi, () => nickname);
 
   // [ai] → AI 名称
   const aiName = useSettingsStore.getState().ai_name || "私藏";
-  result = result.replace(/\[ai\]/g, aiName);
+  result = result.replace(/\[ai\]/gi, () => aiName);
 
   // [time] → 相对时间
   if (result.includes("[time]") && eventTimestamp) {
@@ -625,26 +667,28 @@ export function replacePlaceholders(
 }
 
 /**
- * 截断策略：预算覆盖「系统人设 + 状态区 + 记忆区 + 历史」
+ * 按预算裁剪「系统人设 + 状态区 + 记忆区 + 历史」
  *
- * 顺序（越靠后越伤体感，所以尽量往后放）：
- *   1. 删灵光一闪（锦上添花，最先让路）
- *   2. **先把低权重记忆块降级**（detail → brief，只留一句话）——别直接把整块抹掉
- *   3. 再按权重从低到高删除记忆块
- *   4. 仍超预算则丢弃最旧历史（至少保留最后一轮）
+ * **历史一条都不删**：上下文里的历史全是游标之后、还没被巩固的对话，
+ * 删掉就等于这段经历再也进不了记忆（已巩固的部分本来就由会话摘要代表，不在历史里）。
+ * 所以超预算时只动记忆区，实在装不下就让这条请求超一点，并把超出量交回调用方记日志。
+ *
+ * 顺序：1. 删灵光一闪（锦上添花，最先让路）
+ *       2. 低权重记忆块降级（detail → brief，只留一句话）——别直接把整块抹掉
+ *       3. 按权重从低到高删除记忆块
  */
 function truncateToFit(params: {
   system: string;
+  today: string;
   state: string;
   memoryBlocks: MemoryBlock[];
   messages: HistoryMessage[];
   budget: number;
-}): { memory: string; messages: HistoryMessage[] } {
-  const { system, state, memoryBlocks, messages, budget } = params;
+}): { memory: string; messages: HistoryMessage[]; trimmed: AssembledPrompt["trimmed"] } {
+  const { system, today, state, memoryBlocks, messages, budget } = params;
 
-  const systemTokens = estimateTokens(system);
+  const systemTokens = estimateTokens(system) + estimateTokens(today);
   const stateTokens = estimateTokens(state);
-  let keptMessages = messages;
 
   const measure = (blocks: MemoryBlock[], msgs: typeof messages) =>
     systemTokens +
@@ -654,9 +698,13 @@ function truncateToFit(params: {
 
   // 就地标记，避免截断过程中改动调用方传入的数组
   const blocks = memoryBlocks.map((b) => ({ ...b }));
-  let total = measure(blocks, keptMessages);
+  let total = measure(blocks, messages);
   if (total <= budget) {
-    return { memory: renderMemoryBlocks(blocks), messages: keptMessages };
+    return {
+      memory: renderMemoryBlocks(blocks),
+      messages,
+      trimmed: { degradedBlocks: 0, droppedBlocks: 0, overBudget: 0 },
+    };
   }
 
   const removed = new Set<MemoryBlock>();
@@ -667,16 +715,26 @@ function truncateToFit(params: {
   };
   const alive = () => blocks.filter((b) => !removed.has(b));
   const remeasure = () => {
-    total = measure(alive(), keptMessages);
+    total = measure(alive(), messages);
     return total;
   };
+  /** 收口并带上裁剪统计：调用方会打进调试日志 */
+  const result = () => ({
+    memory: renderMemoryBlocks(alive()),
+    messages,
+    trimmed: {
+      degradedBlocks: blocks.filter((b) => b.degraded).length,
+      droppedBlocks: removed.size,
+      overBudget: Math.max(0, remeasure() - budget),
+    },
+  });
 
   // 1. 灵光一闪优先删除（还有其它记忆时）
   const epi = blocks.find((b) => b.isEpiphany);
   if (epi && blocks.length > 1) {
     dropBlock(epi);
     if (remeasure() <= budget) {
-      return { memory: renderMemoryBlocks(alive()), messages: keptMessages };
+      return result();
     }
   }
 
@@ -696,32 +754,19 @@ function truncateToFit(params: {
     remeasure();
   }
 
-  // 4. 仍超预算：丢弃最旧历史（至少保留最后一轮）
-  while (keptMessages.length > 2 && total > budget) {
-    // 摘要条目最后才丢：它比等量原文更紧凑，先丢摘要反而损失更大
-    const dropIdx = keptMessages[0]?.is_digest ? 1 : 0;
-    keptMessages = keptMessages.filter((_, i) => i !== dropIdx);
-    remeasure();
-  }
-
-  return { memory: renderMemoryBlocks(alive()), messages: keptMessages };
+  return result();
 }
 
 /**
  * 构建冷启动 Prompt — 对齐 PRD 2.1 节第 1 步
  * 冷启动 = 系统人设 + 冷启动模板（无状态区、无记忆区）
  */
-export function buildColdStartPrompt(): { system: string; context: string } {
+export function buildColdStartPrompt(): { system: string; today: string; context: string } {
   const prompts = getPrompts();
-  const nickname = getUserNickname();
-  const systemPromptText = [
-    prompts.system_prompt,
-    prompts.cold_start_template,
-  ]
-    .filter(Boolean)
-    .join("\n\n")
-    .replace(/\[user\]/gi, nickname);
+  const systemPromptText = applyIdentityPlaceholders(
+    [prompts.system_prompt, prompts.cold_start_template].filter(Boolean).join("\n\n")
+  );
 
-  // 冷启动时状态区和记忆区为空
-  return { system: systemPromptText, context: "" };
+  // 冷启动没有状态区和记忆区，但日期锚点同样要前置
+  return { system: systemPromptText, today: formatTodayLine(), context: "" };
 }

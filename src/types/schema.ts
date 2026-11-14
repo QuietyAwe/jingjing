@@ -26,7 +26,12 @@ export type MemoryKind =
   /** 日常琐事：按小时衰减，几天内淡忘 */
   | "daily"
   /** 共同经历（游戏、深度对话等）：按天衰减且有下限，数月甚至数年后仍可被想起 */
-  | "episode";
+  | "episode"
+  /**
+   * 持续型处境（感冒中、在搬家、刚分手）：仍成立时每轮参与对话，
+   * 结束时写 closed_at 变成一段普通过去经历。衰减同 episode
+   */
+  | "condition";
 
 /**
  * 约定状态：未来才发生的事就是「约定」，和已发生的记忆共用一张事件表，
@@ -50,6 +55,13 @@ export interface MemoryEvent {
   memory_kind: MemoryKind;
   /** 约定状态；普通记忆为 none */
   event_status: AppointmentStatus;
+  /**
+   * 持续型处境的结束时刻（ISO8601）；NULL = 仍然成立。
+   * 只对 memory_kind='condition' 有意义，不参与衰减计算
+   */
+  closed_at: string | null;
+  /** 已注入过几次提醒（临近 / 过期关心合计）；满了就归档，不再靠「用户提起」判定 */
+  nudge_count: number;
 }
 
 // --- 游戏会话 ---
@@ -123,27 +135,12 @@ export interface SocialGraphEntry {
   attitude: string;
 }
 
-/**
- * 状态（有时效的事实）：如「[time]开始发烧」「[time]在疯狂加班」
- * text 含 [time] 占位符，注入时按 created_at 渲染成相对时间（「7天前开始发烧」）；
- * 超过 STATE_EXPIRE_DAYS 未再被提及即停止注入（数据保留，等记忆区找回）
- */
-export interface StateItem {
-  text: string;
-  /** 写入 / 最近一次被提及时刻 ISO8601（重提会刷新） */
-  created_at: string;
-}
-
-
-
-/** 用户信息 (user_info 表存储结构) — 属性/状态 两桶（未来事件存在 memory_events） */
+/** 用户信息 (user_info 表存储结构)；「当前处境」是 memory_events 里的 condition 事件 */
 export interface UserInfo {
   basic_identity: BasicIdentity;
   social_graph: SocialGraphEntry[];
   /** 属性（Trait）：永久有效的事实（喜好/性格/沟通偏好/长期目标…） */
   traits: string[];
-  /** 状态（State）：有时效的事实 */
-  states: StateItem[];
 }
 
 /** 后台模型返回的新记忆片段 */
@@ -165,6 +162,13 @@ export interface NewFragment {
    * 落库后事件 timestamp = 该时刻、event_status = upcoming，由时间通道负责到点提醒。
    */
   happens_at?: string;
+  /**
+   * 描述一个**仍然成立**的处境时填标签（2~8 字，如「感冒」「在搬家」）。
+   * 代码会把片段挂到该处境的 condition 事件上（同名未结束的复用，否则新建）
+   */
+  condition?: string;
+  /** 说明某个正在持续的处境结束了（用户说「我好了」）时填同一个标签 */
+  condition_ended?: string;
 }
 
 /** 模型给出的「这几条事件其实是同一段经历」的归并决策 */
@@ -184,13 +188,9 @@ export interface ConsolidationResponse {
     social_graph?: SocialGraphEntry[];
     /** 属性（永久有效），如「喜欢吃番茄炒蛋」 */
     traits?: string[];
-    /** 状态（有时效），文本含 [time] 占位符，如「[time]开始发烧」 */
-    states?: string[];
   };
-  /** 本次提取出的记忆片段（一次巩固可覆盖多个话题，见 B4） */
+  /** 本次提取出的记忆片段（一次巩固可覆盖多个话题） */
   new_fragments?: NewFragment[];
-  /** 兼容旧结构：单条片段 */
-  new_fragment?: NewFragment;
   /** 模型判断「这几条事件是同一段经历」，由代码在事务内执行 */
   event_merges?: EventMerge[];
   /** 滚动会话摘要：旧摘要 + 本批对话压成 200~300 字，只服务前台上下文 */
@@ -206,7 +206,6 @@ export interface PromptsConfig {
 
   cold_start_template: string;
   memory_injection_template: string;
-  memory_event_template: string;
   schedule_generation_prompt: string;
   /** 未来事件临近提示（隐形提示词，注入消息末尾，{{event}}/{{due_time}}；后者渲染发生时刻） */
   event_reminder_template: string;
@@ -222,8 +221,10 @@ export interface PromptsConfig {
   friend_persona_generation_prompt: string;
   /** 好友发帖文案生成指令 */
   friend_moment_generation_prompt: string;
-  /** 好友评论生成指令 */
+  /** 好友评论生成指令（单人，用于被回复时的回评） */
   friend_comment_prompt: string;
+  /** 多人候选的好友留言生成指令：谁开口由模型自己决定，可以一个都不回 */
+  friend_comments_prompt: string;
 }
 
 export interface DefaultPlaceholders {
@@ -244,8 +245,6 @@ export interface ThresholdsConfig {
   context_history_rounds: number;
   /** 上下文总预算（系统人设 + 状态区 + 摘要 + 历史 + 记忆区） */
   context_token_budget: number;
-  /** 记忆区加载的高权重事件数量 */
-  context_active_events_limit: number;
   /** 详细/简略切换权重阈值：实时权重低于它的记忆只注入一句话 gist */
   detail_visible_weight: number;
   /** AI 主动评论用户动态的概率（0~1） */
@@ -260,8 +259,6 @@ export interface ThresholdsConfig {
   friend_moment_probability: number;
   /** 每条动态被好友评论的概率（0~1） */
   friend_comment_probability: number;
-  /** 花名册行只列最近这么多天有互动（或刚创建）的好友 */
-  friend_roster_visible_days: number;
   /** 每 1× 动态新近度折算的灵光一闪概率（4× → 约 85%） */
   recent_moment_recall_weight: number;
 }
@@ -370,7 +367,7 @@ export interface FriendPersona {
   name: string;
   /** 头像 emoji */
   avatar_emoji: string;
-  /** 一句关系与态度（小传原文摘要），用于列表与状态区花名册行 */
+  /** 一句关系与态度（小传原文摘要），用于列表与好友评论候选 */
   summary: string;
   /** 自由文本小传：按 [身份]/[说话方式]/[与关系]/[看法]/[自己的日子] 分段 */
   profile: string;
@@ -421,4 +418,6 @@ export interface ChatMessage {
   friend_id?: number;
   /** 游戏结束后合并出的摘要消息（替代整局对话，进上下文但不污染历史） */
   is_game_summary?: boolean;
+  /** AI 的情境旁白：进模型上下文、不显示在聊天界面 */
+  is_state_note?: boolean;
 }

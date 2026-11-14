@@ -116,6 +116,29 @@ export function tokenize(
   return picked;
 }
 
+/** 单字线索上限：只保前 8 个，避免长句被拆成一串单字 */
+const MAX_SINGLE_CHARS = 8;
+
+/**
+ * 单字线索：常规分词会把单字整个丢掉，「猫」这种单字实体于是永远检索不到。
+ *
+ * 只在常规关键词一个都没命中时兜底使用；而且只与 tags 的**完整标签**精确比对——
+ * 标签里写的是「猫」才算命中，不会因为标签是「吃面」就被单字「吃」拉出来。
+ */
+export function singleCharKeywords(text: string, isStop?: (g: string) => boolean): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const run of text.match(/[一-鿿]+/g) || []) {
+    for (const ch of run) {
+      if (seen.has(ch) || STOP_WORDS.has(ch) || isStop?.(ch)) continue;
+      seen.add(ch);
+      out.push(ch);
+      if (out.length >= MAX_SINGLE_CHARS) return out;
+    }
+  }
+  return out;
+}
+
 /**
  * 关键词重合度打分：文本里命中了几个不同的关键词
  *

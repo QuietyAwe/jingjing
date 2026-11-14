@@ -3,7 +3,7 @@
 // 调用 gpt-4o-mini (JSON mode) 从对话快照中提取用户信息与记忆片段
 // ============================================================
 
-import { getClient } from "./client";
+import { getClient, hasApiKey } from "./client";
 import { getPrompts, getModelRouting } from "@/prompt/config";
 import { logDebug } from "@/store/chatStore";
 import dayjs from "dayjs";
@@ -15,10 +15,19 @@ import type {
   PostPlanDraft,
 } from "@/types/schema";
 import { MOOD_TAGS } from "@/types/schema";
-import { activeStates, getUpcomingEvents } from "@/db/queries";
+import { getActiveConditions, getUpcomingEvents } from "@/db/queries";
 import type { ScheduleItem } from "@/db/queries";
 import { stripIdentityKeywords } from "@/memory/identity";
 import { ensureTimePlaceholder } from "@/utils/text";
+import { applyIdentityPlaceholders } from "@/prompt/assembler";
+
+/**
+ * 把要塞进提示词的文本先过一遍身份占位符：
+ * 用户自定义的人设、模型写的好友小传都带 [user]/[ai]，不换就会原样漏给模型
+ */
+function fillIdentity(text: string): string {
+  return applyIdentityPlaceholders(text);
+}
 
 /**
  * 归一化一条提取出来的片段：补齐缺失字段、夹紧取值范围
@@ -32,6 +41,11 @@ function normalizeFragment(raw: NewFragment): NewFragment {
   // 未来才发生的事：发生时刻合法才保留，否则当普通记忆
   const rawHappensAt = typeof raw.happens_at === "string" ? raw.happens_at.trim() : "";
   const happensAt = rawHappensAt ? dayjs(rawHappensAt) : null;
+  // 处境标签：去空白、限长；同时填「开始」和「结束」时以「还在持续」为准，
+  // 因为误判成已结束会让 AI 直接忘掉用户当下的处境
+  const condition = typeof raw.condition === "string" ? raw.condition.trim().slice(0, 12) : "";
+  const conditionEnded =
+    typeof raw.condition_ended === "string" ? raw.condition_ended.trim().slice(0, 12) : "";
   return {
     summary,
     // gist 缺失时从 summary 截一句，保证分层渲染始终有「一句话」可用
@@ -44,26 +58,65 @@ function normalizeFragment(raw: NewFragment): NewFragment {
     target_event_index: Number(raw.target_event_index) || -1,
     new_event_text: (raw.new_event_text ?? "").trim(),
     happens_at: happensAt?.isValid() ? happensAt.toISOString() : undefined,
+    condition: condition || undefined,
+    condition_ended: condition ? undefined : conditionEnded || undefined,
   };
 }
 
-/** 巩固时展示给模型的候选事件（片段文本已渲染成「昨天 …」，不再是裸 [time]） */
+/** 巩固时展示给模型的候选事件（片段保持原文，含 [time]/[user] 占位符，模型照此体例写） */
 export interface CandidateEvent {
   id: number;
   title: string;
   snippets: string[];
+  /** 这条事件是一个仍在持续的处境（模型据此判断该刷新还是该闭合） */
+  condition?: boolean;
+}
+
+/** 相邻两条消息断开这么久就另起一段（固定值，不随设置页阈值变化） */
+const HISTORY_SEGMENT_GAP_MINUTES = 30;
+
+/** 巩固快照里的一条消息：时间只用来给历史分段 */
+export interface ConsolidationMessage {
+  role: string;
+  content: string;
+  timestamp?: string;
+}
+
+/**
+ * 按「相邻两条有没有断开」分段，只在段首标一次时刻。
+ * 标签用绝对时间；参照日取调用方传入的批末时间，同一批重试时不变，也不影响固定段的缓存前缀。
+ */
+function stampHistory(
+  snapshot: ConsolidationMessage[],
+  asOf?: string
+): Array<{ role: "user" | "assistant"; content: string }> {
+  // 参照日取批末消息时间，补记几天前的对话时「今天」才对得上
+  const anchorDay = dayjs(asOf);
+  let last: dayjs.Dayjs | null = null;
+  return snapshot.map((m) => {
+    const t = m.timestamp ? dayjs(m.timestamp) : null;
+    let content = m.content;
+    if (t?.isValid()) {
+      if (!last || t.diff(last, "minute") >= HISTORY_SEGMENT_GAP_MINUTES) {
+        const stamp = t.isSame(anchorDay, "day") ? t.format("HH:mm") : t.format("M/D HH:mm");
+        content = `[${stamp}] ${content}`;
+      }
+      last = t;
+    }
+    return { role: m.role as "user" | "assistant", content };
+  });
 }
 
 /**
  * 构建提取消息数组
  *
  * - [system] 固定提取规则 + 输出格式：每次完全一致，才能吃到前缀缓存；
- * - [history] 游标之后的新对话：不重复发已巩固内容；
+ * - [history] 游标之后的新对话：不重复发已巩固内容，按断开分段、段首带时刻；
  * - [user] 动态块（当前时间 / 已有数据 / 上次摘要 / 候选事件 / 任务）：放最后。
  */
 function buildExtractionMessages(
   userInfo: UserInfo,
-  snapshot: Array<{ role: string; content: string }>,
+  snapshot: ConsolidationMessage[],
   candidates: CandidateEvent[],
   sessionDigest: string | undefined,
   asOf?: string,
@@ -76,16 +129,12 @@ function buildExtractionMessages(
     "",
     "## 输出格式（严格 JSON）",
     '{"new_info": {只写本次新发现的字段，没有新信息的字段不要输出},',
-    ' "new_fragments": [{"gist": "...", "summary": "...", "keywords": ["..."], "priority": 数字1-9, "target_event_index": 数字或-1, "new_event_text": "", "happens_at": ""}],',
+    ' "new_fragments": [{"gist": "...", "summary": "...", "keywords": ["..."], "priority": 数字1-9, "target_event_index": 数字或-1, "new_event_text": "", "happens_at": "", "condition": "", "condition_ended": ""}],',
     ' "event_merges": [{"keep": 数字, "merge": [数字], "reason": "..."}],',
     ' "session_digest": "..."}',
   ].join("\n");
 
-  // 对话历史（作为独立消息）
-  const historyMessages = snapshot.map((m) => ({
-    role: m.role as "user" | "assistant",
-    content: m.content,
-  }));
+  const historyMessages = stampHistory(snapshot, asOf);
 
   // 动态块（增量模式：只展示已有数组值，避免 LLM 重复提取）
   const lines: string[] = [
@@ -94,12 +143,13 @@ function buildExtractionMessages(
     // 不传则用当前时间；显示本地时间，LLM 才能正确推断时段与 happens_at 日期。
     // 否则几天前的对话会被当成「今天刚发生」提取
     dayjs(asOf).format("YYYY-MM-DD HH:mm:ss"),
-    "⚠️ 这个时间只用于你推断相对时间和计算片段的 happens_at（未来发生时刻）。",
-    "gist / summary / states 里的事发时间必须写 [time] 占位符（系统会渲染成「昨天/前天」等相对时间）；绝对不要写「10月10日」这类具体日期，否则记忆过几天就是错的。",
+    "⚠️ 这是这批对话实际发生的时刻，用来推算会话摘要里的绝对日期和片段的 happens_at。",
+    "记忆片段（gist / summary）的事发时间必须写 [time] 占位符，不要写具体日期；会话摘要 session_digest 例外，按第四节写绝对日期。",
+    "历史消息开头的 [HH:mm] / [M/D HH:mm] 只标明这段话的时刻，用来判断事情先后与间隔，不是对话内容；不要把它写进片段，片段仍一律用 [time]。",
     "",
     "## 已有数据（不需要重复提取）",
     `属性：${userInfo.traits.join("、") || "（无）"}`,
-    `近况：${activeStates(userInfo).map((s) => s.text).join("、") || "（无）"}`,
+    `当前处境：${getActiveConditions().map((e) => e.event_text).join("、") || "（无）"}`,
     `近期会发生的事：${getUpcomingEvents()
       .map((e) => `${e.event_text}（${dayjs(e.timestamp).format("YYYY-MM-DD HH:mm")}）`)
       .join("、") || "（无）"}`,
@@ -115,7 +165,8 @@ function buildExtractionMessages(
     lines.push("（暂无相关事件，请为本次对话创建新事件）");
   } else {
     for (const c of candidates) {
-      lines.push(`- [id:${c.id}] ${c.title}`);
+      // 处境要标出来：模型得知道这条可以「接着提」（刷新）或「说好了」（闭合）
+      lines.push(`- [id:${c.id}]${c.condition ? "[当前处境]" : ""} ${c.title}`);
       for (const snippet of c.snippets) lines.push(`  · ${snippet}`);
     }
   }
@@ -136,17 +187,27 @@ function buildExtractionMessages(
   return [{ role: "system" as const, content: systemPrompt }, ...historyMessages, requestMessage];
 }
 
+/** 提取结果：失败必须带原因——它会进「连续失败」告警，用户要知道该修什么 */
+export type ConsolidationExtraction =
+  | { ok: true; data: ConsolidationResponse }
+  | { ok: false; reason: string };
+
 /**
  * 调用后台 LLM 提取用户信息与记忆片段
  */
 export async function extractConsolidation(
   userInfo: UserInfo,
-  snapshot: Array<{ role: string; content: string }>,
+  snapshot: ConsolidationMessage[],
   candidates: CandidateEvent[],
   sessionDigest: string | undefined,
   timeoutMs: number = 30000,
   asOf?: string,
-): Promise<ConsolidationResponse | null> {
+): Promise<ConsolidationExtraction> {
+  // 没配 Key 时 getClient 会抛英文异常，这里给个能直接看懂的原因（会进连续失败告警）
+  if (!hasApiKey()) {
+    return { ok: false, reason: "还没配置 API Key" };
+  }
+
   const requestMessages = buildExtractionMessages(userInfo, snapshot, candidates, sessionDigest, asOf);
   const routing = getModelRouting();
   const config = routing.background_extraction_config;
@@ -186,21 +247,23 @@ export async function extractConsolidation(
     const text = response.choices[0]?.message?.content;
     logDebug("巩固返回", `=== 完整响应 ===\n${text ?? "（空回复）"}`);
     if (!text) {
-      return null;
+      return { ok: false, reason: "模型返回空内容" };
     }
 
-    const parsed = JSON.parse(text) as ConsolidationResponse;
+    let parsed: ConsolidationResponse;
+    try {
+      parsed = JSON.parse(text) as ConsolidationResponse;
+    } catch {
+      logDebug("巩固返回", `返回内容不是合法 JSON\n${text.slice(0, 200)}`);
+      return { ok: false, reason: "返回内容不是合法 JSON" };
+    }
 
     // 只更新摘要（没有新用户信息）也是合法返回，不能因缺 new_info 丢掉整包
     if (!parsed.new_info) {
       parsed.new_info = {};
     }
 
-    // 兼容单条旧结构，统一归一成数组
-    const rawList: NewFragment[] = [
-      ...(Array.isArray(parsed.new_fragments) ? parsed.new_fragments : []),
-      ...(parsed.new_fragment ? [parsed.new_fragment] : []),
-    ];
+    const rawList: NewFragment[] = Array.isArray(parsed.new_fragments) ? parsed.new_fragments : [];
     const fragments = rawList
       .filter((f) => f && typeof f.summary === "string" && f.summary.trim())
       .slice(0, 8) // 一次巩固最多 8 条：chunk 变大后话题变多，但仍要防止按句拆开刷爆片段表
@@ -228,28 +291,24 @@ export async function extractConsolidation(
     // 片段和摘要都没有才算失败：纯闲聊也可能没有可提取的片段，但摘要仍要更新
     if (fragments.length === 0 && !parsed.session_digest) {
       logDebug("巩固返回", `没有可用的片段或摘要\n${text.slice(0, 200)}`);
-      return null;
+      return { ok: false, reason: "返回里既没有片段也没有摘要" };
     }
     parsed.new_fragments = fragments;
-    // states 的事发时间同样必须是 [time]（渲染成相对时间），写死日期兜底换回
-    if (parsed.new_info.states?.length) {
-      parsed.new_info.states = parsed.new_info.states.map(ensureTimePlaceholder);
-    }
 
     logDebug(
       "巩固返回",
       `片段 ${fragments.length} 条 / 归并 ${parsed.event_merges.length} 组 / 摘要 ${parsed.session_digest ? `${parsed.session_digest.length} 字` : "无"}\n${fragments.map((f) => `- ${f.gist}（P${f.priority}）`).join("\n")}`
     );
-    return parsed;
+    return { ok: true, data: parsed };
   } catch (err: unknown) {
     clearTimeout(timer);
     if (err instanceof Error && err.name === "AbortError") {
       logDebug("巩固超时", `${timeoutMs}ms 已丢弃`);
-    } else {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      logDebug("巩固失败", errMsg);
+      return { ok: false, reason: `超时（${Math.round(timeoutMs / 1000)}s 无响应）` };
     }
-    return null;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logDebug("巩固失败", errMsg);
+    return { ok: false, reason: errMsg };
   }
 }
 
@@ -291,7 +350,7 @@ export async function generateSchedule(
   }
 
   const prompt = (schedule_generation_prompt || DEFAULT_SCHEDULE_PROMPT)
-    .replace("{{persona}}", systemPrompt)
+    .replace("{{persona}}", () => fillIdentity(systemPrompt))
     .replace("{{last_week}}", lastWeekText);
 
   const controller = new AbortController();
@@ -394,6 +453,8 @@ JSON 对象，包含 schedule 数组，每个元素：
 export interface MomentDraft {
   content: string;
   mood: string;
+  /** 随帖子一次生成的好友留言（未必有），调用方按名字找人、延迟落库 */
+  friendComments: Array<{ name: string; content: string }>;
 }
 
 /** 发帖上下文 */
@@ -402,6 +463,10 @@ export interface MomentGenerationContext {
   scene: string;
   /** 发帖计划里的主题/心情提示 */
   themeHint: string;
+  /** 最近的共同经历（时间倒序，一行一件），只作情绪参考，不许复述细节 */
+  memories: string[];
+  /** 看到了这条动态的人（掷骰筛过的好友：名字 + 一句关系 + 小传），评论区只允许来自这些人 */
+  friends: Array<{ name: string; summary: string; profile: string }>;
   /** 最近动态（时间升序），避免重复、保持连贯 */
   recentMoments: Array<{ author: MomentAuthor; content: string; mood: string; authorLabel?: string }>;
 }
@@ -413,7 +478,8 @@ function formatMomentLine(m: {
   mood: string;
   authorLabel?: string;
 }): string {
-  const who = m.authorLabel?.trim() || (m.author === "ai" ? "你" : "[user]");
+  // 调用方负责传真名；兜底也绝不能漏出 [user] 这种占位符
+  const who = fillIdentity(m.authorLabel?.trim() || (m.author === "ai" ? "你" : "用户"));
   return `${who}（${m.mood || "未标"}）：${m.content}`;
 }
 
@@ -437,12 +503,27 @@ export async function generateMoment(
   const config = routing.background_extraction_config;
 
   const prompt = (moment_generation_prompt || "")
-    .replace("{{persona}}", systemPrompt)
-    .replace("{{scene}}", ctx.scene || "（照常的一天）")
+    .replace("{{persona}}", () => fillIdentity(systemPrompt))
+    .replace("{{scene}}", () => fillIdentity(ctx.scene || "（照常的一天）"))
     .replace("{{theme_hint}}", ctx.themeHint || "（没有特别想发的，随便发点什么）")
-    .replace("{{recent}}", ctx.recentMoments.length > 0
-      ? ctx.recentMoments.map(formatMomentLine).join("\n")
-      : "（还没有发过动态）");
+    .replace("{{memories}}", () =>
+      ctx.memories.length > 0 ? ctx.memories.map((m) => `- ${m}`).join("\n") : "（最近没什么特别的）"
+    )
+    .replace("{{friends}}", () =>
+      ctx.friends.length > 0
+        ? ctx.friends
+            .map(
+              (f) =>
+                `- ${fillIdentity(f.name)}${f.summary ? `（${fillIdentity(f.summary)}）` : ""}\n  ${fillIdentity(f.profile.replace(/\s+/g, " ")).slice(0, 160)}`
+            )
+            .join("\n")
+        : "（这次没有别人看到）"
+    )
+    .replace("{{recent}}", () =>
+      ctx.recentMoments.length > 0
+        ? ctx.recentMoments.map(formatMomentLine).join("\n")
+        : "（还没有发过动态）"
+    );
 
   const requestMessages = [
     { role: "system" as const, content: "你是一个动态文案生成引擎，只输出 JSON。" },
@@ -471,11 +552,32 @@ export async function generateMoment(
     logDebug("动态生成返回", `=== 完整响应 ===\n${text ?? "（空回复）"}`);
     if (!text) return null;
 
-    const parsed = JSON.parse(text) as { content?: string; mood?: string };
+    const parsed = JSON.parse(text) as {
+      content?: string;
+      mood?: string;
+      friend_comments?: Array<{ name?: string; content?: string }>;
+    };
     const content = (parsed.content ?? "").trim();
     if (!content) return null;
 
-    return { content: content.slice(0, 300), mood: normalizeMood(parsed.mood) };
+    // 只收名单里的人的留言：模型偶尔会自造名字，那些直接丢掉；一人一条，条数不设上限
+    const allowed = new Set(ctx.friends.map((f) => f.name));
+    const rawComments = Array.isArray(parsed.friend_comments) ? parsed.friend_comments : [];
+    const seenNames = new Set<string>();
+    const friendComments: Array<{ name: string; content: string }> = [];
+    for (const item of rawComments) {
+      const name = String(item?.name ?? "").trim();
+      const body = String(item?.content ?? "").trim();
+      if (!body || !allowed.has(name) || seenNames.has(name)) continue;
+      seenNames.add(name);
+      friendComments.push({ name, content: body.slice(0, 120) });
+    }
+
+    return {
+      content: content.slice(0, 300),
+      mood: normalizeMood(parsed.mood),
+      friendComments,
+    };
   } catch (err: unknown) {
     clearTimeout(timer);
     if (err instanceof Error && err.name === "AbortError") {
@@ -527,15 +629,18 @@ export async function generateDailyLife(
   const { daily_life_generation_prompt } = getPrompts();
   if (!daily_life_generation_prompt) return null;
 
-  const prompt = daily_life_generation_prompt
-    .replace("{{persona}}", systemPrompt)
-    .replace("{{date}}", ctx.date)
-    .replace("{{day_context}}", ctx.dayContext)
-    .replace("{{weather}}", ctx.weather)
-    .replace("{{baseline}}", ctx.baseline)
-    .replace("{{yesterday}}", ctx.yesterday)
-    .replace("{{late_night}}", ctx.lateNight)
-    .replace("{{user_context}}", ctx.userContext);
+  // 模板正文里的「和[user]有关的事」也要换成昵称：整段再过滤一遍
+  const prompt = fillIdentity(
+    daily_life_generation_prompt
+      .replace("{{persona}}", () => fillIdentity(systemPrompt))
+      .replace("{{date}}", ctx.date)
+      .replace("{{day_context}}", ctx.dayContext)
+      .replace("{{weather}}", ctx.weather)
+      .replace("{{baseline}}", ctx.baseline)
+      .replace("{{yesterday}}", ctx.yesterday)
+      .replace("{{late_night}}", ctx.lateNight)
+      .replace("{{user_context}}", ctx.userContext)
+  );
 
   const parsed = await requestBackgroundJson(prompt, timeoutMs, "每日实况", 0.8);
   if (!parsed) return null;
@@ -591,10 +696,10 @@ export async function generateFriendRoster(
   if (!friend_persona_generation_prompt) return [];
 
   const prompt = friend_persona_generation_prompt
-    .replace("{{persona}}", ctx.persona)
-    .replace("{{scene}}", ctx.scene || "（平常的一天）")
-    .replace("{{user_context}}", ctx.userContext || "（还不了解[user]）")
-    .replace("{{preferences}}", ctx.preferences || "（[user]没有特别要求）")
+    .replace("{{persona}}", () => fillIdentity(ctx.persona))
+    .replace("{{scene}}", () => fillIdentity(ctx.scene || "（平常的一天）"))
+    .replace("{{user_context}}", () => fillIdentity(ctx.userContext || "（还不了解[user]）"))
+    .replace("{{preferences}}", () => fillIdentity(ctx.preferences || "（[user]没有特别要求）"))
     .replace("{{count}}", String(ctx.count));
 
   const parsed = await requestBackgroundJson(prompt, timeoutMs, "好友花名册", 1.0);
@@ -634,19 +739,20 @@ export interface FriendMomentContext {
 export async function generateFriendMoment(
   ctx: FriendMomentContext,
   timeoutMs: number = 30000
-): Promise<MomentDraft | null> {
+): Promise<{ content: string; mood: string } | null> {
   const { friend_moment_generation_prompt } = getPrompts();
   if (!friend_moment_generation_prompt) return null;
 
   const prompt = friend_moment_generation_prompt
     .replace("{{friend_name}}", ctx.friendName)
-    .replace("{{profile}}", ctx.profile)
-    .replace("{{scene}}", ctx.scene || "（平常的一天）")
+    .replace("{{profile}}", () => fillIdentity(ctx.profile))
+    .replace("{{scene}}", () => fillIdentity(ctx.scene || "（平常的一天）"))
     .replace(
       "{{recent}}",
-      ctx.recent.length > 0
-        ? ctx.recent.map((m) => `${m.author}（${m.mood || "未标"}）：${m.content}`).join("\n")
-        : "（最近没人发什么）"
+      () =>
+        ctx.recent.length > 0
+          ? ctx.recent.map((m) => `${fillIdentity(m.author)}（${m.mood || "未标"}）：${m.content}`).join("\n")
+          : "（最近没人发什么）"
     );
 
   const parsed = await requestBackgroundJson(prompt, timeoutMs, `好友发帖·${ctx.friendName}`, 0.95);
@@ -673,26 +779,102 @@ export async function generateFriendComment(
   const { friend_comment_prompt } = getPrompts();
   if (!friend_comment_prompt) return null;
 
-  const prompt = friend_comment_prompt
-    .replace("{{friend_name}}", ctx.friendName)
-    .replace("{{profile}}", ctx.profile)
-    .replace("{{preferences}}", ctx.preferences || "（没有特别要求）")
-    .replace(
-      "{{moment}}",
-      `${ctx.moment.authorLabel}（${ctx.moment.mood || "未标"}）：${ctx.moment.content}`
-    )
-    .replace(
-      "{{comments}}",
-      ctx.comments.length > 0
-        ? ctx.comments.map((c) => `${c.authorLabel}：${c.content}`).join("\n")
-        : "（还没有评论）"
-    );
+  // 模板正文里的「（[user]写下的要求）」也要换成昵称：整段再过滤一遍
+  const prompt = fillIdentity(
+    friend_comment_prompt
+      .replace("{{friend_name}}", ctx.friendName)
+      .replace("{{profile}}", () => fillIdentity(ctx.profile))
+      .replace("{{preferences}}", () => fillIdentity(ctx.preferences || "（没有特别要求）"))
+      .replace(
+        "{{moment}}",
+        () => `${fillIdentity(ctx.moment.authorLabel)}（${ctx.moment.mood || "未标"}）：${ctx.moment.content}`
+      )
+      .replace(
+        "{{comments}}",
+        () =>
+          ctx.comments.length > 0
+            ? ctx.comments.map((c) => `${fillIdentity(c.authorLabel)}：${c.content}`).join("\n")
+            : "（还没有评论）"
+      )
+  );
 
   const parsed = await requestBackgroundJson(prompt, timeoutMs, `好友评论·${ctx.friendName}`, 0.95);
   if (!parsed) return null;
 
   const content = String(parsed.content ?? "").trim();
   return content ? content.slice(0, 120) : null;
+}
+
+export interface FriendCommentCandidate {
+  name: string;
+  summary: string;
+  profile: string;
+}
+
+export interface FriendCommentsContext {
+  preferences: string;
+  moment: { authorLabel: string; content: string; mood: string };
+  comments: Array<{ authorLabel: string; content: string }>;
+  /** 掷骰筛出来的「看到了这条动态的人」 */
+  candidates: FriendCommentCandidate[];
+}
+
+/**
+ * 一次生成「谁开口、说什么」：候选池由调用方掷骰筛出，
+ * 模型自己决定谁真的会留言，也可以一个人都不回。
+ */
+export async function generateFriendComments(
+  ctx: FriendCommentsContext,
+  timeoutMs: number = 30000
+): Promise<Array<{ name: string; content: string }>> {
+  const { friend_comments_prompt } = getPrompts();
+  if (!friend_comments_prompt || ctx.candidates.length === 0) return [];
+
+  // 模板正文里的「（[user]写下的要求）」也要换成昵称：整段再过滤一遍
+  const prompt = fillIdentity(
+    friend_comments_prompt
+      .replace("{{preferences}}", () => fillIdentity(ctx.preferences || "（没有特别要求）"))
+      .replace(
+        "{{moment}}",
+        () => `${fillIdentity(ctx.moment.authorLabel)}（${ctx.moment.mood || "未标"}）：${ctx.moment.content}`
+      )
+      .replace("{{comments}}", () =>
+        ctx.comments.length > 0
+          ? ctx.comments.map((c) => `${fillIdentity(c.authorLabel)}：${c.content}`).join("\n")
+          : "（还没有评论）"
+      )
+      .replace("{{candidates}}", () =>
+        ctx.candidates
+          .map(
+            (c) =>
+              `- ${fillIdentity(c.name)}${c.summary ? `（${fillIdentity(c.summary)}）` : ""}\n  ${fillIdentity(
+                c.profile.replace(/\s+/g, " ")
+              ).slice(0, 320)}`
+          )
+          .join("\n")
+      )
+  );
+
+  const parsed = await requestBackgroundJson(
+    prompt,
+    timeoutMs,
+    `好友评论·${ctx.candidates.length} 位候选`,
+    0.95
+  );
+  if (!parsed) return [];
+
+  const allowed = new Map(ctx.candidates.map((c) => [c.name, c]));
+  const raw = Array.isArray(parsed.comments) ? parsed.comments : [];
+  const seen = new Set<string>();
+  const out: Array<{ name: string; content: string }> = [];
+  for (const item of raw) {
+    const name = String(item?.name ?? "").trim();
+    const content = String(item?.content ?? "").trim();
+    if (!content || !allowed.has(name) || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ name, content: content.slice(0, 120) });
+  }
+  return out;
 }
 
 /**
@@ -762,18 +944,23 @@ export async function generateMomentComment(
   const config = routing.background_extraction_config;
 
   const task = ctx.replyTo
-    ? `回复 [user] 的这条评论：「${ctx.replyTo}」`
+    ? `回复${fillIdentity("[user]")}的这条评论：「${ctx.replyTo}」`
     : "给这条动态留一条你的评论";
 
   const prompt = (moment_comment_prompt || "")
-    .replace("{{persona}}", systemPrompt)
-    .replace("{{moment}}", formatMomentLine(ctx.moment))
-    .replace("{{comments}}", ctx.comments.length > 0
-      ? ctx.comments
-          .map((c) => `${c.authorLabel ?? (c.author === "ai" ? "你" : "[user]")}：${c.content}`)
-          .join("\n")
-      : "（还没有评论）")
-    .replace("{{task}}", task);
+    .replace("{{persona}}", () => fillIdentity(systemPrompt))
+    .replace("{{moment}}", () => formatMomentLine(ctx.moment))
+    .replace("{{comments}}", () =>
+      ctx.comments.length > 0
+        ? ctx.comments
+            .map(
+              (c) =>
+                `${fillIdentity(c.authorLabel ?? (c.author === "ai" ? "你" : "[user]"))}：${c.content}`
+            )
+            .join("\n")
+        : "（还没有评论）"
+    )
+    .replace("{{task}}", () => fillIdentity(task));
 
   const requestMessages = [
     { role: "system" as const, content: "你是一个评论文案生成引擎，只输出 JSON。" },

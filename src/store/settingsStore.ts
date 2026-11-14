@@ -9,8 +9,6 @@ import { getUserInfo, updateBasicIdentityNickname } from "@/db/queries";
 
 const API_KEY_STORAGE = "openai_api_key";
 const BASE_URL_STORAGE = "openai_base_url";
-/** 已废弃：昵称真相源统一为 user_info.basic_identity.nickname，此 key 仅用于旧数据迁移 */
-const LEGACY_NICKNAME_STORAGE = "user_nickname";
 const AI_NAME_STORAGE = "ai_name";
 const STREAM_OUTPUT_STORAGE = "stream_output";
 const THINKING_MODE_STORAGE = "thinking_mode";
@@ -95,10 +93,9 @@ export const useSettingsStore = create<SettingsState>((set) => ({
 
   loadApiKey: async () => {
     try {
-      const [key, url, legacyNickname, aiName, stream, thinking, autoFocus, blocked, friendPrefs, lightJson, darkJson] = await Promise.all([
+      const [key, url, aiName, stream, thinking, autoFocus, blocked, friendPrefs, lightJson, darkJson] = await Promise.all([
         AsyncStorage.getItem(API_KEY_STORAGE),
         AsyncStorage.getItem(BASE_URL_STORAGE),
-        AsyncStorage.getItem(LEGACY_NICKNAME_STORAGE),
         AsyncStorage.getItem(AI_NAME_STORAGE),
         AsyncStorage.getItem(STREAM_OUTPUT_STORAGE),
         AsyncStorage.getItem(THINKING_MODE_STORAGE),
@@ -123,13 +120,8 @@ export const useSettingsStore = create<SettingsState>((set) => ({
         try { customColorsDark = JSON.parse(darkJson); } catch {}
       }
 
-      // 昵称真相源统一到 user_info 表：旧 AsyncStorage 值迁移一次后即弃用
-      let nickname = getUserInfo()?.basic_identity?.nickname ?? "";
-      if (!nickname && legacyNickname) {
-        nickname = legacyNickname.trim();
-        if (nickname) updateBasicIdentityNickname(nickname);
-        await AsyncStorage.removeItem(LEGACY_NICKNAME_STORAGE);
-      }
+      // 昵称的唯一真相源是 user_info.basic_identity，AsyncStorage 不再存副本
+      const nickname = getUserInfo()?.basic_identity?.nickname ?? "";
 
       set({
         apiKey: key || "",

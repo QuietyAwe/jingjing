@@ -13,6 +13,8 @@ import { useEffect } from "react";
 import dayjs from "dayjs";
 import {
   getMoments,
+  getFragmentsByEventIds,
+  getRecentSharedEvents,
   insertMoment,
   getPendingPlanForSlot,
   skipMissedPostPlans,
@@ -23,7 +25,8 @@ import {
   getFriendById,
   getUserInfo,
 } from "@/db/queries";
-import type { PostPlanItem } from "@/types/schema";
+import { anchorLine } from "@/prompt/assembler";
+import type { FriendPersona, PostPlanItem } from "@/types/schema";
 import { generateMoment, generateFriendMoment } from "@/llm/background";
 import { getPrompts, getThresholds } from "@/prompt/config";
 import {
@@ -37,6 +40,7 @@ import {
 import { ensureDailyLife, dayKey, stableHash } from "@/memory/dailyLife";
 import { checkAndGenerateFriends } from "@/friends/roster";
 import { friendName } from "@/friends/persona";
+import { scheduleFriendComment } from "@/friends/service";
 import { notifyMomentUpdates } from "@/moments/service";
 import { recordAiMomentMemory, recordFriendMomentMemory } from "@/moments/memory";
 import { logDebug } from "@/store/chatStore";
@@ -145,6 +149,60 @@ export async function checkAndPostDueMoments(): Promise<void> {
   }
 }
 
+/**
+ * 最近的共同经历：近 3 天最多 3 件，一件一行（标题 + 最新一句印象）
+ *
+ * 只给「发生了什么」，不给整段细节 —— 动态是随口一说，不是复盘。
+ */
+function recentMemoryLines(): string[] {
+  const userInfo = getUserInfo();
+  const events = getRecentSharedEvents(3, 3);
+  if (events.length === 0) return [];
+  const fragments = getFragmentsByEventIds(events.map((e) => e.id));
+  return events.map((event) => {
+    const title = anchorLine(event.event_text, event.timestamp, userInfo);
+    const latest = fragments.get(event.id)?.slice(-1)[0];
+    if (!latest) return title;
+    const gist = anchorLine(latest.gist || latest.summary.slice(0, 24), latest.timestamp, userInfo);
+    return gist === title ? title : `${title}｜${gist}`;
+  });
+}
+
+/** 动态里的作者署名：提示词里必须出现真名，不能漏出 [user]/[ai] */
+function momentAuthorLabel(author: string, friendId?: number | null): string {
+  if (author === "friend") return friendName(friendId) || "朋友";
+  if (author === "ai") return useSettingsStore.getState().ai_name.trim() || "私藏";
+  return getUserInfo()?.basic_identity.nickname?.trim() || "用户";
+}
+
+/**
+ * 每位已登场好友独立掷骰：掷中的才算「看到了这条动态」。
+ * 掷中的人设会一起进提示词，由模型判断谁真的会开口（可以一个都不回）。
+ */
+function pickSeenFriends(): FriendPersona[] {
+  const { friend_comment_probability } = getThresholds();
+  return getDebutedFriends().filter(() => Math.random() < friend_comment_probability);
+}
+
+/**
+ * 随帖子一起生成的好友留言：按名字找人，错开延迟落库。
+ * 内容已经写好了，延迟只决定「什么时候出现在评论区」。
+ */
+function schedulePresetComments(
+  momentId: number,
+  comments: Array<{ name: string; content: string }>
+): void {
+  if (comments.length === 0) return;
+  const friends = getDebutedFriends();
+  comments.forEach((comment, index) => {
+    const friend = friends.find((f) => f.name === comment.name);
+    if (!friend) return;
+    // 第一条 20s~2min，后面每条再往后推 1~3min
+    const delay = 20_000 + Math.random() * 100_000 + index * (60_000 + Math.random() * 120_000);
+    scheduleFriendComment(momentId, friend, comment.content, Math.round(delay));
+  });
+}
+
 /** 按计划行生成并发布一条 AI 动态；返回是否已处理完（失败保留 pending 下轮重试） */
 async function postFromPlan(plan: PostPlanItem): Promise<boolean> {
   if (posting) return false;
@@ -158,11 +216,18 @@ async function postFromPlan(plan: PostPlanItem): Promise<boolean> {
     const draft = await generateMoment(system_prompt, {
       scene: scene ? formatScene(scene) : "",
       themeHint: plan.theme_hint,
+      memories: recentMemoryLines(),
+      // 掷骰筛出的「看到了这条动态的人」：评论区只能来自这些名字，人设一起给模型
+      friends: pickSeenFriends().map((f) => ({
+        name: f.name,
+        summary: f.summary,
+        profile: f.profile,
+      })),
       recentMoments: recent.map((m) => ({
         author: m.author,
         content: m.content,
         mood: m.mood,
-        authorLabel: m.author === "friend" ? friendName(m.friend_id) : undefined,
+        authorLabel: momentAuthorLabel(m.author, m.friend_id),
       })),
     });
 
@@ -178,6 +243,8 @@ async function postFromPlan(plan: PostPlanItem): Promise<boolean> {
     notifyMomentUpdates();
     // AI 自身动态存档进记忆，供检索时自我引用
     recordAiMomentMemory(momentId);
+    // 随帖子一起生成的好友留言：错开延迟落库，看起来是陆续冒出来的
+    schedulePresetComments(momentId, draft.friendComments);
     return true;
   } finally {
     posting = false;

@@ -70,7 +70,6 @@ export function getConfigDefault(key: string): string {
     consolidation_idle_minutes: String(thresholds.consolidation_idle_minutes),
     context_history_rounds: String(thresholds.context_history_rounds),
     context_token_budget: String(thresholds.context_token_budget),
-    context_active_events_limit: String(thresholds.context_active_events_limit),
     detail_visible_weight: String(thresholds.detail_visible_weight),
     moment_ai_comment_probability: String(thresholds.moment_ai_comment_probability),
     moment_ai_reply_delay_ms: String(thresholds.moment_ai_reply_delay_ms),
@@ -78,7 +77,6 @@ export function getConfigDefault(key: string): string {
     friend_roster_size: String(thresholds.friend_roster_size),
     friend_moment_probability: String(thresholds.friend_moment_probability),
     friend_comment_probability: String(thresholds.friend_comment_probability),
-    friend_roster_visible_days: String(thresholds.friend_roster_visible_days),
     recent_moment_recall_weight: String(thresholds.recent_moment_recall_weight),
     ebbinghaus_decay_rate: String(decay.ebbinghaus_decay_rate),
     epiphany_trigger_probability: String(decay.epiphany_trigger_probability),
@@ -91,13 +89,13 @@ export function getConfigDefault(key: string): string {
     system_prompt: config.prompts.system_prompt,
     extraction_prompt: config.prompts.extraction_prompt,
     memory_injection_template: config.prompts.memory_injection_template,
-    memory_event_template: config.prompts.memory_event_template,
     moment_generation_prompt: config.prompts.moment_generation_prompt,
     moment_comment_prompt: config.prompts.moment_comment_prompt,
     daily_life_generation_prompt: config.prompts.daily_life_generation_prompt,
     friend_persona_generation_prompt: config.prompts.friend_persona_generation_prompt,
     friend_moment_generation_prompt: config.prompts.friend_moment_generation_prompt,
     friend_comment_prompt: config.prompts.friend_comment_prompt,
+    friend_comments_prompt: config.prompts.friend_comments_prompt,
     state_injection_template: config.prompts.state_injection_template,
     cold_start_template: config.prompts.cold_start_template,
     schedule_generation_prompt: config.prompts.schedule_generation_prompt,
@@ -131,31 +129,14 @@ export async function setCustomSystemPrompt(prompt: string): Promise<void> {
 // 各类配置 getter（带覆盖支持）
 // ============================================================
 
-/**
- * 旧版（12 变量）状态区模板的废弃变量——画像改两桶后这些变量无数据可填，
- * 存量覆盖层若还在引用就自动回退到新版默认模板
- */
-const LEGACY_STATE_VARS =
-  /\{\{(likes|dislikes|comm_preference|personality_traits|current_stressors|long_term_goals|ongoing_tasks)\}\}/;
-
-/** 旧版提取指令还在输出五块字段（preferences/psycho_state/life_quests），新合并逻辑不认，同样回退默认 */
-const LEGACY_EXTRACTION = /(preferences|psycho_state|life_quests)/;
-
 /** 获取 prompts 配置 */
 export function getPrompts() {
-  const stateTpl = getOverride("state_injection_template", config.prompts.state_injection_template);
-  const extractionTpl = getOverride("extraction_prompt", config.prompts.extraction_prompt);
   return {
     system_prompt: getOverride("system_prompt", config.prompts.system_prompt),
-    extraction_prompt: LEGACY_EXTRACTION.test(extractionTpl)
-      ? config.prompts.extraction_prompt
-      : extractionTpl,
-    state_injection_template: LEGACY_STATE_VARS.test(stateTpl)
-      ? config.prompts.state_injection_template
-      : stateTpl,
+    extraction_prompt: getOverride("extraction_prompt", config.prompts.extraction_prompt),
+    state_injection_template: getOverride("state_injection_template", config.prompts.state_injection_template),
     cold_start_template: getOverride("cold_start_template", config.prompts.cold_start_template),
     memory_injection_template: getOverride("memory_injection_template", config.prompts.memory_injection_template),
-    memory_event_template: getOverride("memory_event_template", config.prompts.memory_event_template),
     schedule_generation_prompt: getOverride("schedule_generation_prompt", config.prompts.schedule_generation_prompt),
     event_reminder_template: getOverride("event_reminder_template", config.prompts.event_reminder_template),
     event_care_template: getOverride("event_care_template", config.prompts.event_care_template),
@@ -165,6 +146,7 @@ export function getPrompts() {
     friend_persona_generation_prompt: getOverride("friend_persona_generation_prompt", config.prompts.friend_persona_generation_prompt),
     friend_moment_generation_prompt: getOverride("friend_moment_generation_prompt", config.prompts.friend_moment_generation_prompt),
     friend_comment_prompt: getOverride("friend_comment_prompt", config.prompts.friend_comment_prompt),
+    friend_comments_prompt: getOverride("friend_comments_prompt", config.prompts.friend_comments_prompt),
   };
 }
 
@@ -191,7 +173,6 @@ export function getThresholds() {
     consolidation_idle_minutes: getOverride("consolidation_idle_minutes", config.thresholds.consolidation_idle_minutes),
     context_history_rounds: getOverride("context_history_rounds", config.thresholds.context_history_rounds),
     context_token_budget: getOverride("context_token_budget", config.thresholds.context_token_budget),
-    context_active_events_limit: getOverride("context_active_events_limit", config.thresholds.context_active_events_limit),
     detail_visible_weight: getOverride("detail_visible_weight", config.thresholds.detail_visible_weight),
     moment_ai_comment_probability: getOverride("moment_ai_comment_probability", config.thresholds.moment_ai_comment_probability),
     moment_ai_reply_delay_ms: getOverride("moment_ai_reply_delay_ms", config.thresholds.moment_ai_reply_delay_ms),
@@ -199,7 +180,6 @@ export function getThresholds() {
     friend_roster_size: getOverride("friend_roster_size", config.thresholds.friend_roster_size),
     friend_moment_probability: getOverride("friend_moment_probability", config.thresholds.friend_moment_probability),
     friend_comment_probability: getOverride("friend_comment_probability", config.thresholds.friend_comment_probability),
-    friend_roster_visible_days: getOverride("friend_roster_visible_days", config.thresholds.friend_roster_visible_days),
     recent_moment_recall_weight: getOverride("recent_moment_recall_weight", config.thresholds.recent_moment_recall_weight),
   };
 }

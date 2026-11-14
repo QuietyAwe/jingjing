@@ -47,3 +47,4 @@ $null
 
 # CodeBuddy project data（项目数据，勿删，仅不入库）
 .codebuddy/
+tmp/

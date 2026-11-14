@@ -10,7 +10,7 @@
 // ============================================================
 
 import dayjs from "dayjs";
-import { getDailyLog, upsertDailyLog, getRecentDailyLogs, getUserInfo, activeStates, getUpcomingEvents, getWeekSchedule, getMoments } from "@/db/queries";
+import { getDailyLog, upsertDailyLog, getRecentDailyLogs, getActiveConditions, getUpcomingEvents, getWeekSchedule, getMoments } from "@/db/queries";
 import { generateDailyLife } from "@/llm/background";
 import { hasApiKey } from "@/llm/client";
 import { getPrompts } from "@/prompt/config";
@@ -218,25 +218,23 @@ function formatLogForPrompt(row: DailyLog | null): string {
 }
 
 /**
- * 用户在场感：今天和[user]有关的事（约定/近况/昨晚聊很晚/昨天发的心情）。
+ * 用户在场感：今天和[user]有关的事（约定/当前处境/昨晚聊很晚/昨天发的心情）。
  * 这是「AI 的生活里有用户」的入口——不是让 AI 报备，是让今天的行为被用户影响。
  */
 function buildUserContext(now: dayjs.Dayjs): string {
   const lines: string[] = [];
-  const info = getUserInfo();
 
-  if (info) {
-    // 今天要发生的事：今天有面试/复查，实况里就该出现
-    for (const e of getUpcomingEvents()) {
-      const due = dayjs(e.timestamp);
-      if (!due.isValid()) continue;
-      if (due.isSame(now, "day")) {
-        lines.push(`今天 [user] 有「${e.event_text}」（${due.format("HH:mm")}）`);
-      }
+  // 今天要发生的事：今天有面试/复查，实况里就该出现
+  for (const e of getUpcomingEvents()) {
+    const due = dayjs(e.timestamp);
+    if (!due.isValid()) continue;
+    if (due.isSame(now, "day")) {
+      lines.push(`今天 [user] 有「${e.event_text}」（${due.format("HH:mm")}）`);
     }
-    for (const s of activeStates(info, now).slice(-2)) {
-      lines.push(`[user] 近况：${s.text}`);
-    }
+  }
+  // 仍在持续的处境：在生病、在赶项目，AI 今天的节奏会跟着受影响
+  for (const c of getActiveConditions().slice(0, 2)) {
+    lines.push(`[user] 当前处境：${c.event_text}`);
   }
 
   // 昨晚聊到很晚 → 今早有代价（只读消息时间戳，不写任何东西）

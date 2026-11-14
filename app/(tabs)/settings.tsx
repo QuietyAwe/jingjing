@@ -29,7 +29,7 @@ import {
   resetConfigOverride,
   loadConfigOverrides,
 } from "@/prompt/config";
-import { getUserInfo, setUserInfo as persistUserInfo, getTopActive, getActiveCount, clearAllData, updateEventText, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById, getUpcomingEvents } from "@/db/queries";
+import { getUserInfo, setUserInfo as persistUserInfo, getTopActive, getActiveCount, clearAllData, updateEventParams, replaceEventAliases, getEventAliases, updateFragmentParams, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById, getUpcomingEvents, getActiveConditions, startCondition, resolveCondition } from "@/db/queries";
 import { getWeekStart } from "@/memory/scheduler";
 import { identityNames } from "@/memory/identity";
 import {
@@ -41,6 +41,8 @@ import {
 } from "@/db/queries";
 import { rebuildFriendRoster, replaceFriend } from "@/friends/roster";
 import { friendAvatarText } from "@/friends/persona";
+import { formatTodayLine } from "@/utils/holidays";
+import { normalizePlaceholders } from "@/prompt/assembler";
 import { fetchModels, getClient } from "@/llm/client";
 import { CollapsibleSection } from "@/components/CollapsibleSection";
 import { exportBackup, importBackup } from "../../src/utils/backup";
@@ -48,12 +50,12 @@ import * as Updates from "expo-updates";
 import { RELEASE_VERSION } from "@/version";
 import type { UserInfo, MemoryEvent, MemoryFragment, ConsolidationResponse, FriendPersona } from "@/types/schema";
 
-/** 人设提取结果（与巩固流 new_info 同构：属性/状态 两桶） */
-type PersonaInfo = ConsolidationResponse["new_info"];
+/** 人设提取结果：属性桶同巩固流，另加「仍在持续的处境」标签（落成 condition 事件） */
+type PersonaInfo = ConsolidationResponse["new_info"] & { conditions?: string[] };
 
 // 替换片段中的 [user] [ai] [time] 占位符
 function replaceFragmentPlaceholder(text: string, timestamp: string, nickname: string, aiName?: string): string {
-  let result = text.replace(/\[user\]/gi, nickname || "用户");
+  let result = normalizePlaceholders(text).replace(/\[user\]/gi, nickname || "用户");
   result = result.replace(/\[ai\]/gi, aiName || "私藏");
   if (result.includes("[time]") && timestamp) {
     const now = dayjs();
@@ -79,6 +81,10 @@ function replaceFragmentPlaceholder(text: string, timestamp: string, nickname: s
   return result;
 }
 
+/** 事件字段的中文名，设置页只读展示用 */
+const MEMORY_KIND_LABEL: Record<string, string> = { daily: "日常琐事", episode: "共同经历", condition: "持续处境" };
+const EVENT_STATUS_LABEL: Record<string, string> = { none: "普通", upcoming: "待发生", caring: "关心中", archived: "已归档" };
+
 // 配置项元数据
 interface ConfigField {
   key: string;
@@ -90,15 +96,13 @@ interface ConfigField {
 const THRESHOLD_FIELDS: ConfigField[] = [
   { key: "consolidation_window_turns", label: "巩固最小窗口（轮）", type: "number", description: "少于这么多轮不触发巩固，避免每聊两句就调一次模型（默认 10）" },
   { key: "consolidation_token_budget", label: "巩固 token 预算", type: "number", description: "未巩固对话攒到这么多 token 就触发巩固（默认 10000，约 50 轮）" },
-  { key: "consolidation_idle_minutes", label: "空闲巩固（分钟）", type: "number", description: "用户停多久后把不足预算的积压也消化掉（默认 30）；同时是上下文缓存的守卫阈值" },
-  { key: "context_history_rounds", label: "无摘要时回退轮数", type: "number", description: "没有会话摘要时（首次使用 / 旧数据）最多带多少轮历史" },
-  { key: "context_token_budget", label: "上下文总预算（token）", type: "number", description: "人设 + 状态区 + 摘要 + 历史 + 记忆区的总预算（默认 14000）" },
-  { key: "context_active_events_limit", label: "记忆区事件上限", type: "number", description: "记忆区最多注入几条事件；本轮没检索命中时不注入记忆" },
+  { key: "consolidation_idle_minutes", label: "空闲巩固（分钟）", type: "number", description: "用户停多久后把不足预算的积压也消化掉（默认 30）" },
+  { key: "context_history_rounds", label: "冷启动 / 好友私聊轮数", type: "number", description: "冷启动（还没有摘要，首次使用 / 旧数据）和好友私聊最多带多少轮历史；主聊天有了摘要后按巩固游标全量带上，不按轮数截断" },
+  { key: "context_token_budget", label: "上下文总预算（token）", type: "number", description: "人设 + 状态区 + 摘要 + 历史 + 记忆区的目标预算（默认 18000）。超了只会降级/删除记忆区，未巩固的历史一条都不删——删了这段经历就永远进不了记忆" },
   { key: "detail_visible_weight", label: "详细/简略切换权重", type: "number", description: "实时权重低于此值的记忆只显示一句话摘要（默认 60，调高=更多记忆变简略）" },
   { key: "friend_roster_size", label: "好友人数", type: "number", description: "AI 熟人圈的固定人数（默认 5，重建花名册时生效）" },
   { key: "friend_moment_probability", label: "好友每日发帖概率", type: "number", description: "每位好友每天发一条动态的概率（0~1，默认 0.35），太高会抢主角戏份" },
-  { key: "friend_comment_probability", label: "好友评论概率", type: "number", description: "每条动态招来一位好友评论的概率（0~1，默认 0.3）" },
-  { key: "friend_roster_visible_days", label: "花名册活跃窗口", type: "number", description: "只把最近这么多天有互动（或刚建立关系）的好友写进状态区，默认 14 天" },
+  { key: "friend_comment_probability", label: "好友评论概率", type: "number", description: "每位好友「刷到这条动态」的概率（0~1，默认 0.5）。刷到的人设一起进提示词，由 AI 自己判断谁真的会留言——可以一个都不留，人数不设上限" },
   { key: "recent_moment_recall_weight", label: "近期动态回想权重", type: "number", description: "每 1× 动态新近度折算的灵光一闪概率（默认 0.2）：用户刚评论/自己刚发帖 = 4× → 约 85%" },
 ];
 
@@ -117,9 +121,8 @@ const PROMPT_GROUPS: PromptGroup[] = [
     description: "按消息发送顺序排列，越靠前缓存命中率越高",
     fields: [
       { key: "system_prompt", label: "① 系统人设", type: "multiline", description: "定义 AI 的角色与人格。此部分作为独立消息发送，缓存命中率最高。" },
-      { key: "state_injection_template", label: "② 状态区注入模板", type: "multiline", description: "定义用户信息的注入格式。两次巩固之间保持稳定，空字段自动隐藏。" },
-      { key: "memory_injection_template", label: "③ 记忆区注入模板", type: "multiline", description: "定义记忆区的整体结构。仅检索命中时注入，未命中整块不出现。" },
-      { key: "memory_event_template", label: "└ 记忆事件格式", type: "multiline", description: "定义单条记忆事件的格式。[time] 为相对于事件发生时间的描述。" },
+      { key: "state_injection_template", label: "② 状态区注入模板", type: "multiline", description: "定义用户信息的注入格式。两次巩固之间保持稳定，空字段自动隐藏。这里只放用户侧；AI 自己的情境由聊天历史里的状态注记提供。" },
+      { key: "memory_injection_template", label: "③ 记忆区注入模板", type: "multiline", description: "定义记忆区的整体结构。没有可注入的记忆时整块不出现。" },
       { key: "event_reminder_template", label: "未来事件临近提示", type: "multiline", description: "隐形提示词：未来事件到点前 24h 注入消息末尾，AI 自然提起。{{event}} 事件内容、{{due_time}} 发生时刻。" },
       { key: "event_care_template", label: "已过期关心提示", type: "multiline", description: "隐形提示词：事件过去且用户没提起时注入，AI 找机会关心。{{event}} 事件内容、{{due_time}} 发生时刻。" },
     ],
@@ -145,11 +148,12 @@ const PROMPT_GROUPS: PromptGroup[] = [
     description: "清晨一次的实况生成 + 朋友圈文案，失败会静默回退，不影响聊天",
     fields: [
       { key: "daily_life_generation_prompt", label: "每日实况生成", type: "multiline", description: "每天一次，把习惯基线变成「今天具体怎么过」。可用 {{persona}} {{date}} {{day_context}} {{weather}} {{baseline}} {{yesterday}} {{late_night}} {{user_context}}。" },
-      { key: "moment_generation_prompt", label: "AI 发动态", type: "multiline", description: "AI 发心情动态时的文案指令。{{persona}} {{scene}} {{theme_hint}} {{recent}}。" },
+      { key: "moment_generation_prompt", label: "AI 发动态", type: "multiline", description: "AI 发心情动态时的文案指令。{{persona}} {{scene}} {{theme_hint}} {{memories}}（最近 3 天的共同经历）{{friends}}（掷骰刷到这条动态的人及其小传，评论只能由他们出）{{recent}}。" },
       { key: "moment_comment_prompt", label: "AI 回评", type: "multiline", description: "AI 在动态下评论/回评。{{persona}} {{moment}} {{comments}} {{task}}。" },
       { key: "friend_persona_generation_prompt", label: "好友花名册生成", type: "multiline", description: "一次性生成 AI 的熟人圈。{{persona}} {{scene}} {{user_context}} {{preferences}} {{count}}。" },
       { key: "friend_moment_generation_prompt", label: "好友发动态", type: "multiline", description: "好友发帖文案。{{friend_name}} {{profile}} {{scene}} {{recent}}。" },
-      { key: "friend_comment_prompt", label: "好友评论", type: "multiline", description: "好友在动态下留话。{{friend_name}} {{profile}} {{preferences}} {{moment}} {{comments}}。" },
+      { key: "friend_comment_prompt", label: "好友回评", type: "multiline", description: "好友被回复时，本人回一句话。{{friend_name}} {{profile}} {{preferences}} {{moment}} {{comments}}。" },
+      { key: "friend_comments_prompt", label: "好友评论（多人）", type: "multiline", description: "刷到这条动态的人一起决定谁开口，可以一个都不回。{{moment}} {{comments}} {{candidates}}（候选人设）{{preferences}}。" },
     ],
   },
 ];
@@ -207,10 +211,8 @@ export default function SettingsScreen() {
       { label: "所在地", value: "{{location}}" },
       { label: "社交图谱", value: "{{social_graph}}" },
       { label: "属性（永久）", value: "{{traits}}" },
-      { label: "近况（状态）", value: "{{states}}" },
+      { label: "当前处境", value: "{{conditions}}" },
       { label: "安排（未来事件）", value: "{{events}}" },
-      { label: "当前状态", value: "{{current_status}}" },
-      { label: "今天是（周几/假期）", value: "[today]" },
     ],
     event_reminder_template: [
       ...COMMON_VARIABLES,
@@ -227,13 +229,7 @@ export default function SettingsScreen() {
     memory_injection_template: [
       { label: "事件列表", value: "{{event_list}}" },
       { label: "灵光一闪", value: "{{epiphany}}" },
-      { label: "今天是（周几/假期）", value: "[today]" },
       { label: "当前时间", value: "[now]" },
-    ],
-    memory_event_template: [
-      ...COMMON_VARIABLES,
-      { label: "相对时间", value: "[time]" },
-      { label: "事件内容", value: "{{event_text}}" },
     ],
   };
 
@@ -270,10 +266,16 @@ export default function SettingsScreen() {
   const [events, setEvents] = useState<MemoryEvent[]>([]);
   const [editingEvent, setEditingEvent] = useState<MemoryEvent | null>(null);
   const [editEventText, setEditEventText] = useState("");
+  const [editEventPriority, setEditEventPriority] = useState("5");
+  const [editEventWeight, setEditEventWeight] = useState("100");
+  const [editEventAliases, setEditEventAliases] = useState("");
   const [showEventEditor, setShowEventEditor] = useState(false);
   const [editorFragments, setEditorFragments] = useState<MemoryFragment[]>([]);
+  /** 片段检索词 / 优先级的编辑草稿，按片段 id 存 */
+  const [fragmentEdits, setFragmentEdits] = useState<Record<number, { keywords: string; priority: string }>>({});
   const [newFragmentSummary, setNewFragmentSummary] = useState("");
   const [newFragmentGist, setNewFragmentGist] = useState("");
+  const [newFragmentKeywords, setNewFragmentKeywords] = useState("");
   const [newFragmentPriority, setNewFragmentPriority] = useState("5");
   const [deletingEvent, setDeletingEvent] = useState<MemoryEvent | null>(null);
   const [showNewEventModal, setShowNewEventModal] = useState(false);
@@ -285,6 +287,7 @@ export default function SettingsScreen() {
   const [selectedEvent, setSelectedEvent] = useState<MemoryEvent | null>(null);
   const [showEventDetail, setShowEventDetail] = useState(false);
   const [eventFragments, setEventFragments] = useState<MemoryFragment[]>([]);
+  const [eventAliases, setEventAliases] = useState<string[]>([]);
 
   // 配置值刷新
   const [thresholds, setThresholds] = useState(getThresholds());
@@ -297,6 +300,17 @@ export default function SettingsScreen() {
   const [personaResult, setPersonaResult] = useState<PersonaInfo | null>(null);
   const [personaError, setPersonaError] = useState("");
 
+  /** 列表含兜底事件「日常闲聊」，新建/编辑/删除后也走这里刷新 */
+  const reloadEvents = useCallback(() => {
+    const allEvents = getTopActive(999);
+    const defaultId = getDefaultEventId();
+    if (defaultId) {
+      const defaultEvt = getEventById(defaultId);
+      if (defaultEvt) allEvents.unshift(defaultEvt);
+    }
+    return allEvents;
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       setUserInfo(getUserInfo());
@@ -304,15 +318,9 @@ export default function SettingsScreen() {
       setSystemPromptState(getSystemPrompt());
       setThresholds(getThresholds());
       setModelRouting(getModelRouting());
-      const allEvents = getTopActive(999);
-      const defaultId = getDefaultEventId();
-      if (defaultId) {
-        const defaultEvt = getEventById(defaultId);
-        if (defaultEvt) allEvents.unshift(defaultEvt);
-      }
-      setEvents(allEvents);
+      setEvents(reloadEvents());
       setFriends(getAllFriends().filter((f) => !f.is_deleted));
-    }, []),
+    }, [reloadEvents]),
   );
 
   const handleSaveKey = async () => {
@@ -452,9 +460,49 @@ export default function SettingsScreen() {
     const priority = parseInt(newEventPriority) || 5;
     if (!text) return;
     insertEvent(text, Math.min(100, Math.max(1, weight)), Math.min(9, Math.max(1, priority)));
-    setEvents(getTopActive(999));
+    setEvents(reloadEvents());
     setEventCount(getActiveCount());
     setShowNewEventModal(false);
+  };
+
+  /** 打开事件编辑器：载入事件与片段的可编辑参数 */
+  const openEventEditor = (evt: MemoryEvent) => {
+    const frags = getFragmentsByEventId(evt.id);
+    const edits: Record<number, { keywords: string; priority: string }> = {};
+    for (const f of frags) edits[f.id] = { keywords: f.keywords, priority: String(f.priority) };
+    setEditingEvent(evt);
+    setEditEventText(evt.event_text);
+    setEditEventPriority(String(evt.priority));
+    setEditEventWeight(String(evt.active_weight));
+    setEditEventAliases(getEventAliases(evt.id).join("、"));
+    setEditorFragments(frags);
+    setFragmentEdits(edits);
+    setNewFragmentSummary("");
+    setNewFragmentGist("");
+    setNewFragmentKeywords("");
+    setNewFragmentPriority("5");
+    setShowEventEditor(true);
+  };
+
+  /** 保存事件与片段的可编辑参数 */
+  const handleSaveEvent = () => {
+    if (!editingEvent || !editEventText.trim()) return;
+    const priority = Math.min(9, Math.max(1, parseInt(editEventPriority) || 5));
+    const weight = Math.min(100, Math.max(1, parseInt(editEventWeight) || 100));
+    updateEventParams(editingEvent.id, editEventText.trim(), priority, weight);
+    replaceEventAliases(editingEvent.id, editEventAliases);
+    for (const frag of editorFragments) {
+      const edit = fragmentEdits[frag.id];
+      if (!edit) continue;
+      updateFragmentParams(
+        frag.id,
+        edit.keywords.trim(),
+        Math.min(9, Math.max(1, parseInt(edit.priority) || 5))
+      );
+    }
+    setEvents(reloadEvents());
+    setEventCount(getActiveCount());
+    setShowEventEditor(false);
   };
 
   const handleCreateFragment = () => {
@@ -462,10 +510,12 @@ export default function SettingsScreen() {
     const priority = parseInt(newFragmentPriority) || 5;
     // 一句话概要留空时由摘要截取，保证分层渲染有内容
     const gist = newFragmentGist.trim() || newFragmentSummary.trim().slice(0, 24);
-    insertFragment(editingEvent.id, gist, newFragmentSummary.trim(), Math.min(9, Math.max(1, priority)));
+    insertFragment(editingEvent.id, gist, newFragmentSummary.trim(), Math.min(9, Math.max(1, priority)), newFragmentKeywords.trim());
     setEditorFragments(getFragmentsByEventId(editingEvent.id));
     setNewFragmentSummary("");
     setNewFragmentGist("");
+    setNewFragmentKeywords("");
+    setNewFragmentPriority("5");
   };
 
   // 获取模型列表
@@ -504,19 +554,20 @@ export default function SettingsScreen() {
 
   // 是否为提示词类型（可预览）
   const isPreviewable = (key: string) => {
-    return ["system_prompt", "state_injection_template", "memory_injection_template", "memory_event_template", "extraction_prompt", "cold_start_template"].includes(key);
+    return ["system_prompt", "state_injection_template", "memory_injection_template", "extraction_prompt", "cold_start_template"].includes(key);
   };
 
   // 渲染状态区模板（用 editorValue 替换 {{}}），空字段整行移除
   const EMPTY = "__EMPTY__";
-  const renderStateTemplate = (template: string, ui: UserInfo, currentStatus: string): string => {
+  const renderStateTemplate = (template: string, ui: UserInfo): string => {
     const bi = ui.basic_identity;
     const sg = ui.social_graph;
     const nickname = bi.nickname || "你";
     const graphText = sg.length > 0 ? sg.map((s) => `${s.name}(${s.role})：${s.attitude}`).join("\n* ") : EMPTY;
-    // 近况（状态）带 [time] 相对时间，未来事件带发生时刻
-    const statesText = ui.states.length > 0
-      ? ui.states.map((s) => replaceFragmentPlaceholder(s.text, s.created_at, nickname, ai_name)).join("\n")
+    // 当前处境：仍在持续的 condition 事件，标出从哪天开始；未来事件带发生时刻
+    const conditions = getActiveConditions();
+    const conditionsText = conditions.length > 0
+      ? conditions.map((c) => `- ${replaceFragmentPlaceholder(c.event_text, c.timestamp, nickname, ai_name)}（${dayjs(c.timestamp).format("M/D")} 起）`).join("\n")
       : EMPTY;
     const appointments = getUpcomingEvents();
     const eventsText = appointments.length > 0
@@ -524,72 +575,56 @@ export default function SettingsScreen() {
           .map((e) => `${replaceFragmentPlaceholder(e.event_text, e.timestamp, nickname, ai_name)}（${dayjs(e.timestamp).format("M/D HH:mm")}）`)
           .join("\n")
       : EMPTY;
-    const result = template
-      .replace(/\{\{nickname\}\}/g, nickname)
+    const result = normalizePlaceholders(template)
+      .replace(/\{\{nickname\}\}/g, () => nickname)
+      .replace(/\{\{gender\}\}/g, bi.gender || EMPTY)
+      .replace(/\{\{birthday\}\}/g, bi.birthday || EMPTY)
       .replace(/\{\{occupation\}\}/g, bi.occupation || "未知")
       .replace(/\{\{location\}\}/g, bi.location || "未知")
       .replace(/\{\{traits\}\}/g, ui.traits.length > 0 ? ui.traits.join("、") : EMPTY)
       .replace(/\{\{social_graph\}\}/g, graphText)
-      .replace(/\{\{states\}\}/g, statesText)
+      .replace(/\{\{conditions\}\}/g, conditionsText)
       .replace(/\{\{events\}\}/g, eventsText)
-      .replace(/\{\{current_status\}\}/g, currentStatus || EMPTY)
+      // 老模板里可能还留着这两个变量：渲染成空行清掉
+      .replace(/\{\{friends\}\}/g, EMPTY)
+      .replace(/\{\{current_status\}\}/g, EMPTY)
       // 通用变量
-      .replace(/\[user\]/g, nickname)
-      .replace(/\[now\]/g, new Date().toLocaleString("zh-CN", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }));
+      .replace(/\[user\]/gi, () => nickname)
+      .replace(/\[ai\]/gi, () => ai_name || "私藏")
+      .replace(/\[now\]/g, () => new Date().toLocaleString("zh-CN", { year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" }))
+      .replace(/\[today\]/g, () => formatTodayLine());
     // 移除空值行和空段落标题
     return result.split("\n").filter(line => !line.includes(EMPTY)).join("\n")
       .replace(/\n{3,}/g, "\n\n").trim();
   };
 
-  // 渲染记忆区（使用模板）
+  // 渲染记忆区预览
   const renderMemorySection = (
     events: ReturnType<typeof getTopActive>,
-    epiphany: ReturnType<typeof getTopActive>[0] | null,
-    memEventTplOverride?: string,
     memInjectTplOverride?: string
   ): string => {
     const nickname = user_nickname || "用户";
     const aiName = ai_name || "私藏";
     const prompts = getPrompts();
-    const eventTpl = memEventTplOverride || prompts.memory_event_template;
-    const injectTpl = memInjectTplOverride || prompts.memory_injection_template;
+    const injectTpl = normalizePlaceholders(memInjectTplOverride || prompts.memory_injection_template);
 
-    // 渲染每条事件
-    const eventLines: string[] = [];
-    for (const e of events) {
-      const text = e.event_text
+    // 预览用事件名当一行片段占位
+    const eventLines = events.map((e) => {
+      const text = normalizePlaceholders(e.event_text)
         .replace(/\[user\]/gi, nickname)
         .replace(/\[ai\]/gi, aiName);
-      const line = eventTpl
-        .replace(/\{\{weight\}\}/g, String(e.active_weight))
-        .replace(/\{\{event_text\}\}/g, text);
-      eventLines.push(line);
-    }
+      return `  · ${text}`;
+    });
 
-    // 渲染灵光一闪
-    let epiphanyText = "";
-    if (epiphany) {
-      const text = epiphany.event_text
-        .replace(/\[user\]/gi, nickname)
-        .replace(/\[ai\]/gi, aiName);
-      epiphanyText = `- [灵光一闪·冷记忆] ${text}`;
-    }
-
-    // 使用 memory_injection_template 拼装
     if (injectTpl && injectTpl.includes("{{")) {
       return injectTpl
-        .replace(/\{\{event_list\}\}/g, eventLines.join("\n") || "（暂无记忆事件）")
-        .replace(/\{\{epiphany\}\}/g, epiphanyText);
+        .replace(/\{\{event_list\}\}/g, eventLines.join("\n"))
+        .replace(/\{\{epiphany\}\}/g, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
     }
 
-    // 降级
-    const lines: string[] = [];
-    if (eventLines.length > 0) {
-      lines.push("## 记忆区");
-      lines.push(...eventLines);
-    }
-    if (epiphanyText) lines.push(epiphanyText);
-    return lines.join("\n");
+    return eventLines.join("\n");
   };
 
   // 构建预览文本（展示完整 system prompt 拼接结果）
@@ -600,20 +635,16 @@ export default function SettingsScreen() {
     const prompts = getPrompts();
 
     // 获取当前各段的实际值（编辑中的值优先）
-    const getSysPrompt = () => {
-      if (key === "system_prompt") return editorValue.replace(/\[user\]/gi, nickname);
-      return prompts.system_prompt.replace(/\[user\]/gi, nickname);
-    };
+    const fillIdentity = (text: string) =>
+      normalizePlaceholders(text)
+        .replace(/\[user\]/gi, nickname)
+        .replace(/\[ai\]/gi, ai_name || "私藏");
+    const getSysPrompt = () => fillIdentity(key === "system_prompt" ? editorValue : prompts.system_prompt);
     const getStateInfo = () => {
       const tpl = key === "state_injection_template" ? editorValue : prompts.state_injection_template;
       if (!ui) return "";
-      return tpl.includes("{{") ? renderStateTemplate(tpl, ui, "（当前状态预览）") : "（模板无变量占位符）";
+      return tpl.includes("{{") ? renderStateTemplate(tpl, ui) : "（模板无变量占位符）";
     };
-    const getMemoryInfo = () => {
-      const events = getTopActive(10);
-      return renderMemorySection(events, null) || "（暂无记忆事件）";
-    };
-
     switch (key) {
       // ===== 系统人设：展示人设内容 =====
       case "system_prompt": {
@@ -622,6 +653,7 @@ export default function SettingsScreen() {
         sections.push(getSysPrompt());
         sections.push("", "━━━ 渲染效果 ━━━");
         sections.push("作为独立 system message 发送，缓存命中率最高。");
+        sections.push(`紧随其后另有一条独立的消息：「${formatTodayLine()}」（同一天内恒定）。`);
         return sections.join("\n");
       }
 
@@ -632,7 +664,7 @@ export default function SettingsScreen() {
         sections.push(editorValue);
         sections.push("", "━━━ 渲染结果 ━━━");
         if (ui) {
-          sections.push(renderStateTemplate(editorValue, ui, "（当前状态预览）"));
+          sections.push(renderStateTemplate(editorValue, ui));
         } else {
           sections.push("（暂无用户数据，无法渲染）");
         }
@@ -646,31 +678,19 @@ export default function SettingsScreen() {
         sections.push(editorValue);
         sections.push("", "━━━ 渲染结果 ━━━");
         const events = getTopActive(10);
-        const memSection = renderMemorySection(events, null, undefined, editorValue);
-        sections.push(memSection || "（暂无记忆事件）");
-        return sections.join("\n");
-      }
-
-      // ===== 记忆事件格式 =====
-      case "memory_event_template": {
-        const sections: string[] = [];
-        sections.push("━━━ 记忆事件格式（当前编辑）━━━");
-        sections.push(editorValue);
-        sections.push("", "━━━ 渲染结果（完整记忆区）━━━");
-        const events = getTopActive(10);
-        const memSection = renderMemorySection(events, null, editorValue);
-        sections.push(memSection || "（暂无记忆事件）");
+        const memSection = renderMemorySection(events, editorValue);
+        sections.push(memSection);
         return sections.join("\n");
       }
 
       case "cold_start_template": {
         const sysPrompt = getSysPrompt();
-        const coldStart = editorValue.replace(/\[user\]/gi, nickname);
+        const coldStart = fillIdentity(editorValue);
         const fullSys = [sysPrompt, coldStart].filter(Boolean).join("\n\n");
         return fullSys;
       }
 
-      // ===== 提取指令：按真实请求结构展示（system 固定段 + 动态块）=====
+      // ===== 提取指令：按真实请求结构展示（固定段 + 历史 + 动态块）=====
       case "extraction_prompt": {
         const candidates = getTopActive(5);
         const lines: string[] = [];
@@ -680,13 +700,20 @@ export default function SettingsScreen() {
         lines.push("## 输出格式（严格 JSON）");
         lines.push('{"new_info": {...}, "new_fragments": [{...}], "event_merges": [{"keep": 数字, "merge": [数字], "reason": "..."}], "session_digest": "..."}');
         lines.push("");
+        lines.push("━━━ [history] 游标之后的新对话（多条消息）━━━");
+        lines.push("[21:02] （相邻消息断开 ≥30 分钟时，段首标一次时刻；同一天只写时刻，跨天补日期）");
+        lines.push("（用户说了什么）");
+        lines.push("（AI 回了什么）");
+        lines.push("[22:05] （再断开时另标一次）");
+        lines.push("");
         lines.push("━━━ [user] 动态块（放最后，不打断前缀）━━━");
         lines.push("## 当前时间");
         lines.push("（本批最后一条消息的时间）");
+        lines.push("片段事发时间写 [time] 占位符；历史里的时刻标签只用来判断先后与间隔，不写进片段。");
         lines.push("");
         lines.push("## 已有数据（不需要重复提取）");
         lines.push(`属性：${ui?.traits?.join("、") || "（无）"}`);
-        lines.push(`近况：${ui?.states?.map((s) => s.text).join("、") || "（无）"}`);
+        lines.push(`当前处境：${getActiveConditions().map((c) => c.event_text).join("、") || "（无）"}`);
         lines.push(`近期会发生的事：${getUpcomingEvents().map((e) => `${e.event_text}（${dayjs(e.timestamp).format("M/D HH:mm")}）`).join("、") || "（无）"}`);
         lines.push(`社交关系：${ui?.social_graph?.map((s) => `${s.name}(${s.role})`).join("、") || "（无）"}`);
         lines.push("");
@@ -699,9 +726,12 @@ export default function SettingsScreen() {
         } else {
           for (const e of candidates) {
             lines.push(`- [id:${e.id}] ${e.event_text}`);
-            lines.push("  · （最早 1 条 + 最近 2 条片段，自带「昨天 / 3天前」相对时间）");
+            lines.push("  · （最早 1 条 + 最近 2 条片段，保持原文含 [time]/[user] 占位符）");
           }
         }
+        lines.push("");
+        lines.push("## 任务");
+        lines.push("提取 new_info / new_fragments / event_merges / session_digest；片段优先挂靠候选事件。");
         return lines.join("\n");
       }
 
@@ -763,19 +793,20 @@ export default function SettingsScreen() {
 文本：
 ${text}
 
-输出格式（属性/状态 两桶）：
+输出格式（属性 / 当前处境）：
 {
   "basic_identity": {"nickname":"", "gender":"", "birthday":"", "occupation":"", "location":""},
   "social_graph": [],
   "traits": [],
-  "states": []
+  "conditions": []
 }
 
 规则：
 - 只提取文本中明确提到的信息，不要推测
 - 未提到的字段留空字符串或空数组
 - traits（属性，永久有效）：喜好/厌恶/性格/能力/长期目标等，如「喜欢吃番茄炒蛋」
-- states（状态，有时效）：近况文本带 [time] 占位符表示时间，如「[time]开始发烧」
+- conditions（仍在持续的处境）：还在进行、会结束的事，每条写成 2~8 字标签，如「感冒」「在考研」「在赶项目」
+- 已经过去的一次性经历不要放进 conditions
 - 未来的约定（如「周五面试」）不用在这里提取，正常聊天时会进记忆
 - social_graph 暂时留空数组
 - 只输出 JSON，不要其他文字`;
@@ -814,6 +845,11 @@ ${text}
   const handleMergePersona = () => {
     if (!personaResult) return;
     mergeUserInfo(personaResult);
+    // 仍在持续的处境落成 condition 事件：手动录入也算「现在还在」
+    for (const label of personaResult.conditions ?? []) {
+      const text = label.trim();
+      if (text) startCondition(text, 5, new Date().toISOString());
+    }
     setUserInfo(getUserInfo());
     setPersonaModalVisible(false);
     setPersonaInput("");
@@ -836,7 +872,7 @@ ${text}
         </View>
         <View style={styles.rowRight}>
           <Text style={[styles.value, { color: colors.textMuted }, isChanged && { color: colors.accent }]} numberOfLines={1}>
-            {field.type === "multiline" ? "已编辑" : currentValue}
+            {field.type === "multiline" ? (isChanged ? "已编辑" : "默认") : currentValue}
           </Text>
         </View>
       </TouchableOpacity>
@@ -868,12 +904,22 @@ ${text}
       case "traits":
         updated.traits = val ? val.split(/[,，、\n]+/).filter(Boolean) : [];
         break;
-      case "states":
-        // 手动编辑视为刚提及：时间戳全部刷新，按 7 天规则重新计时
-        updated.states = val
-          ? val.split(/[,，、\n]+/).filter(Boolean).map((text) => ({ text, created_at: new Date().toISOString() }))
-          : [];
-        break;
+      case "conditions": {
+        // 处境是内存事件不是画像字段：删掉的等于「结束了」，新增的等于「现在还在」
+        const nowIso = new Date().toISOString();
+        const next = val ? val.split(/[,，、\n]+/).map((s) => s.trim()).filter(Boolean) : [];
+        const current = getActiveConditions();
+        for (const c of current) {
+          if (!next.includes(c.event_text)) resolveCondition(c.id, nowIso);
+        }
+        for (const label of next) {
+          if (!current.some((c) => c.event_text === label)) startCondition(label, 5, nowIso);
+        }
+        // 处境不在 user_info 里，换一个对象引用让列表重新读一遍
+        setUserInfo(getUserInfo());
+        setEditFieldModalVisible(false);
+        return;
+      }
       default: return;
     }
 
@@ -890,8 +936,9 @@ ${text}
   const renderUserInfo = () => {
     if (!userInfo) return <Text style={styles.emptyText}>暂无用户数据</Text>;
 
-    const { basic_identity, social_graph, traits, states } = userInfo;
+    const { basic_identity, social_graph, traits } = userInfo;
     const appointments = getUpcomingEvents();
+    const conditions = getActiveConditions();
 
     const Row = ({ label, value, fieldKey, fieldValue }: { label: string; value: string; fieldKey: string; fieldValue: string }) => (
       <TouchableOpacity style={[styles.editableRow, { borderBottomColor: colors.border }]} onPress={() => openEditField(label, fieldKey, fieldValue)}>
@@ -914,7 +961,14 @@ ${text}
           </View>
         )}
         <Row label="属性（永久）" value={traits.join("、")} fieldKey="traits" fieldValue={traits.join("、")} />
-        <Row label="近况（7 天）" value={states.map((s) => s.text).join("、")} fieldKey="states" fieldValue={states.map((s) => s.text).join("、")} />
+        <Row
+          label="当前处境"
+          value={conditions
+            .map((c) => `${c.event_text} · ${dayjs(c.timestamp).format("M/D")} 起`)
+            .join("、")}
+          fieldKey="conditions"
+          fieldValue={conditions.map((c) => c.event_text).join("、")}
+        />
         {appointments.length > 0 && (
           <View style={[styles.editableRow, { borderBottomColor: colors.border }]}>
             <Text style={[styles.editableLabel, { color: colors.textMuted }]}>安排</Text>
@@ -1301,7 +1355,7 @@ ${text}
                   </Text>
                 </View>
                 <Text style={[styles.promiseStatus, { color: colors.textMuted }]}>
-                  {event.event_status === "caring" ? "关心中" : "待发生"}
+                  {event.event_status === "caring" ? "关心中" : "待发生"} · 已提醒 {event.nudge_count ?? 0}/2
                 </Text>
               </View>
             );
@@ -1330,6 +1384,7 @@ ${text}
               onPress={() => {
                 setSelectedEvent(evt);
                 setEventFragments(getFragmentsByEventId(evt.id));
+                setEventAliases(getEventAliases(evt.id));
                 setShowEventDetail(true);
               }}
               onLongPress={() => setDeletingEvent(evt)}
@@ -1747,20 +1802,14 @@ ${text}
                 <Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text>
               </TouchableOpacity>
               <Text style={[styles.editorTitle, { color: colors.text }]}>编辑事件 #{editingEvent?.id}</Text>
-              <TouchableOpacity onPress={() => {
-                if (editingEvent && editEventText.trim()) {
-                  updateEventText(editingEvent.id, editEventText.trim());
-                  setEvents(getTopActive(999));
-                  setShowEventEditor(false);
-                }
-              }}>
+              <TouchableOpacity onPress={handleSaveEvent}>
                 <Text style={[styles.confirmText, { color: colors.accent }]}>保存</Text>
               </TouchableOpacity>
             </View>
             {editingEvent && (
               <ScrollView style={{ flex: 1, padding: 20 }}>
                 {/* 事件内容 */}
-                <Text style={[styles.editorLabel, { color: colors.text, marginHorizontal: 0, marginTop: 0 }]}>事件内容</Text>
+                <Text style={[styles.editorLabel, { color: colors.text, marginHorizontal: 0, marginTop: 0 }]}>事件标题</Text>
                 <TextInput
                   style={[styles.editorInputMultiline, { borderColor: colors.border, color: colors.text, minHeight: 80, marginHorizontal: 0, marginTop: 8 }]}
                   value={editEventText}
@@ -1768,9 +1817,41 @@ ${text}
                   multiline
                   textAlignVertical="top"
                 />
-                <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 8 }}>
-                  <Text style={[styles.rowDesc, { color: colors.textMuted }]}>
-                    权重: {editingEvent.active_weight} · 创建于 {new Date(editingEvent.timestamp).toLocaleString()}
+                <View style={{ flexDirection: "row", gap: 12, marginTop: 12 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.rowDesc, { color: colors.textMuted }]}>优先级 (1-9)</Text>
+                    <TextInput
+                      style={[styles.input, { marginTop: 4 }]}
+                      value={editEventPriority}
+                      onChangeText={setEditEventPriority}
+                      keyboardType="number-pad"
+                      placeholder="5"
+                      placeholderTextColor="#9B9A97"
+                    />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.rowDesc, { color: colors.textMuted }]}>权重 (1-100)</Text>
+                    <TextInput
+                      style={[styles.input, { marginTop: 4 }]}
+                      value={editEventWeight}
+                      onChangeText={setEditEventWeight}
+                      keyboardType="number-pad"
+                      placeholder="100"
+                      placeholderTextColor="#9B9A97"
+                    />
+                  </View>
+                </View>
+                <Text style={[styles.rowDesc, { color: colors.textMuted, marginTop: 10 }]}>别名（逗号或空格分隔，换种说法也能想起这件事）</Text>
+                <TextInput
+                  style={[styles.input, { marginTop: 4 }]}
+                  value={editEventAliases}
+                  onChangeText={setEditEventAliases}
+                  placeholder="例如：朋友圈、动态、帖子"
+                  placeholderTextColor="#9B9A97"
+                />
+                <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 12 }}>
+                  <Text style={[styles.rowDesc, { color: colors.textMuted, flex: 1, marginRight: 8 }]}>
+                    创建于 {new Date(editingEvent.timestamp).toLocaleString()} · 被想起时权重会刷新为 100
                   </Text>
                   <TouchableOpacity onPress={() => {
                     setShowEventEditor(false);
@@ -1792,14 +1873,38 @@ ${text}
                   editorFragments.map((frag) => (
                     <View key={frag.id} style={[styles.fragmentItem, { borderBottomColor: colors.border }]}>
                       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-                        <Text style={[styles.fragmentPriority, { color: colors.textMuted }]}>P{frag.priority}</Text>
+                        <Text style={[styles.fragmentPriority, { color: colors.textMuted }]}>片段 #{frag.id}</Text>
                         <Text style={[styles.fragmentTime, { color: colors.textMuted }]}>
                           {new Date(frag.timestamp).toLocaleString()}
                         </Text>
                       </View>
                       <Text style={[styles.fragmentSummary, { color: colors.text }]}>
-                        {replaceFragmentPlaceholder(frag.summary, frag.timestamp, user_nickname, ai_name)}
+                        一句话印象：{replaceFragmentPlaceholder(frag.gist, frag.timestamp, user_nickname, ai_name)}
                       </Text>
+                      <Text style={[styles.fragmentSummary, { color: colors.textMuted }]}>
+                        详细内容：{replaceFragmentPlaceholder(frag.summary, frag.timestamp, user_nickname, ai_name)}
+                      </Text>
+                      <Text style={[styles.rowDesc, { color: colors.textMuted, marginTop: 8 }]}>检索词／唤醒词（逗号分隔）</Text>
+                      <TextInput
+                        style={[styles.input, { marginTop: 4 }]}
+                        value={fragmentEdits[frag.id]?.keywords ?? frag.keywords}
+                        onChangeText={(text) => setFragmentEdits((prev) => ({
+                          ...prev,
+                          [frag.id]: { keywords: text, priority: prev[frag.id]?.priority ?? String(frag.priority) },
+                        }))}
+                        placeholder="用户以后可能怎么提起这件事"
+                        placeholderTextColor="#9B9A97"
+                      />
+                      <Text style={[styles.rowDesc, { color: colors.textMuted, marginTop: 8 }]}>优先级 (1-9)</Text>
+                      <TextInput
+                        style={[styles.input, { marginTop: 4 }]}
+                        value={fragmentEdits[frag.id]?.priority ?? String(frag.priority)}
+                        onChangeText={(text) => setFragmentEdits((prev) => ({
+                          ...prev,
+                          [frag.id]: { keywords: prev[frag.id]?.keywords ?? frag.keywords, priority: text },
+                        }))}
+                        keyboardType="number-pad"
+                      />
                     </View>
                   ))
                 )}
@@ -1821,6 +1926,13 @@ ${text}
                   value={newFragmentGist}
                   onChangeText={setNewFragmentGist}
                   placeholder="一句话概要（选填，20 字内，留空自动截取）"
+                  placeholderTextColor="#9B9A97"
+                />
+                <TextInput
+                  style={[styles.input, { marginTop: 8 }]}
+                  value={newFragmentKeywords}
+                  onChangeText={setNewFragmentKeywords}
+                  placeholder="检索词／唤醒词（逗号分隔，留空则这条片段不会被想起）"
                   placeholderTextColor="#9B9A97"
                 />
                 <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8, gap: 8 }}>
@@ -1859,12 +1971,7 @@ ${text}
             <View style={{ flexDirection: "row", gap: 16 }}>
               <TouchableOpacity onPress={() => {
                 setShowEventDetail(false);
-                if (selectedEvent) {
-                  setEditingEvent(selectedEvent);
-                  setEditEventText(selectedEvent.event_text);
-                  setEditorFragments(getFragmentsByEventId(selectedEvent.id));
-                  setShowEventEditor(true);
-                }
+                if (selectedEvent) openEventEditor(selectedEvent);
               }}>
                 <Text style={[styles.confirmText, { color: colors.accent }]}>编辑</Text>
               </TouchableOpacity>
@@ -1901,6 +2008,32 @@ ${text}
                 <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>片段数量</Text>
                 <Text style={[styles.detailMetaValue, { color: colors.text }]}>{eventFragments.length}</Text>
               </View>
+              <View style={styles.detailMetaItem}>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>类型</Text>
+                <Text style={[styles.detailMetaValue, { color: colors.text }]}>
+                  {MEMORY_KIND_LABEL[selectedEvent?.memory_kind ?? ""] ?? "未知"}
+                </Text>
+              </View>
+              <View style={styles.detailMetaItem}>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>状态</Text>
+                <Text style={[styles.detailMetaValue, { color: colors.text }]}>
+                  {EVENT_STATUS_LABEL[selectedEvent?.event_status ?? ""] ?? "未知"}
+                </Text>
+              </View>
+              <View style={styles.detailMetaItem}>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>结束时刻</Text>
+                <Text style={[styles.detailMetaValue, { color: colors.text }]}>
+                  {selectedEvent?.closed_at ? new Date(selectedEvent.closed_at).toLocaleString() : "未结束"}
+                </Text>
+              </View>
+              <View style={styles.detailMetaItem}>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>提醒次数</Text>
+                <Text style={[styles.detailMetaValue, { color: colors.text }]}>{selectedEvent?.nudge_count ?? 0}</Text>
+              </View>
+              <View style={styles.detailMetaItem}>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>别名</Text>
+                <Text style={[styles.detailMetaValue, { color: colors.text }]}>{eventAliases.join("、") || "无"}</Text>
+              </View>
             </View>
 
             {/* 记忆片段列表 */}
@@ -1931,9 +2064,16 @@ ${text}
                       <Text style={[styles.fragmentDelete, { color: colors.danger }]}>删除</Text>
                     </TouchableOpacity>
                   </View>
+                  <Text style={[styles.rowDesc, { color: colors.textMuted }]}>一句话印象</Text>
+                  <Text style={[styles.fragmentText, { color: colors.text }]}>
+                    {replaceFragmentPlaceholder(frag.gist, frag.timestamp, user_nickname, ai_name)}
+                  </Text>
+                  <Text style={[styles.rowDesc, { color: colors.textMuted, marginTop: 8 }]}>详细内容</Text>
                   <Text style={[styles.fragmentText, { color: colors.text }]}>
                     {replaceFragmentPlaceholder(frag.summary, frag.timestamp, user_nickname, ai_name)}
                   </Text>
+                  <Text style={[styles.rowDesc, { color: colors.textMuted, marginTop: 8 }]}>检索词／唤醒词</Text>
+                  <Text style={[styles.fragmentText, { color: colors.text }]}>{frag.keywords || "（空）"}</Text>
                   <Text style={[styles.fragmentTime, { color: colors.textMuted }]}>
                     {new Date(frag.timestamp).toLocaleString()}
                   </Text>
@@ -1971,7 +2111,7 @@ ${text}
               <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: colors.danger }]} onPress={() => {
                 if (deletingEvent) {
                   deleteEvent(deletingEvent.id);
-                  setEvents(getTopActive(999));
+                  setEvents(reloadEvents());
                   setEventCount(getActiveCount());
                   setDeletingEvent(null);
                 }
@@ -2058,11 +2198,11 @@ ${text}
                     </View>
                   )}
 
-                  {/* 近况（状态） */}
-                  {(personaResult.states?.length ?? 0) > 0 && (
+                  {/* 当前处境（仍在持续） */}
+                  {(personaResult.conditions?.length ?? 0) > 0 && (
                     <View style={[styles.infoBlock, { borderBottomColor: colors.border }]}>
-                      <Text style={[styles.infoTitle, { color: colors.text }]}>近况（7 天内有效）</Text>
-                      {personaResult.states!.map((s, i) => (
+                      <Text style={[styles.infoTitle, { color: colors.text }]}>当前处境（仍在持续）</Text>
+                      {personaResult.conditions!.map((s, i) => (
                         <Text key={i} style={[styles.infoLine, { color: colors.textSecondary }]}>· {s}</Text>
                       ))}
                     </View>

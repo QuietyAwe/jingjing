@@ -3,15 +3,14 @@
 // 用户输入 → 冷启动判断 → 检索 → Prompt 拼装 → LLM 调用
 // ============================================================
 
-import { getUserInfo, getMeta, setMeta } from "@/db/queries";
+import { getUserInfo, getMeta } from "@/db/queries";
 import { retrieve } from "./retrieval";
 import { buildEventNudges } from "./eventChecker";
 import { assemblePrompt, buildColdStartPrompt } from "@/prompt/assembler";
 import { logDebug } from "@/store/chatStore";
-import { getCurrentScene, formatScene } from "./scheduler";
+import { getThresholds } from "@/prompt/config";
 import { resolveFriendMention } from "@/friends/persona";
 import type { ChatMessage, UserInfo } from "@/types/schema";
-import dayjs from "dayjs";
 
 /** 游戏注入：稳定段放记忆区之前，易变段放历史之后 */
 export interface GameParts {
@@ -57,21 +56,24 @@ export function buildChatContext(
 
   // 2. 本地检索（PRD 2.1 节第 2-5 步）
   const { topEvents, epiphany, keywords, hitFragments, cuedFragmentIds } = retrieve(userInput);
-
-  // 获取 AI 当前情境（自己的作息），拼成自然的一句注入到 [你] 段落
-  const scene = getCurrentScene();
-  const currentStatus = scene ? formatScene(scene) : undefined;
+  // 本轮已召回的片段：按名字命中那几条不必再重复给
+  const recalledFragmentIds = new Set<number>();
+  for (const list of hitFragments.values()) for (const frag of list) recalledFragmentIds.add(frag.id);
 
   // 3. Prompt 拼装
   if (isColdStart) {
     // 冷启动：使用 cold_start_template
-    const { system, context } = buildColdStartPrompt();
-    // 冷启动无历史，结构：[system, game, ...history, gameHint]
+    const { system, today, context } = buildColdStartPrompt();
+    // 冷启动没有人设/摘要/记忆区，也不走 token 预算测量：
+    // 只带最近几轮，避免积压一堆还没巩固的消息把请求撑爆
+    const recent = chatHistory.slice(-getThresholds().context_history_rounds * 2);
+    // 冷启动无历史，结构：[system, today, game, ...history, gameHint]
     const messages = [
       { role: "system" as const, content: system },
+      { role: "system" as const, content: today },
       ...(context ? [{ role: "system" as const, content: context }] : []),
       ...(game?.section ? [{ role: "system" as const, content: game.section }] : []),
-      ...chatHistory.map((m) => ({
+      ...recent.map((m) => ({
         role: m.role as "user" | "assistant",
         content: m.content,
       })),
@@ -90,8 +92,7 @@ export function buildChatContext(
     };
   }
 
-  // 用户提到某位好友的名字：前置她的档案卡
-  // （档案回答「她是谁」，片段回答「她说过什么」，不混为一谈）
+  // 用户提到某位好友的名字：前置一句「想起了谁」+ 最近几条相关记忆
   const mention = resolveFriendMention(userInput);
   // 已巩固的对话由滚动摘要代表：由 assemblePrompt 插在历史最前面
   const sessionDigest = getMeta("session_digest") ?? undefined;
@@ -102,26 +103,21 @@ export function buildChatContext(
     topEvents,
     epiphany,
     chatHistory,
-    currentStatus,
     hitFragments,
     undefined, // tokenBudget 用默认值
     cuedFragmentIds,
     mention
       ? {
-          name: mention.friend.name,
-          profile: mention.friend.profile,
-          fragments: mention.fragments.map((f) => ({
-            summary: f.summary,
-            timestamp: f.timestamp,
-          })),
+          fragments: mention.fragments
+            .filter((f) => !recalledFragmentIds.has(f.id))
+            .map((f) => ({
+              summary: f.summary,
+              timestamp: f.timestamp,
+            })),
         }
       : undefined,
     sessionDigest
   );
-
-  // 记下本次请求时刻：隔了空闲阈值后缓存已失效，getHistory 会退回短窗口，
-  // 避免全价重读一长段历史（见 chatStore.getHistory 的 TTL 守卫）
-  setMeta("last_request_at", dayjs().toISOString());
 
   const memoryCount = topEvents.length + (epiphany ? 1 : 0);
 
@@ -129,10 +125,13 @@ export function buildChatContext(
   // 对局中不注入——别让关心得知打断游戏节奏
   const eventNudge = game ? null : buildEventNudges(userInput);
 
-  // Prompt 顺序：[system 人设][system 状态区][摘要 + history][system 游戏区][system 记忆区][游戏提示][事件提醒]
-  // 记忆区/游戏区必须后置：它们随话题变化，放在历史前会让后面整段历史的前缀缓存失效
+  // Prompt 顺序：[system 人设][system 今天][system 状态区（用户侧）][摘要 + history（含状态注记）]
+  //              [system 游戏区][system 记忆区][游戏提示][事件提醒]
+  // 「今天」只到天、同一天内恒定；时刻由消息时间戳表达。
+  // 游戏区和记忆区随话题变，留在历史后，一变不影响上面的历史
   const messages = [
     { role: "system" as const, content: assembled.system },
+    { role: "system" as const, content: assembled.today },
     ...(assembled.state ? [{ role: "system" as const, content: assembled.state }] : []),
     ...assembled.messages,
     ...(game?.section ? [{ role: "system" as const, content: game.section }] : []),
@@ -140,9 +139,18 @@ export function buildChatContext(
     ...(game?.hint ? [{ role: "system" as const, content: game.hint }] : []),
     ...(eventNudge ? [{ role: "system" as const, content: eventNudge }] : []),
   ];
+  const trimmed = assembled.trimmed;
+  const trimNote =
+    [
+      trimmed.droppedBlocks ? `删除记忆 ${trimmed.droppedBlocks} 块` : "",
+      trimmed.degradedBlocks ? `降级记忆 ${trimmed.degradedBlocks} 块` : "",
+      trimmed.overBudget > 0 ? `仍超 ${trimmed.overBudget} token（历史不裁）` : "",
+    ]
+      .filter(Boolean)
+      .join(" / ") || "无";
   logDebug(
     "上下文",
-    `正常模式${game ? "(游戏中)" : ""}, 记忆: ${memoryCount} 条, 摘要: ${sessionDigest ? `${sessionDigest.length} 字` : "无"}\n消息数: ${messages.length}\nsystem 长度: ${assembled.system.length}\nstate 长度: ${assembled.state.length}\nmemory 长度: ${assembled.memory.length}`
+    `正常模式${game ? "(游戏中)" : ""}, 记忆: ${memoryCount} 条, 摘要: ${sessionDigest ? `${sessionDigest.length} 字` : "无"}\n消息数: ${messages.length}\nsystem 长度: ${assembled.system.length}\nstate 长度: ${assembled.state.length}\nmemory 长度: ${assembled.memory.length}\n超出预算的裁剪: ${trimNote}`
   );
   return {
     systemPrompt: assembled.system,

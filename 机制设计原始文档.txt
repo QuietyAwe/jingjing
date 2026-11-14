@@ -119,7 +119,6 @@ Slogans：世间所有的重逢，都是因为不曾遗忘。
 这些参数直接决定了系统的计算成本（Token 消耗）和响应延迟。
 
 * **`consolidation_window_turns`**: 触发短期巩固的对话轮数（暂定为 10）。
-* **`context_active_events_limit`**: 每次对话上下文中加载的高权重记忆事件数量上限（暂定 10 条）。
 
 ### 3. 权重与衰减策略 (Weight & Decay)
 

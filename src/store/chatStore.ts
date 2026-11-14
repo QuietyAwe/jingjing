@@ -1,12 +1,11 @@
 // ============================================================
 // 聊天状态（全量持久化）
-// UI 显示全部历史，LLM 上下文仅取最近 N 轮
+// UI 显示全部历史，LLM 上下文见 getHistory（游标之后 + 会话摘要）
 // ============================================================
 
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { getThresholds } from "@/prompt/config";
 import { getGameSessionById, getUserInfo, getMeta } from "@/db/queries";
 import { replacePlaceholders } from "@/prompt/assembler";
 import { splitForChat } from "@/utils/text";
@@ -14,9 +13,29 @@ import type { ChatMessage } from "@/types/schema";
 import dayjs from "dayjs";
 
 export interface DebugLog {
+  /** 单调递增，供调试弹窗记录哪条日志被展开（日志列表会滚动淘汰） */
+  id: number;
   time: string;
   tag: string;
   text: string;
+}
+
+/** 日志 id 单调自增，清空日志后也不复用旧 id */
+let debugLogSeq = 0;
+
+/** 一次请求的 token 用量：cachedTokens 是其中命中前缀缓存的部分 */
+export interface LlmUsage {
+  promptTokens: number;
+  cachedTokens: number;
+  completionTokens: number;
+}
+
+/** 调试日志用的用量描述；没有用量时说明原因，不要显示成 0% */
+export function formatUsage(usage: LlmUsage | null): string {
+  if (!usage) return "缓存命中率 未知（本次会话还没有成功的请求）";
+  const rate =
+    usage.promptTokens > 0 ? Math.round((usage.cachedTokens / usage.promptTokens) * 100) : 0;
+  return `缓存命中率 ${rate}%（${usage.cachedTokens}/${usage.promptTokens} prompt token）`;
 }
 
 interface ChatState {
@@ -35,6 +54,8 @@ interface ChatState {
   lastKeywords: string[];
   /** 最后一次检索的记忆数量 */
   lastMemoryCount: number;
+  /** 最后一次请求的 token 用量（含前缀缓存命中，调试用，不持久化） */
+  lastUsage: LlmUsage | null;
   /** API 请求/响应日志（调试用） */
   debugLogs: DebugLog[];
 
@@ -53,6 +74,8 @@ interface ChatState {
   clearMessages: () => void;
   /** 存储调试信息 */
   setDebugInfo: (systemPrompt: string, keywords: string[], memoryCount: number) => void;
+  /** 记录最后一次请求的用量 */
+  setLastUsage: (usage: LlmUsage) => void;
   /** 添加调试日志 */
   addDebugLog: (tag: string, text: string) => void;
   /** 清空调试日志 */
@@ -143,6 +166,7 @@ export const useChatStore = create<ChatState>()(
       lastSystemPrompt: "",
       lastKeywords: [],
       lastMemoryCount: 0,
+      lastUsage: null,
       debugLogs: [],
 
       addMessage: (msg) =>
@@ -176,16 +200,19 @@ export const useChatStore = create<ChatState>()(
         set((state) => ({ streamingThinking: state.streamingThinking + delta })),
 
       clearMessages: () =>
-        set({ messages: [], streamingText: "", streamingChunks: [], streamingThinking: "", isLoading: false, lastSystemPrompt: "", lastKeywords: [], lastMemoryCount: 0, debugLogs: [] }),
+        set({ messages: [], streamingText: "", streamingChunks: [], streamingThinking: "", isLoading: false, lastSystemPrompt: "", lastKeywords: [], lastMemoryCount: 0, lastUsage: null, debugLogs: [] }),
 
       setDebugInfo: (systemPrompt, keywords, memoryCount) =>
         set({ lastSystemPrompt: systemPrompt, lastKeywords: keywords, lastMemoryCount: memoryCount }),
+
+      setLastUsage: (usage) => set({ lastUsage: usage }),
 
       addDebugLog: (tag, text) =>
         set((state) => {
           const now = new Date();
           const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
-          const logs = [...state.debugLogs, { time, tag, text }];
+          const id = ++debugLogSeq;
+          const logs = [...state.debugLogs, { id, time, tag, text }];
           // 保留最近 50 条
           return { debugLogs: logs.slice(-50) };
         }),
@@ -196,27 +223,21 @@ export const useChatStore = create<ChatState>()(
        * LLM 上下文
        *
        * 有会话摘要时只带「游标之后还没被摘要覆盖」的对话（摘要由 assemblePrompt 插在历史最前）；
-       * 没有摘要（老数据/首次）时退回最近 N 轮滑动窗口。
+       * 还没有摘要（首次使用 / 尚未巩固成功）时全量带上。
+       *
+       * 不做任何按轮数的截断：对话只在巩固推进游标、或 token 预算（truncateToFit）不够时才变短。
+       * 按窗口从头切会让下一次请求的开头整体左移，前缀缓存全部失效，比省下的 token 更贵。
        */
       getHistory: () => {
-        const { context_history_rounds, consolidation_idle_minutes } = getThresholds();
-        const window = context_history_rounds * 2; // 每轮 = user + assistant
         // 好友私聊是另一个空间：主聊天的上下文与记忆都不该看到它
         const msgs = get().messages.filter((m) => !m.friend_id);
         // 把已结束对局的游戏对话合并成一条摘要，避免污染上下文
         const merged = mergeEndedGameMessages(msgs);
         // system 消息（游戏提示等）只用于 UI 展示，不进入模型上下文；
-        // 但游戏摘要是有意进上下文的，标记 is_game_summary 保留。
-        // 先过滤再截窗：放在 slice 之后过滤会让 system 消息占掉窗口名额，实际历史不足 N 轮
+        // 但游戏摘要是有意进上下文的，标记 is_game_summary 保留
         const visible = merged.filter((m) => m.role !== "system" || m.is_game_summary);
 
-        const digest = getMeta("session_digest");
-        if (!digest) {
-          // 最后一条是 user（刚发送，AI 尚未回复）时，多取 1 条确保第一条是 user
-          const lastRole = visible[visible.length - 1]?.role;
-          const len = lastRole === "user" ? window + 1 : window;
-          return visible.slice(-len);
-        }
+        if (!getMeta("session_digest")) return visible;
 
         // 摘要覆盖到巩固游标为止：之后的消息才是「还没被压缩过的原文」。
         // 锚点按 id 定位，消息被删时退化到时间戳
@@ -231,21 +252,16 @@ export const useChatStore = create<ChatState>()(
           pendingStart = i < 0 ? visible.length : i;
         }
         let pending = visible.slice(pendingStart);
-        // 已结束对局的「游戏回顾」本身就是压缩摘要，被游标切掉会让 AI 忘记刚玩过什么。
-        // 只补最近两局，避免历史对局越攒越多
-        const pastGameRecaps = visible
-          .slice(0, pendingStart)
-          .filter((m) => m.is_game_summary)
-          .slice(-2);
-        if (pastGameRecaps.length > 0) pending = [...pastGameRecaps, ...pending];
+        // 被游标切掉的内容里，补回最近两局游戏回顾与最近两条状态注记：
+        // 前者让 AI 记得刚玩过什么，后者让当下的情境还能被看见
+        const past = visible.slice(0, pendingStart);
+        const pastGameRecaps = past.filter((m) => m.is_game_summary).slice(-2);
+        const pastStateNotes = past.filter((m) => m.is_state_note).slice(-2);
+        const pastNotes = [...pastGameRecaps, ...pastStateNotes].sort((a, b) =>
+          a.timestamp < b.timestamp ? -1 : 1
+        );
+        if (pastNotes.length > 0) pending = [...pastNotes, ...pending];
 
-        // 缓存 TTL 守卫：隔了一段时间没聊，前缀缓存已经失效，
-        // 这时全量重读长历史比只读最近几轮贵得多
-        const lastRequest = getMeta("last_request_at");
-        const idleMinutes = lastRequest ? dayjs().diff(dayjs(lastRequest), "minute") : Infinity;
-        if (idleMinutes >= consolidation_idle_minutes && pending.length > window) {
-          pending = pending.slice(-window);
-        }
         // 游标刚好在末尾（极少见）：至少带上最后一轮，
         // 否则「重新生成」会拿不到待重发的用户消息
         if (pending.length === 0) return visible.slice(-2);

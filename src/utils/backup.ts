@@ -8,7 +8,8 @@ import * as Sharing from "expo-sharing";
 import * as DocumentPicker from "expo-document-picker";
 import { getDB } from "@/db/connection";
 
-const BACKUP_VERSION = 1;
+/** 备份结构版本：只认这一个版本，其它版本直接拒绝导入 */
+const BACKUP_VERSION = 2;
 
 interface BackupData {
   version: number;
@@ -20,16 +21,13 @@ interface BackupData {
     user_info: any[];
     system_metadata: any[];
     behavior_schedule: any[];
-    // v1.0.8 起补齐的四张表（旧备份文件里没有，导入时按空处理）
-    game_sessions?: any[];
-    moments?: any[];
-    moment_comments?: any[];
-    post_plan?: any[];
-    // 好友圈与每日实况（旧备份没有，按空处理）
-    friend_personas?: any[];
-    daily_log?: any[];
-    // 事件别名（旧备份没有，按空处理）：丢了只会让合并判断重做一次
-    memory_event_aliases?: any[];
+    game_sessions: any[];
+    moments: any[];
+    moment_comments: any[];
+    post_plan: any[];
+    friend_personas: any[];
+    daily_log: any[];
+    memory_event_aliases: any[];
   };
 }
 
@@ -126,9 +124,12 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
     const json = await FileSystem.readAsStringAsync(fileUri);
     const backup: BackupData = JSON.parse(json);
 
-    // 3. 验证版本
-    if (!backup.version || !backup.asyncStorage || !backup.sqlite) {
-      return { success: false, message: "备份文件格式无效" };
+    // 3. 验证版本：结构不一致的备份导进来会让「当前处境」整块失效
+    if (backup.version !== BACKUP_VERSION || !backup.asyncStorage || !backup.sqlite) {
+      return {
+        success: false,
+        message: `备份文件版本不匹配（需要 v${BACKUP_VERSION}，文件是 v${backup.version ?? "未知"}）`,
+      };
     }
 
     // 4. 恢复 AsyncStorage（先清空旧数据再写入，避免残留）
@@ -153,11 +154,11 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
     // 别名指向 memory_events.id：不先清会让旧别名挂到恢复后被复用 id 的另一条事件上
     db.execSync("DELETE FROM memory_event_aliases");
 
-    // 恢复 memory_events（旧备份可能仍含 "index" / is_archived，已废弃列不再写入；
-    // memory_kind 必须一并恢复，否则 episode 共同经历会退化成 daily、丢失按天衰减与权重下限）
+    // 恢复 memory_events（memory_kind / event_status / closed_at 必须一并恢复，
+    // 否则共同经历会退化成日常琐事、处境会变回普通记忆）
     for (const row of backup.sqlite.memory_events) {
       db.runSync(
-        "INSERT INTO memory_events (id, event_text, timestamp, active_weight, last_accessed, priority, memory_kind, event_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO memory_events (id, event_text, timestamp, active_weight, last_accessed, priority, memory_kind, event_status, closed_at, nudge_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         row.id,
         row.event_text,
         row.timestamp,
@@ -165,22 +166,21 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
         row.last_accessed,
         row.priority ?? 5,
         row.memory_kind ?? "daily",
-        row.event_status ?? "none"
+        row.event_status ?? "none",
+        row.closed_at ?? null,
+        row.nudge_count ?? 0
       );
     }
 
     // 恢复 memory_fragments
     for (const row of backup.sqlite.memory_fragments) {
-      // 旧备份带 emotion 列：并进 summary，避免丢信息
-      const legacyEmotion = typeof row.emotion === "string" ? row.emotion.trim() : "";
-      const summary = legacyEmotion ? `${row.summary}（${legacyEmotion}）` : row.summary;
       db.runSync(
         'INSERT INTO memory_fragments (id, "index", timestamp, gist, summary, keywords, priority) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        row.id, row.index, row.timestamp, row.gist ?? "", summary, row.keywords ?? "", row.priority ?? 5
+        row.id, row.index, row.timestamp, row.gist ?? "", row.summary, row.keywords ?? "", row.priority ?? 5
       );
     }
 
-    // 恢复事件别名（旧备份没有这张表，按空处理）
+    // 恢复事件别名
     for (const row of backup.sqlite.memory_event_aliases ?? []) {
       db.runSync(
         "INSERT OR IGNORE INTO memory_event_aliases (event_id, alias) VALUES (?, ?)",
@@ -218,7 +218,7 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
       );
     }
 
-    // 恢复游戏对局与心情动态（旧备份没有这四张表，按空处理）
+    // 恢复游戏对局与心情动态
     for (const row of backup.sqlite.game_sessions ?? []) {
       db.runSync(
         `INSERT INTO game_sessions (id, game_type, mode, status, secret, secret_source, question_count, turns, started_at, ended_at, result_note)

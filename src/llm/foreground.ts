@@ -5,13 +5,38 @@
 
 import { getClient } from "./client";
 import { getModelRouting } from "@/prompt/config";
-import { logDebug } from "@/store/chatStore";
+import { logDebug, formatUsage, useChatStore } from "@/store/chatStore";
+import type { LlmUsage } from "@/store/chatStore";
 import { useSettingsStore } from "@/store/settingsStore";
 import EventSource from "react-native-sse";
 
 /** 格式化消息列表用于日志显示（不截断） */
 function formatMessagesForLog(msgs: { role: string; content: string }[]): string {
   return msgs.map((m, i) => `[${i}] ${m.role.toUpperCase()}\n${m.content}`).join("\n\n");
+}
+
+/** 响应里的 usage 字段（DeepSeek / OpenAI 兼容端点字段名不一，两处都认） */
+type RawUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  prompt_cache_hit_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+};
+
+function pickUsage(raw: RawUsage | undefined): LlmUsage | null {
+  if (!raw?.prompt_tokens) return null;
+  return {
+    promptTokens: raw.prompt_tokens,
+    cachedTokens: raw.prompt_cache_hit_tokens ?? raw.prompt_tokens_details?.cached_tokens ?? 0,
+    completionTokens: raw.completion_tokens ?? 0,
+  };
+}
+
+/** 记下用量并打日志：命中率是前缀是否稳定的唯一证据 */
+function recordUsage(usage: LlmUsage | null): void {
+  if (!usage) return;
+  useChatStore.getState().setLastUsage(usage);
+  logDebug("用量", formatUsage(usage));
 }
 
 /** SSE 静默超时：连续这么久收不到任何数据即判定 API 无响应（收到事件即重置） */
@@ -95,6 +120,7 @@ async function chatComplete(
   const text = res.choices?.[0]?.message?.content ?? "";
   // @ts-ignore: DeepSeek reasoning_content
   const thinking = res.choices?.[0]?.message?.reasoning_content ?? "";
+  recordUsage(pickUsage(res.usage as RawUsage | undefined));
   logDebug("API返回", `=== 完整响应 ===\n长度: ${text.length}${thinking ? `\n思考: ${thinking.length}字` : ""}${text.length > 0 ? "\n\n" + text : "\n（空回复）"}`);
   return { text, thinking };
 }
@@ -140,6 +166,8 @@ async function chatCompleteStream(
         temperature,
         messages,
         stream: true,
+        // 流式默认不回 usage：不带这个开关就拿不到缓存命中数
+        stream_options: { include_usage: true },
         thinking: getThinkingConfig(),
       }),
     });
@@ -200,6 +228,8 @@ async function chatCompleteStream(
 
       try {
         const json = JSON.parse(data);
+        // 末块只有 usage（choices 为空），先接住再处理增量
+        recordUsage(pickUsage(json.usage));
         const delta = json.choices?.[0]?.delta?.content;
         if (delta) {
           fullText += delta;

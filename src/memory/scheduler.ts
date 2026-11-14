@@ -47,9 +47,8 @@ export function checkAndGenerateSchedule(): Promise<void> {
 
 async function doCheckAndGenerateSchedule(): Promise<void> {
   const weekStart = getWeekStart();
-  // 作息表与发帖计划分开判定：本周表可能是旧版本（发帖计划上线前）生成的，
-  // 也可能是周中才生成、LLM 把计划排在了已经过去的日子上——只看作息表会让
-  // 这类库整周一条动态都发不出来
+  // 作息表与发帖计划分开判定：本周表可能是周中才生成的，LLM 也可能把计划
+  // 排在了已经过去的日子上——只看作息表会让这一周一条动态都发不出来
   const needSchedule = !hasScheduleForWeek(weekStart);
   const needPlan = !hasPostPlanForWeek(weekStart);
   if (!needSchedule && !needPlan) return;
@@ -204,7 +203,7 @@ function timeOfDay(hour: number): string {
 }
 
 /**
- * 把 AI 当前情境拼成一句当下处境，注入状态区。
+ * 把 AI 当前情境拼成一句当下处境，供状态注记与发帖取景。
  *
  * 刻意只给一句：真人不复述自己一天的流水账（「今天已经晨跑、看书」），
  * done 列表留作 remark 素材——AI 需要时能提，但不主动报备。

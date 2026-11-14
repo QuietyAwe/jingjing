@@ -3,7 +3,7 @@
 //
 // 模拟真实记忆的两类遗忘速度：
 // - daily（日常琐事）：按小时衰减，几天内淡忘
-// - episode（共同经历：游戏、深度对话）：按天衰减且有下限，
+// - episode（共同经历：游戏、深度对话）与 condition（持续处境）：按天衰减且有下限，
 //   数月乃至数年后仍能停留在"可被偶然想起"的权重区间
 // ============================================================
 
@@ -56,8 +56,9 @@ export function calculateWeight(
 ): number {
   const now = dayjs();
 
-  if (kind === "episode") {
-    // 共同经历：以「天」为单位衰减，并保留下限
+  if (kind === "episode" || kind === "condition") {
+    // 共同经历与持续处境：以「天」为单位衰减，并保留下限——
+    // 「在考研」「在还房贷」这类处境不该因为几天没被提起就掉进冷池
     const daysDiff = now.diff(dayjs(lastAccessed), "day", true);
     const decayed = lastWeight * Math.exp(-EPISODE_DECAY_PER_DAY * daysDiff);
     return Math.max(EPISODE_MIN_WEIGHT, Math.min(100, Math.floor(decayed)));

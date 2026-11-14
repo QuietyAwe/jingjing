@@ -21,19 +21,54 @@ import {
   getEventByAlias,
   addEventAliases,
   upsertFutureEvent,
+  getActiveConditions,
+  findActiveConditionByLabel,
+  startCondition,
+  resolveCondition,
 } from "@/db/queries";
 import { extractConsolidation } from "@/llm/background";
 import type { CandidateEvent } from "@/llm/background";
 import { tokenize } from "./tokenize";
 import { blockedWords, isBlockedGram } from "./identity";
-import { anchorLine, estimateTokens } from "@/prompt/assembler";
+import { estimateTokens } from "@/prompt/assembler";
 import { getThresholds } from "@/prompt/config";
-import { logDebug } from "@/store/chatStore";
+import { logDebug, formatUsage, useChatStore } from "@/store/chatStore";
 import { useMetaStore } from "@/store/metaStore";
 import type { UserInfo } from "@/types/schema";
 import dayjs from "dayjs";
+import { Alert } from "react-native";
 
 const LOCK_TIMEOUT_MS = 30_000; // 30s 超时
+/** 连续失败到这么多次就弹窗：未巩固对话不裁不删，一直失败只会越积越多，用户必须知道 */
+const FAIL_WARN_STREAK = 3;
+/** 之后每逢这个倍数再提醒一次，避免每轮都弹 */
+const FAIL_WARN_EVERY = 10;
+
+/**
+ * 记一次巩固失败并（必要时）告警。
+ *
+ * 失败不推进游标，积压原样留着等下一次——所以既不会丢对话，
+ * 也不会自己好起来，只能靠用户去修 API Key / 网络。
+ */
+function noteFailure(reason: string, pendingCount: number): void {
+  const streak = Number(getMeta("consolidation_fail_streak") ?? "0") + 1;
+  setMeta("consolidation_fail_streak", String(streak));
+  setMeta("consolidation_fail_reason", reason);
+  if (streak === FAIL_WARN_STREAK || streak % FAIL_WARN_EVERY === 0) {
+    Alert.alert(
+      "记忆巩固一直失败",
+      `最近 ${streak} 次都没能把对话写进记忆，现在积压 ${pendingCount} 条。\n原因：${reason}\n\n对话不会丢：还在本地攒着，下一个检查点会再试；一直失败多半是网络、API Key 或模型服务的问题。`
+    );
+  }
+}
+
+/** 成功一次就把连续失败清零 */
+function clearFailure(): void {
+  if (getMeta("consolidation_fail_streak") !== "0") {
+    setMeta("consolidation_fail_streak", "0");
+    setMeta("consolidation_fail_reason", "");
+  }
+}
 
 /**
  * 定位「上次巩固结束到哪条」——用消息 id 锚定，不能用数组下标
@@ -48,28 +83,19 @@ function resolveCursor(
   messages: Array<{ id: string; timestamp: string }>
 ): number {
   const anchorId = getMeta("last_consolidated_id");
-  if (anchorId) {
-    const idx = messages.findIndex((m) => m.id === anchorId);
-    if (idx >= 0) return idx + 1;
-    const at = getMeta("last_consolidated_at");
-    if (at) {
-      const j = messages.findIndex((m) => m.timestamp > at);
-      return j < 0 ? messages.length : j;
-    }
-    return messages.length;
-  }
+  // 从未巩固过
+  if (!anchorId) return 0;
 
-  // 旧版本用数组下标做游标：迁移成「那条之后」，老设备平滑过渡
-  const legacy = parseInt(getMeta("last_consolidated_index") ?? "0", 10);
-  const anchor = messages[legacy - 1];
-  if (anchor) {
-    setMeta("last_consolidated_id", anchor.id);
-    setMeta("last_consolidated_at", anchor.timestamp);
-    return legacy;
+  const idx = messages.findIndex((m) => m.id === anchorId);
+  if (idx >= 0) return idx + 1;
+  // 锚点消息被删：用它的时间戳找「之后的第一条」；
+  // 彻底定位不到就当都巩固过了——宁可少提取一次，也不要把老记忆重复提取一遍
+  const at = getMeta("last_consolidated_at");
+  if (at) {
+    const j = messages.findIndex((m) => m.timestamp > at);
+    return j < 0 ? messages.length : j;
   }
-  // 锚点定位不到（消息被删导致下标越界 / meta 损坏）：宁可少提取，
-  // 也不能返回 0 从头重提——那会把全部历史重复提取一遍，产生重复记忆
-  return legacy > 0 ? Math.min(legacy, messages.length) : 0;
+  return messages.length;
 }
 
 /** 记下「巩固已经推进到这条」 */
@@ -78,8 +104,6 @@ function advanceCursor(messages: Array<{ id: string; timestamp: string }>, endEx
   if (!anchor) return;
   setMeta("last_consolidated_id", anchor.id);
   setMeta("last_consolidated_at", anchor.timestamp);
-  // 保留下标副本：仅用于旧版本兼容与调试排查
-  setMeta("last_consolidated_index", String(endExclusive));
 }
 
 /**
@@ -169,12 +193,20 @@ export function shouldConsolidate(
     .slice(cursor, settledEnd)
     .filter((m) => !m.game_id && !m.friend_id);
 
-  // 最小窗口：不足这么多条不看，防止碎片化调用
-  if (pending.length < consolidation_window_turns * 2) return false;
-
+  const minCount = consolidation_window_turns * 2;
   const tokens = pending.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+  const pendingNote = `未巩固 ${tokens} token / ${pending.length} 条`;
+  // 缓存命中率反映「发给模型的前缀有没有变」：与巩固互不相关，但同一屏里一起看才判断得清
+  const usageNote = formatUsage(useChatStore.getState().lastUsage);
+
+  // 最小窗口：不足这么多条不看，防止碎片化调用
+  if (pending.length < minCount) {
+    logDebug("巩固检查", `${pendingNote}，未到最小窗口 ${minCount} 条；${usageNote}`);
+    return false;
+  }
+
   if (tokens >= consolidation_token_budget) {
-    logDebug("巩固检查", `未巩固 ${tokens} token ≥ ${consolidation_token_budget}，触发巩固`);
+    logDebug("巩固检查", `${pendingNote} ≥ ${consolidation_token_budget}，触发巩固；${usageNote}`);
     return true;
   }
 
@@ -187,12 +219,15 @@ export function shouldConsolidate(
     const lastTs = messages[messages.length - 1]?.timestamp;
     const idleMinutes = lastTs ? dayjs().diff(dayjs(lastTs), "minute") : 0;
     if (idleMinutes >= consolidation_idle_minutes) {
-      logDebug("巩固检查", `已空闲 ${Math.round(idleMinutes)} 分钟 ≥ ${consolidation_idle_minutes}，触发巩固`);
+      logDebug(
+        "巩固检查",
+        `${pendingNote}，已空闲 ${Math.round(idleMinutes)} 分钟 ≥ ${consolidation_idle_minutes}，触发巩固；${usageNote}`
+      );
       return true;
     }
   }
 
-  logDebug("巩固检查", `未巩固 ${tokens} token，未达阈值`);
+  logDebug("巩固检查", `${pendingNote}，未达阈值 ${consolidation_token_budget}；${usageNote}`);
   return false;
 }
 
@@ -233,7 +268,6 @@ export async function runConsolidation(
         basic_identity: { nickname: "", gender: "", birthday: "", occupation: "", location: "" },
         social_graph: [],
         traits: [],
-        states: [],
       };
     }
 
@@ -258,7 +292,9 @@ export async function runConsolidation(
     // 游戏回合由游戏自己的巩固写入记忆，这里跳过，避免重复记账。
     // 好友私聊同理：好友对话不进主 AI 记忆（信息隔离），只留一条弱痕迹。
     // 注意：被跳过的只是「不参与提取」，游标仍会推进——否则一整段对局会让巩固反复空转
-    const snapshot = windowMessages.filter((m) => !m.game_id && !m.friend_id);
+    const snapshot = windowMessages
+      .filter((m) => !m.game_id && !m.friend_id)
+      .map((m) => ({ role: m.role, content: m.content, timestamp: m.timestamp }));
     // 批末消息时间 = 这批对话实际发生的时刻：提取提示词与落库时间戳都用它，
     // 避免把历史对话当成「现在」巩固（否则几天前的事被写成「今天」）
     const batchEndTs =
@@ -298,9 +334,17 @@ export async function runConsolidation(
       return {
         id: e.id,
         title: e.event_text,
-        snippets: picked.map((f) => anchorLine(f.summary, f.timestamp, userInfo)),
+        // 片段原样给（保留 [time] / [user] 占位符）：模型照着这个体例写，
+        // 渲染成「3天前 …」反而是在教它把相对时间写死进记忆
+        snippets: picked.map((f) => f.summary),
+        condition: e.memory_kind === "condition" && !e.closed_at,
       };
     });
+    // 未闭合的处境必须全部进候选：用户说「我好了」时，模型得有一个 id 可挂
+    for (const c of getActiveConditions().slice(0, 5)) {
+      if (candidates.some((x) => x.id === c.id)) continue;
+      candidates.push({ id: c.id, title: c.event_text, snippets: [], condition: true });
+    }
     // 默认事件作为兜底候选：没有明确主题的零碎片段挂这里，别乱建事件
     const defaultEventId = getDefaultEventId();
     const defaultEvent = defaultEventId ? getEventById(defaultEventId) : null;
@@ -313,7 +357,7 @@ export async function runConsolidation(
     }
 
     // 5. 调用后台 LLM 提取（增量模式，传 userInfo 供展示已有数据）
-    const result = await extractConsolidation(
+    const extraction = await extractConsolidation(
       userInfo,
       snapshot,
       candidates,
@@ -321,16 +365,22 @@ export async function runConsolidation(
       LOCK_TIMEOUT_MS - 2000,
       batchEndTs
     );
-    if (!result) {
-      logDebug("巩固结果", "LLM 提取失败或返回空, is_locked=false, 保留计数器下次重试");
+    if (!extraction.ok) {
+      logDebug("巩固结果", `LLM 提取失败：${extraction.reason}，保留游标下次重试`);
+      noteFailure(extraction.reason, pendingCount);
       clearTimeout(timeoutTimer);
       useMetaStore.getState().setLocked(false);
       return false;
     }
+    const result = extraction.data;
 
     // 6. 双重关联写入（SQLite 事务）
     const db = getDB();
     const written: string[] = [];
+    /** 处境计数：新建 / 刷新 / 结束，写进巩固日志 */
+    let conditionStarted = 0;
+    let conditionRefreshed = 0;
+    let conditionClosed = 0;
     /** 被合并掉的事件 id → keep id：本次返回的 target_event_index 可能指向已删除的行 */
     const idMap = new Map<number, number>();
     await db.withExclusiveTransactionAsync(async () => {
@@ -360,7 +410,31 @@ export async function runConsolidation(
         // 模型在同一份回复里既说「把 9 并进 7」又说「新片段挂 9」：按映射改投 7
         const mappedTarget = idMap.get(frag.target_event_index) ?? frag.target_event_index;
 
-        if (frag.happens_at) {
+        // 处境标记决定这条片段挂在哪：仍在持续就挂到处境事件下，说「好了」就结束它。
+        // 结束时间沿用本批对话时间，不记成巩固执行时刻
+        let conditionTarget: number | null = null;
+        if (frag.condition_ended) {
+          const open = findActiveConditionByLabel(frag.condition_ended);
+          if (open) {
+            resolveCondition(open.id, batchEndTs);
+            conditionTarget = open.id;
+            conditionClosed++;
+            written.push(`  ✓ 处境结束 [${open.id}] ${open.event_text}`);
+          }
+        }
+        if (frag.condition) {
+          const existingOpen = findActiveConditionByLabel(frag.condition);
+          conditionTarget = startCondition(frag.condition, priority, batchEndTs);
+          if (existingOpen) conditionRefreshed++;
+          else conditionStarted++;
+          written.push(
+            `  ◇ 处境${existingOpen ? "刷新" : "新建"} [${conditionTarget}] ${frag.condition}`
+          );
+        }
+
+        if (conditionTarget !== null) {
+          targetEventId = conditionTarget;
+        } else if (frag.happens_at) {
           // 将来才发生的事（约定 / 离职 / 考试 / 手术…）：独立成一条未来事件，
           // 不挂到已发生的记忆上。事件 timestamp = 发生时刻，到点由时间通道提醒
           const rawTitle =
@@ -405,11 +479,12 @@ export async function runConsolidation(
 
     // 7. 会话摘要：旧摘要 + 本批对话压成新摘要，供前台替代已巩固的对话。
     //    游标一旦推进，这段对话就只剩摘要能代表它——本次必须有摘要可写。
-    //    模型漏写时用本批片段 gist 拼一段兜底，宁可粗糙也不能让覆盖范围断档。
+    //    模型漏写时用本批片段 gist 拼一段兜底（[time] 换成绝对日期），宁可粗糙也不能让覆盖范围断档。
     const prevDigest = getMeta("session_digest") ?? "";
+    const dayLabel = dayjs(batchEndTs).format("YY年M月D日");
     const nextDigest =
       result.session_digest?.trim() ||
-      [prevDigest, ...(result.new_fragments ?? []).map((f) => f.gist)]
+      [prevDigest, ...(result.new_fragments ?? []).map((f) => f.gist.replace(/\[time\]/gi, dayLabel))]
         .filter(Boolean)
         .join("；")
         .slice(-400);
@@ -421,16 +496,18 @@ export async function runConsolidation(
     // 8. 释放锁 + 清零计数 + 记录巩固进度（同步更新内存 + DB）
     advanceCursor(recentMessages, windowStart);
     useMetaStore.getState().reset();
+    clearFailure();
 
     logDebug(
       "巩固完成",
-      `候选 ${candidates.length} 个 / 归并 ${result.event_merges?.length ?? 0} 组 / 摘要 ${nextDigest.length} 字\n${written.join("\n")}\n进度: 已推进到第 ${windowStart} 条`
+      `候选 ${candidates.length} 个 / 归并 ${result.event_merges?.length ?? 0} 组 / 处境 新建${conditionStarted} 刷新${conditionRefreshed} 结束${conditionClosed} / 摘要 ${nextDigest.length} 字\n${written.join("\n")}\n进度: 已推进到第 ${windowStart} 条`
     );
     return true;
   } catch (err) {
     clearTimeout(timeoutTimer);
     const errMsg = err instanceof Error ? err.message : String(err);
-    logDebug("巩固异常", `${errMsg}\nis_locked=false, 保留计数器下次重试`);
+    logDebug("巩固异常", `${errMsg}\nis_locked=false, 保留游标下次重试`);
+    noteFailure(`写库异常：${errMsg}`, pendingCount);
     useMetaStore.getState().setLocked(false);
     return false;
   }

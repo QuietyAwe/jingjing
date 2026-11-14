@@ -1,267 +1,233 @@
-// 记忆强化时序评估：验证「常提的事保持记忆」与「误报的事不被长期提醒」。
-// 复跑：node --experimental-strip-types tests/memory-weight.eval.mjs
-// 分词/停用词/屏蔽词取自真实源码；衰减公式按 src/memory/decay.ts 复刻（项目无 node_modules，别名模块无法直接 import）。
-import { readFileSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+// 记忆强化时序评估：node tests/memory-weight.eval.mjs
+//
+// 检验「常提的事保持清晰」与「误报的事不被长期提醒」能否同时成立。
+// 模拟剧情与人工标注：tests/cases/weight.cases.mjs
+// 记忆内容：tests/cases/memories.mjs
+// 分词/门槛/打分取自真实源码；衰减公式按 src/memory/decay.ts 复刻（项目模块带 @/ 别名，Node 里加载不了）。
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { DOCS_DIR, loadDecayBaseRate, loadRetrievalCore, loadWeightLines } from "./lib/harness.mjs";
+import { ALL_FIELDS, SCORED_FIELDS, buildPool, createRetriever } from "./lib/retrieval-sim.mjs";
+import { MEMORIES, RETRIEVABLE } from "./cases/memories.mjs";
+import {
+  GROUP_OF,
+  KEEP_MIN_FINAL,
+  ORDER,
+  START_WEIGHT,
+  TIMELINE,
+  WINDOW_HOURS,
+} from "./cases/weight.cases.mjs";
 
-const ROOT = "/workspace/jingjing";
-const OUT = `${ROOT}/docs/memory-weight-eval.html`;
-const { tokenize, scoreOverlap } = await import(pathToFileURL(`${ROOT}/src/memory/tokenize.ts`).href);
+const OUT = path.join(DOCS_DIR, "memory-weight-eval.html");
+const real = await loadRetrievalCore();
+const LINES = loadWeightLines();
 
-const tsrc = readFileSync(`${ROOT}/src/memory/tokenize.ts`, "utf8");
-const STOP = new Set(new Function("return [" + tsrc.match(/const STOP_WORDS = new Set\(\[([\s\S]*?)\]\);/)[1] + "]")());
-const isBlockedGram = (g, words) => words.some((w) => w.includes(g) || g.includes(w));
-const BLOCKED = ["阿柚", "私藏"];
-const STOP_MULTI = [...STOP].filter((w) => w.length >= 2 && /^[一-鿿]+$/.test(w)).sort((a, b) => b.length - a.length);
-const stripStop = (text) => STOP_MULTI.reduce((t, w) => t.split(w).join(""), text);
-
-// ── 记忆库（字段化，对应真实 schema 的 event_text / gist / summary / keywords）──
-// group: hot 常提高频 · lowfreq 低频提起 · stopped 提过之后停 · never 从未被提 · ritual 程式化问候
-const MEM = [
-  { id: 1, name: "巷口面馆", group: "hot", event: "巷口面馆", alias: "", gist: "[time]晚上[user]加完班去巷口面馆吃了一碗牛肉面", summary: "[time]晚上[user]说加班结束绕去巷口面馆，点了牛肉面，汤头很暖，觉得一天的压力都被抚平了，还说下次要带[ai]一起去", kw: "巷口面馆 牛肉面 吃面 面馆 加班 夜宵" },
-  { id: 2, name: "妈妈做的番茄炒蛋", group: "stopped", event: "妈妈做的番茄炒蛋", alias: "", gist: "[time][user]说想吃妈妈做的番茄炒蛋", summary: "[time][user]聊起小时候妈妈做的番茄炒蛋，说外面怎么都做不出那个味道，有点想家", kw: "妈妈 母亲 我妈 老妈 番茄炒蛋 想家 老家" },
-  { id: 3, name: "加班到很晚", group: "stopped", event: "加班到很晚", alias: "", gist: "[time][user]连着一周加班到很晚", summary: "[time][user]说项目赶稿连着一周加班到很晚，颈椎疼，语气很疲惫但没抱怨，只说想早点睡", kw: "加班 熬夜 项目 赶稿 疲惫 颈椎 压力" },
-  { id: 4, name: "周末去西山", group: "lowfreq", event: "周末去西山", alias: "", gist: "[time][user]周末去爬了西山", summary: "[time][user]说周末一个人去爬西山，山顶风很大，拍了张照片，觉得好久没这么松快", kw: "西山 爬山 周末 山顶 照片" },
-  { id: 5, name: "团子橘猫", group: "stopped", event: "团子（橘猫）", alias: "", gist: "[time][user]说团子又把桌上的杯子推下去了", summary: "[time][user]家养了只橘猫叫团子，爱推桌上的东西，[user]嘴上嫌弃其实很宠", kw: "团子 橘猫 猫 宠物 推杯子" },
-  { id: 6, name: "被领导批评", group: "never", event: "被领导批评", alias: "", gist: "[time][user]被领导当众批评了", summary: "[time][user]说方案被领导当众否了，觉得委屈又不好意思跟同事说，回家跟[ai]讲了很久", kw: "领导 老板 批评 方案 委屈 当众 骂" },
-  { id: 7, name: "感冒发烧", group: "never", event: "感冒发烧", alias: "", gist: "[time][user]感冒发烧请假在家", summary: "[time][user]说感冒发烧到38度，一个人躺了一天没人照顾，语气有点低落", kw: "感冒 发烧 生病 请假 38度" },
-  { id: 8, name: "和小陈吵架", group: "never", event: "和小陈吵架", alias: "", gist: "[time][user]跟朋友小陈闹了别扭", summary: "[time][user]说和小陈因为一件小事吵了架，其实不全是对方的问题，但拉不下脸先开口", kw: "小陈 朋友 吵架 闹别扭" },
-  { id: 9, name: "手冲咖啡", group: "never", event: "学做手冲咖啡", alias: "", gist: "[time][user]开始学手冲咖啡", summary: "[time][user]买了一套手冲器具，第一次冲出来的咖啡太酸，说要慢慢练", kw: "手冲 咖啡 拿铁 器具 太酸" },
-  { id: 10, name: "童年外婆家", group: "never", event: "童年外婆家", alias: "", gist: "[time][user]聊起小时候在外婆家过暑假", summary: "[time][user]说小时候暑假都在外婆家，院子里有棵枇杷树，那是记忆里最安稳的夏天", kw: "外婆 童年 暑假 枇杷树 院子" },
-  { id: 11, name: "睡前晚安", group: "ritual", event: "睡前晚安", alias: "", gist: "[time][user]睡前跟[ai]说晚安", summary: "[time][user]那阵子每晚睡前都会来跟[ai]说一声晚安，偶尔还会多聊两句才睡", kw: "晚安 睡前 道别 每晚" },
-  { id: 12, name: "打算去大理", group: "never", event: "打算去大理", alias: "", gist: "[time][user]说想请年假去大理", summary: "[time][user]说想请年假去大理住几天，看看洱海，还没订机票", kw: "大理 旅行 洱海 年假 机票" },
-  { id: 13, name: "早安问候", group: "ritual", event: "早安问候", alias: "", gist: "[time][user]早上跟[ai]打招呼", summary: "[time][user]有阵子每天早上会先发一句早上好再出门", kw: "早上好 早安 问候 出门" },
-];
-
-// ── 检索 ──
-const ALL = ["gist", "summary", "kw"], KEY = ["kw"];
-function retrieve(q, o) {
-  const kw = tokenize(o.strip ? stripStop(q) : q, 16, (g) => isBlockedGram(g, BLOCKED));
-  if (!kw.length) return { kw, hits: [] };
-  const has = (s) => kw.some((k) => s.includes(k));
-  const pick = (e, fs) => fs.map((f) => e[f] ?? "").join(" ") || (e.kw ? "" : e.gist);
-  const rank = (cands, textOf) => {
-    const min = o.shortStrict && kw.length <= 2 ? kw.length : 1;
-    return cands
-      .map((item) => ({ item, s: scoreOverlap(textOf(item), kw) }))
-      .filter((x) => x.s >= min)
-      .sort((a, b) => b.s - a.s || a.item.id - b.item.id)
-      .map((x) => x.item);
-  };
-  let hits = rank(MEM.filter((e) => has(`${e.event} ${e.alias}`)), (e) => `${e.event} ${e.alias}`).slice(0, 3);
-  if (!hits.length) hits = rank(MEM.filter((e) => has(pick(e, o.fields))), (e) => pick(e, o.fields)).slice(0, 3);
-  return { kw, hits };
+// ── 记忆库：全部可检索记忆都参演，id 按 ORDER 的顺序（同分时按池子顺序） ──
+const missing = RETRIEVABLE.filter((m) => !ORDER.includes(m.name)).map((m) => m.name);
+if (missing.length) {
+  throw new Error(`weight.cases.mjs 的 ORDER 漏了：${missing.join("、")}（新加记忆必须登记，否则会被悄悄排除在检索池外）`);
 }
+const CHOSEN = ORDER.map((name) => {
+  const m = MEMORIES.find((x) => x.name === name);
+  if (!m) throw new Error(`weight.cases.mjs 的 ORDER 里写了不存在的记忆「${name}」`);
+  if (m.kind) throw new Error(`「${name}」是未来事件/兜底事件，不进检索池，不该出现在 ORDER 里`);
+  if (!GROUP_OF[name]) throw new Error(`weight.cases.mjs 的 GROUP_OF 缺少「${name}」的分组`);
+  return { ...m, group: GROUP_OF[name] };
+});
+const POOL = buildPool(CHOSEN);
+
+// 标注里写了不在记忆库里的名字 = 改名后忘了同步，直接报错而不是静默漏评
+for (const [, , q, intent] of TIMELINE) {
+  for (const name of intent) {
+    if (!POOL.some((m) => m.name === name)) {
+      throw new Error(`时间线用例「${q}」标注了不在记忆库里的「${name}」`);
+    }
+  }
+}
+
+// ── 三套检索判据 ──
 const RETRIEVE = {
-  old: { fields: ALL, strip: false, shortStrict: false },  // 改动前：全字段、命中即算
-  new: { fields: KEY, strip: true, shortStrict: true },     // 改动后：只认标签、停用词先剥离
+  // 当前实现：真实 minHitScore / rankByOverlap（印象+标签打分，长句命中 1 个就算）
+  current: { fields: SCORED_FIELDS, useRealRank: true },
+  // 上一版：两段式、全字段打分、长句要求 2 个关键词、与最高分差一半以上截断
+  previous: { fields: ALL_FIELDS, minFn: (kw) => (kw.length <= 2 ? kw.length : 2), ratio: 0.5, staged: true },
+  // 更早：两段式、全字段、命中即算
+  legacy: { fields: ALL_FIELDS, minFn: () => 1, staged: true },
 };
+const retrievers = Object.fromEntries(
+  Object.entries(RETRIEVE).map(([key, opts]) => [key, createRetriever(real, POOL, opts)])
+);
 
-// ── 时间线：7 天 × 5 轮 = 35 轮 ──
-// role 用于模拟会话时机信号（开场/道别），intent 是「这句话真的在提哪件事」的人工标注，仅用于评分。
-const HOT_Q = ["还记得巷口那家面馆吗", "上次那家面馆的牛肉面", "再去巷口面馆吧", "晚上去吃面吧", "巷口面馆的汤头真暖", "那家面馆还开着吗", "又想去吃面了"];
-const OTHER_Q = [
-  { q: "周末去爬了西山", intent: ["周末去西山"] },
-  { q: "又加班到很晚", intent: ["加班到很晚"] },
-  { q: "我妈做的番茄炒蛋", intent: ["妈妈做的番茄炒蛋"] },
-  { q: "上次去西山拍的照片", intent: ["周末去西山"] },
-  { q: "团子又把杯子推下去了", intent: ["团子橘猫"] },
-  { q: "老妈的拿手菜", intent: ["妈妈做的番茄炒蛋"] },
-  { q: "还想去西山", intent: ["周末去西山"] },
-];
-// 真实闲聊里带通用词，旧检索（全字段）会撞上 summary 的模板话，新检索（只认标签）不会
-const CHAT_Q = ["觉得有点累", "有点无聊", "觉得还行吧", "有点困了", "觉得有点烦", "有点想歇会儿", "觉得今天还行"];
-const T = [];
-for (let d = 0; d < 7; d++) {
-  const base = d * 24;
-  T.push({ t: base + 8, role: "greeting", q: d % 2 === 0 ? "晚上好" : "早上好", intent: [] });
-  T.push({ t: base + 12.5, role: "recall", q: HOT_Q[d], intent: ["巷口面馆"] });
-  T.push({ t: base + 14, role: "chat", q: CHAT_Q[d], intent: [] });
-  const o = OTHER_Q[d];
-  T.push({ t: base + 20, role: "recall", q: o.q, intent: o.intent });
-  T.push({ t: base + 23, role: "farewell", q: "晚安", intent: [] });
-}
-const END = 7 * 24;
+// ── 时间线 ──
+const T = TIMELINE.map(([t, role, q, intent]) => ({ t, role, q, intent }));
 
-// ── 衰减（复刻 decay.ts：daily, priority 5 → 0.025/小时，指数衰减，下限 1）──
-const RATE = 0.02 * (2 - (5 - 1) * (1.5 / 8));
+// ── 衰减（复刻 decay.ts：priority 5 的系数 = 2 - (5-1)*(1.5/8)） ──
+const RATE = loadDecayBaseRate() * (2 - (5 - 1) * (1.5 / 8));
 const decay = (w, hours) => Math.max(1, Math.floor(w * Math.exp(-RATE * hours)));
 
-// ── 策略 ──
+// ── 策略：同一套「命中即 100」的强化规则，只换检索判据 ──
 const POLICIES = [
-  { id: "A", label: "A 现状：旧检索 + 命中即 100", ret: "old", bump: () => 100, gate: false },
-  { id: "B", label: "B 旧检索 + 累进 +35", ret: "old", bump: (w) => Math.min(100, w + 35), gate: false },
-  { id: "B2", label: "B2 旧检索 + 累进 +60", ret: "old", bump: (w) => Math.min(100, w + 60), gate: false },
-  { id: "C", label: "C 新检索 + 命中即 100（推荐）", ret: "new", bump: () => 100, gate: false },
-  { id: "D", label: "D 新检索 + 累进 +35", ret: "new", bump: (w) => Math.min(100, w + 35), gate: false },
-  { id: "E", label: "E = C + 会话闸门（开场/道别不强化）", ret: "new", bump: () => 100, gate: true },
+  { id: "V1", label: "V1 当前实现", ret: "current" },
+  { id: "P1", label: "P1 上一版（长≥2 + 截断）", ret: "previous" },
+  { id: "P2", label: "P2 更早（命中即算）", ret: "legacy" },
 ];
 
-const START_W = 15; // 所有记忆起点都是冷记忆（约 3 天前想起过）
 function simulate(p) {
-  const state = new Map(MEM.map((e) => [e.id, { w: START_W, last: 0 }]));
-  let trueRecallHit = 0, trueRecallTotal = 0, falseHitRounds = 0, irrelevantRounds = 0;
+  const retriever = retrievers[p.ret];
+  const state = new Map(POOL.map((e) => [e.id, { w: START_WEIGHT, last: 0 }]));
+  let trueRecallHit = 0, trueRecallTotal = 0, falseHitRounds = 0;
   const log = [];
   for (const turn of T) {
-    const { hits } = retrieve(turn.q, RETRIEVE[p.ret]);
+    const { hits } = retriever.retrieve(turn.q);
     if (turn.intent.length) {
       trueRecallTotal++;
       if (hits.some((h) => turn.intent.includes(h.name))) trueRecallHit++;
     }
     const wrong = hits.filter((h) => !turn.intent.includes(h.name));
-    if (wrong.length && !turn.intent.length) {
-      falseHitRounds++;
-      if (wrong.some((h) => h.group !== "ritual")) irrelevantRounds++;
-    }
-    const gated =
-      (p.gate && (turn.role === "greeting" || turn.role === "farewell")) ||
-      (p.onlyIntent && turn.intent.length === 0);
+    if (wrong.length && !turn.intent.length) falseHitRounds++;
     for (const h of hits) {
-      if (gated) continue;
       const s = state.get(h.id);
-      s.w = p.bump(decay(s.w, turn.t - s.last));
+      s.w = 100;
       s.last = turn.t;
     }
-    log.push({ ...turn, hits: hits.map((h) => h.name), gated });
+    log.push({ ...turn, hits: hits.map((h) => h.name) });
   }
-  // 逐小时采样
+  // 用事件序列精确回放每条记忆的逐小时权重曲线
   const series = new Map();
-  for (const e of MEM) {
-    const s = state.get(e.id);
+  for (const e of POOL) {
+    const evs = log.filter((x) => x.hits.includes(e.name)).map((x) => x.t);
+    let w = START_WEIGHT, last = 0, k = 0;
     const pts = [];
-    for (let t = 0; t <= END; t++) {
-      // 用「最后一次强化」之前的事件序列回放，避免重复结算：直接按每个强化点分段
-      pts.push(0);
-    }
-    series.set(e.id, pts);
-  }
-  // 用事件序列精确回放每个记忆的权重曲线
-  for (const e of MEM) {
-    const evs = log.filter((x) => x.hits.includes(e.name) && !x.gated).map((x) => x.t);
-    let w = START_W, last = 0, k = 0;
-    const pts = series.get(e.id);
-    for (let t = 0; t <= END; t++) {
+    for (let t = 0; t <= WINDOW_HOURS; t++) {
       while (k < evs.length && evs[k] <= t) {
-        w = p.bump(decay(w, evs[k] - last));
-        last = evs[k]; k++;
+        w = 100; last = evs[k]; k++;
       }
       pts[t] = decay(w, t - last);
     }
+    series.set(e.id, pts);
   }
   const stats = new Map();
-  for (const e of MEM) {
+  for (const e of POOL) {
     const pts = series.get(e.id);
     stats.set(e.id, {
-      clearHours: pts.filter((w) => w >= 60).length,
-      warmHours: pts.filter((w) => w >= 40).length,
-      final: pts[END], peak: Math.max(...pts),
+      clearHours: pts.filter((w) => w >= LINES.clear).length,
+      warmHours: pts.filter((w) => w >= LINES.cold).length,
+      final: pts[WINDOW_HOURS], peak: Math.max(...pts),
     });
   }
-  return { stats, series, trueRecallHit, trueRecallTotal, falseHitRounds, irrelevantRounds, log };
+  return { stats, series, trueRecallHit, trueRecallTotal, falseHitRounds, log };
 }
 
 const results = POLICIES.map((p) => ({ ...p, r: simulate(p) }));
 // 理想基线：只在「真的在提这件事」的轮次复习，其余一律不强化。用作反事实参照。
-const IDEAL = { id: "X", ret: "new", bump: () => 100, gate: false, onlyIntent: true };
+const IDEAL = { id: "X", ret: "current", onlyIntent: true };
 const idealResult = simulate(IDEAL);
 
 // ── 指标 ──
-const NEVER_IDS = MEM.filter((e) => e.group === "never").map((e) => e.id);
-const RITUAL_IDS = MEM.filter((e) => e.group === "ritual").map((e) => e.id);
-const HOT_ID = 1;
-function score(r) {
+const idsOf = (group) => POOL.filter((e) => e.group === group).map((e) => e.id);
+const HOT_ID = POOL.find((e) => e.group === "hot").id;
+const NEVER_IDS = idsOf("never");
+function score(r, onlyIntent = false) {
   const hot = r.stats.get(HOT_ID);
   const falseHours = NEVER_IDS.reduce((s, id) => s + r.stats.get(id).clearHours, 0);
-  const ritualHours = RITUAL_IDS.reduce((s, id) => s + r.stats.get(id).clearHours, 0);
-  const stoppedFinal = MEM.filter((e) => e.group === "stopped").map((e) => r.stats.get(e.id).final);
-  const stoppedClear = MEM.filter((e) => e.group === "stopped")
+  const stoppedClear = POOL.filter((e) => e.group === "stopped")
     .reduce((s, e) => s + r.stats.get(e.id).clearHours, 0);
+  const recall = r.trueRecallTotal ? r.trueRecallHit / r.trueRecallTotal : 1;
   return {
-    keep: hot.clearHours >= 100 && hot.final >= 60,
+    // 判据：用户提往事时不漏 + 相处到最后常聊的事仍清楚
+    keep: recall === 1 && hot.final >= KEEP_MIN_FINAL,
     hotClear: hot.clearHours, hotFinal: hot.final,
-    falseHours, ritualHours,
-    fade: stoppedFinal.every((w) => w < 60), stoppedFinal, stoppedClear,
-    recall: r.trueRecallTotal ? r.trueRecallHit / r.trueRecallTotal : 1,
-    falseRounds: r.falseHitRounds, irrelevantRounds: r.irrelevantRounds,
+    hotClearRatio: hot.clearHours / WINDOW_HOURS,
+    falseHours, stoppedClear, recall,
+    falseRounds: r.falseHitRounds,
+    onlyIntent,
   };
 }
-const ideal = score(idealResult);
+const ideal = score(idealResult, true);
 
 // ── 终端摘要 ──
 const R = Object.fromEntries(results.map((p) => [p.id, p.r]));
-console.log("记忆强化时序评估 · 7 天 35 轮 · 13 条记忆 · 168 小时窗口");
+console.log(`记忆强化时序评估 · ${WINDOW_HOURS / 24} 天 ${T.length} 轮 · ${POOL.length} 条记忆 · ${WINDOW_HOURS} 小时窗口`);
 console.log(`理想基线：停提组清晰 ${ideal.stoppedClear}h（其余为 0）\n`);
-console.log("档位".padEnd(34), "常提保持", "清晰h", "末权重", "误提醒h", "仪式组h", "停提组h", "不相干误报轮");
+console.log("策略".padEnd(32), "常提保持", "清晰h", "末权重", "误提醒h", "停提组h", "误报轮", "真提召回");
 for (const p of results) {
   const s = score(p.r);
   console.log(
-    p.label.padEnd(34),
-    (s.keep ? "✓ 通过" : "✗ 失败").padEnd(8),
-    String(s.hotClear).padEnd(5),
+    p.label.padEnd(32),
+    (s.keep ? "✓ 通过" : "✗ 不达标").padEnd(8),
+    `${s.hotClear}h(${Math.round(s.hotClearRatio * 100)}%)`.padEnd(10),
     String(s.hotFinal).padEnd(6),
     String(s.falseHours).padEnd(7),
-    String(s.ritualHours).padEnd(7),
     String(s.stoppedClear).padEnd(7),
-    `${s.irrelevantRounds}  (真提召回 ${(s.recall * 100).toFixed(0)}%)`
+    String(s.falseRounds).padEnd(6),
+    `${(s.recall * 100).toFixed(0)}%`
   );
 }
-for (const id of ["A", "C"]) {
-  console.log(`\n=== ${id} 档里被误命中过的记忆 ===`);
-  for (const e of MEM) {
-    const st = R[id].stats.get(e.id);
-    const times = R[id].log.filter((x) => x.hits.includes(e.name) && !x.intent.includes(e.name)).length;
-    if (times) console.log(`  ${e.name.padEnd(16)} 被误命中 ${times} 轮，清晰 ${st.clearHours}h，末权重 ${st.final}  [${e.group}]`);
-  }
+for (const id of results.map((p) => p.id)) {
+  const wrong = R[id].log.filter((x) => x.hits.length && !x.intent.length);
+  if (!wrong.length) continue;
+  console.log(`\n=== ${id} 档：闲聊/问候里被误命中 ===`);
+  for (const x of wrong) console.log(`  D${Math.floor(x.t / 24) + 1} 「${x.q}」→ ${x.hits.join("、")}  [${x.role}]`);
 }
 
 // ── HTML 报告 ──
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-const COLORS = { hot: "#c0392b", lowfreq: "#b8860b", stopped: "#4a6fa5", never: "#7a746c", ritual: "#8e44ad" };
+const COLORS = { hot: "#c0392b", lowfreq: "#b8860b", stopped: "#4a6fa5", never: "#7a746c" };
 function chart(p, ids) {
   const W = 560, H = 190, PX = 42, PY = 14, PW = W - PX - 14, PH = H - PY - 26;
-  const x = (t) => PX + (t / END) * PW;
+  const x = (t) => PX + (t / WINDOW_HOURS) * PW;
   const y = (w) => PY + PH - (w / 100) * PH;
   let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;background:#fff">`;
-  for (const th of [40, 60]) svg += `<line x1="${PX}" y1="${y(th)}" x2="${W - 14}" y2="${y(th)}" stroke="#e6e1da" stroke-dasharray="4 4"/><text x="4" y="${y(th) + 4}" font-size="10" fill="#9a938a">${th}</text>`;
-  for (let d = 0; d <= 7; d++) svg += `<line x1="${x(d * 24)}" y1="${PY}" x2="${x(d * 24)}" y2="${PY + PH}" stroke="#f1eee9"/><text x="${x(d * 24) - 4}" y="${H - 8}" font-size="10" fill="#9a938a">D${d}</text>`;
+  for (const th of [LINES.cold, LINES.clear]) svg += `<line x1="${PX}" y1="${y(th)}" x2="${W - 14}" y2="${y(th)}" stroke="#e6e1da" stroke-dasharray="4 4"/><text x="4" y="${y(th) + 4}" font-size="10" fill="#9a938a">${th}</text>`;
+  const days = WINDOW_HOURS / 24;
+  for (let d = 0; d <= days; d++) svg += `<line x1="${x(d * 24)}" y1="${PY}" x2="${x(d * 24)}" y2="${PY + PH}" stroke="#f1eee9"/><text x="${x(d * 24) - 4}" y="${H - 8}" font-size="10" fill="#9a938a">D${d}</text>`;
   for (const id of ids) {
-    const e = MEM.find((m) => m.id === id), pts = p.r.series.get(id);
+    const e = POOL.find((m) => m.id === id), pts = p.r.series.get(id);
     const d = pts.map((w, t) => `${t === 0 ? "M" : "L"}${x(t).toFixed(1)},${y(w).toFixed(1)}`).join(" ");
     svg += `<path d="${d}" fill="none" stroke="${COLORS[e.group]}" stroke-width="2" opacity=".9"/>`;
   }
   svg += `</svg>`;
-  const legend = ids.map((id) => { const e = MEM.find((m) => m.id === id); return `<span style="color:${COLORS[e.group]}">● ${esc(e.name)}</span>`; }).join("　");
+  const legend = ids.map((id) => { const e = POOL.find((m) => m.id === id); return `<span style="color:${COLORS[e.group]}">● ${esc(e.name)}</span>`; }).join("　");
   return `<div class="chart"><div class="ct">${esc(p.label)}</div>${svg}<div class="lg">${legend}</div></div>`;
 }
 
-const rowScore = results.map((p) => { const s = score(p.r); return `<tr><td>${esc(p.label)}</td><td class="${s.keep ? "ok" : "err"}">${s.keep ? "✓ 保持" : "✗ 被遗忘"}</td><td>${s.hotClear}h</td><td>${s.hotFinal}</td><td class="${s.falseHours ? "err" : "ok"}">${s.falseHours}h</td><td>${s.ritualHours}h</td><td class="${s.stoppedClear > ideal.stoppedClear * 1.5 ? "err" : "ok"}">${s.stoppedClear}h</td><td class="${s.irrelevantRounds ? "err" : "ok"}">${s.irrelevantRounds}</td><td>${(s.recall * 100).toFixed(0)}%</td></tr>`; }).join("")
-  + `<tr style="background:#f4f1ec"><td><b>X 理想基线（只在真提轮复习）</b></td><td class="ok">✓ 保持</td><td>${ideal.hotClear}h</td><td>${ideal.hotFinal}</td><td class="ok">${ideal.falseHours}h</td><td>${ideal.ritualHours}h</td><td><b>${ideal.stoppedClear}h</b></td><td class="ok">0</td><td>100%</td></tr>`;
+const rowScore = results.map((p) => {
+  const s = score(p.r);
+  return `<tr><td>${esc(p.label)}</td><td class="${s.keep ? "ok" : "err"}">${s.keep ? "✓ 保持" : "✗ 不达标"}</td><td>${s.hotClear}h (${Math.round(s.hotClearRatio * 100)}%)</td><td class="${s.hotFinal >= KEEP_MIN_FINAL ? "ok" : "err"}">${s.hotFinal}</td><td class="${s.falseHours ? "err" : "ok"}">${s.falseHours}h</td><td class="${s.stoppedClear > ideal.stoppedClear * 1.5 ? "err" : "ok"}">${s.stoppedClear}h</td><td class="${s.falseRounds ? "err" : "ok"}">${s.falseRounds}</td><td class="${s.recall === 1 ? "ok" : "err"}">${(s.recall * 100).toFixed(0)}%</td></tr>`;
+}).join("")
+  + `<tr style="background:#f4f1ec"><td><b>X 理想基线（只在真提轮复习）</b></td><td class="ok">✓ 保持</td><td>${ideal.hotClear}h (${Math.round(ideal.hotClearRatio * 100)}%)</td><td>${ideal.hotFinal}</td><td class="ok">${ideal.falseHours}h</td><td><b>${ideal.stoppedClear}h</b></td><td class="ok">0</td><td>100%</td></tr>`;
 
-const detailRows = MEM.map((e) => {
+const detailRows = POOL.map((e) => {
   const cells = results.map((p) => { const s = p.r.stats.get(e.id); return `<td>${s.clearHours}h / ${s.peak} / ${s.final}</td>`; }).join("");
   return `<tr><td><b>${esc(e.name)}</b></td><td><span style="color:${COLORS[e.group]}">${e.group}</span></td>${cells}</tr>`;
 }).join("");
 
-const aLog = R.A.log.filter((x) => x.hits.length && !x.intent.length).slice(0, 12).map((x) => `<tr><td>D${Math.floor(x.t / 24) + 1} ${x.t % 24}h</td><td>${esc(x.q)}</td><td class="err">${esc(x.hits.join("、"))}</td><td>${x.role}</td></tr>`).join("");
-const cLog = R.C.log.filter((x) => x.hits.length && !x.intent.length).slice(0, 12).map((x) => `<tr><td>D${Math.floor(x.t / 24) + 1} ${x.t % 24}h</td><td>${esc(x.q)}</td><td>${esc(x.hits.join("、"))}</td><td>${x.role}</td></tr>`).join("");
+const logRows = (id) => R[id].log.filter((x) => x.hits.length && !x.intent.length).slice(0, 12)
+  .map((x) => `<tr><td>D${Math.floor(x.t / 24) + 1} ${x.t % 24}h</td><td>${esc(x.q)}</td><td class="${id === "V1" ? "err" : ""}">${esc(x.hits.join("、"))}</td><td>${x.role}</td></tr>`).join("");
 
-const cA = score(R.A), cB = score(R.B), cB2 = score(R.B2), cC = score(R.C), cD = score(R.D), cE = score(R.E);
-const e2Clear = R.A.stats.get(2).clearHours, e4Final = R.A.stats.get(4).final;
+/** 曲线里的「从未被提过」代表：优先固定一条，用例改了也不至于空图 */
+const NEVER_REP = (POOL.find((e) => e.name === "感冒发烧") ?? POOL.find((e) => e.group === "never") ?? POOL[0]).id;
+const namesOf = (group) => POOL.filter((e) => e.group === group).map((e) => esc(e.name)).join("、");
+const cV1 = score(R.V1), cP1 = score(R.P1), cP2 = score(R.P2);
+const missedOf = (id) => R[id].log.filter((x) => x.intent.length && !x.hits.some((n) => x.intent.includes(n)));
+const v1Missed = missedOf("V1"), p1Missed = missedOf("P1");
+const missedText = (list) => list.map((x) => `「${esc(x.q)}」`).join("、") || "无";
+const wrongOf = (id) => R[id].log.filter((x) => x.hits.length && !x.intent.length);
+const wrongText = (id) => wrongOf(id).map((x) => `「${esc(x.q)}」被听成「${esc(x.hits.join("、"))}」`).join("；") || "无";
+// 两天沉默（72h~120h）之后的重逢第一句真提有没有接住
+const SILENCE_END = 120;
+const reunionMissed = R.V1.log.find((x) => x.t >= SILENCE_END && x.intent.length && !x.hits.some((n) => x.intent.includes(n)));
+
 const conclusion = `<h2>结论</h2>
-<div class="box" style="white-space:pre-wrap">1. <b>两个目标可以同时满足，但主力不是「改复习给多少」，而是「管住谁能触发复习」。</b>
-C 档（新检索 + 保留你原本的「一次复习清零」）：常提的面馆清晰 ${cC.hotClear}h / 末权重 ${cC.hotFinal}，保持得住；从未被提过的记忆误提醒从 ${cA.falseHours}h 降到 ${cC.falseHours}h；不相干误报轮 ${cA.irrelevantRounds} → ${cC.irrelevantRounds}；真提召回仍 100%。
+<div class="box" style="white-space:pre-wrap">1. <b>当前实现</b>：用户真提往事时接住 ${(cV1.recall * 100).toFixed(0)}%，最后一天常聊的那件事还有 ${cV1.hotFinal} 分（≥${KEEP_MIN_FINAL} 算记得清楚，全窗口清晰时间占 ${Math.round(cV1.hotClearRatio * 100)}%）；从没提过的事被顶到清晰档 ${cV1.falseHours}h，闲聊/问候轮误报 ${cV1.falseRounds} 次${cV1.falseRounds ? `（${wrongText("V1")}）` : ""}。
 
-2. <b>现状（A）的危害不只是「这一轮冒三条」。</b>7 天里闲聊有 ${cA.irrelevantRounds} 轮撞上不相干记忆：两条从未被提过的事被顶到清晰档共 ${cA.falseHours}h；「妈妈做的番茄炒蛋」只真提过 2 次，却被误报顶得清晰 ${e2Clear}h；「周末去西山」被误报 4 轮，窗口末权重还有 ${e4Final}。停提组清晰 ${cA.stoppedClear}h，理想基线只有 ${ideal.stoppedClear}h —— 多出来的全是误报复习。这也是最初只看「末权重」会漏判的地方。
+2. <b>上一版（全字段 / 长≥2 / 截断）</b>：误报 ${cP1.falseRounds} 次、误提醒 ${cP1.falseHours}h 更干净，但真提漏了 ${p1Missed.length} 次（${missedText(p1Missed)}），常聊的事最后只剩 ${cP1.hotFinal} 分——干净是靠"接不住"换来的。
 
-3. <b>「攒几次才到位」（我上一轮的推荐）被这份用例证伪，不该单独用。</b>
-   - B（旧检索 + 累进 35）确实把长期误提醒压到 ${cB.falseHours}h，但本轮误报仍有 ${cB.irrelevantRounds} 轮，用户体感没改善；
-   - B2 把增量调大到 +60，天天被撞的误报又攒回 ${cB2.falseHours}h，说明调参数挡不住重复误报；
-   - D（新检索 + 累进 35）最糟：从冷记忆起步要爬 3 天，常提清晰小时 ${cC.hotClear}h → ${cD.hotClear}h、末权重掉到 ${cD.hotFinal}，<b>反而把常提的事拖模糊了</b>。
-   保留「被真正想起一次就立刻清晰」+ 干净的准入门槛，比累进更贴合人类回想，也不需要新增参数。
+3. <b>更早（全字段 / 命中即算）</b>：真提全部接住、结束 ${cP2.hotFinal} 分，代价是 ${cP2.falseRounds} 次误报、没提过的事被顶到清晰档 ${cP2.falseHours}h，而且「妈妈做的番茄炒蛋」这类事会被闲聊里的虚词反复擦亮。
 
-4. <b>残留边界</b>：C 档里「晚安」「早上好」每天命中同名记忆，仪式组累计清晰 ${cC.ritualHours}h。若认定这也算误报，加会话时机闸门（E 档）可归零到 ${cE.ritualHours}h，常提保持不变；代价是要把会话状态（距上轮时长 / 是否首条末条）传进检索层，无法从内容判断。这是唯一需要外部信号的一档。
+4. <b>两天没联系（D4-D5）之后的重逢最能看出差别。</b>沉默 48 小时后第一句真提${reunionMissed ? `「${esc(reunionMissed.q)}」当前实现没接住` : "当前实现接住了"}——那段时间里权重已经掉到冷记忆线以下，回来时能不能唤起来，取决于还有没有别的线索撑着。
 
-5. <b>口径说明</b>：早版「停提后淡忘」只看窗口末权重，会漏掉「被误报长期顶着、最后刚好掉下来」的情况，故补了停提组清晰小时与理想基线对照。</div>`;
+5. <b>还剩下的噪音</b>：${wrongText("V1")}。这类句子字面沾边、语义无关，是「只认标签」也挡不住的部分，得靠写入时的标签更准（提示词层）来解决。</div>`;
 
 const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>记忆强化时序评估 — jingjing</title><style>
@@ -279,45 +245,48 @@ th{background:#f4f1ec;text-align:left;padding:9px 10px;font-weight:600;color:#55
 code{background:#f1eee9;padding:1px 5px;border-radius:4px;font-size:12px}ul{margin:8px 0 0;padding-left:20px}li{margin:5px 0}
 </style></head><body><div class="wrap">
 <h1>记忆强化时序评估</h1>
-<div class="meta">jingjing · 7 天 / 35 轮 / 13 条记忆 / 168 小时窗口 · 检索取自真实分词，衰减按 <code>decay.ts</code> 复刻</div>
+<div class="meta">jingjing · ${WINDOW_HOURS / 24} 天 / ${T.length} 轮 / ${POOL.length} 条记忆 / ${WINDOW_HOURS} 小时窗口 · 检索取自真实源码，衰减按 <code>decay.ts</code> 复刻（基准 ${RATE.toFixed(4)}/小时）· 生成于 ${new Date().toLocaleString("zh-CN")}</div>
 
 <h2>用例设计</h2>
-<div class="box">模拟一段真实陪伴：每天早中晚各打招呼、闲聊、道别，中间穿插真正提起往事。记忆按被提起的方式分五组：
+<div class="box">模拟一段真实陪伴（${WINDOW_HOURS / 24} 天 ${T.length} 轮）：每天打招呼、闲聊、道别，中间穿插真正提起往事。剧情里特意安排了两件真实会发生的事——<b>D4-D5 连续两天完全没联系</b>（忙碌期，记忆最容易变淡），<b>D8 一晚上说了 11 句</b>（话多的一天，误命中最容易堆积）。记忆按被提起的方式分四组：
 <ul>
-<li><b style="color:#c0392b">hot</b>「巷口面馆」每天提一次 —— 检验<b>常提的事能不能一直保持清晰</b></li>
-<li><b style="color:#b8860b">lowfreq</b>「周末去西山」每 3 天提一次 —— 低频提起的边界</li>
-<li><b style="color:#4a6fa5">stopped</b> 提过 1~2 次后就不再提 —— 应该自然淡忘，不该永生</li>
-<li><b style="color:#7a746c">never</b> 从未被提起的 6 条 —— 一旦被误报强化并长期占位，就是「误报被长期提醒」</li>
-<li><b style="color:#8e44ad">ritual</b>「早安问候」「睡前晚安」—— 每天打招呼/道别会命中，单列观察</li>
+<li><b style="color:#c0392b">hot</b> ${namesOf("hot")} —— 检验<b>常聊的事能不能一直记得清楚</b></li>
+<li><b style="color:#b8860b">lowfreq</b> ${namesOf("lowfreq")} —— 隔几天提一次的边界</li>
+<li><b style="color:#4a6fa5">stopped</b> ${namesOf("stopped")} —— 提过一两次就不再提，应该自然淡忘</li>
+<li><b style="color:#7a746c">never</b> 从头到尾没真提过的 ${idsOf("never").length} 条（${namesOf("never")}）—— 一旦被闲聊误撞并长期占位，就是「莫名单曲循环」</li>
 </ul>
-每轮先跑检索，再按策略强化，最后按真实衰减曲线逐小时采样。<b>判定口径</b>：权重 ≥60 = 细节清晰、占记忆区前排；≥40 = 还在记忆区；&lt;40 = 冷记忆不再主动冒头。「误提醒小时」= 从未被真正提起的记忆处于 ≥60 的总小时数。</div>
+库里只有「人真的会记住的事」：寒暄、问候、道别不是记忆事件，所以「晚安」「早上好」在剧情里出现，却<b>不该命中任何往事</b>。每轮先跑检索，再按策略强化，最后按真实衰减曲线逐小时采样。<b>权重线</b>：≥${LINES.clear} = 细节记得清楚；≥${LINES.cold} = 还在记忆里；&lt;${LINES.cold} = 冷记忆，只在灵光一闪时才冒头。「误提醒小时」= 从头到尾没被提过、却处于 ≥${LINES.clear} 的总小时数。剧情与标注在 <code>tests/cases/weight.cases.mjs</code>。</div>
 
-<h2>五档策略对照</h2>
-<table><thead><tr><th>策略</th><th>常提保持</th><th>常提清晰小时</th><th>常提末权重</th><th>误提醒小时</th><th>仪式组清晰小时</th><th>停提组清晰小时</th><th>不相干误报轮</th><th>真提召回</th></tr></thead><tbody>${rowScore}</tbody></table>
-<div class="box"><b>怎么读这张表</b>：「常提保持」要求「巷口面馆」≥100 小时处于清晰档且窗口末仍 ≥60；「误提醒小时」= 从未被真提过的 6 条记忆处于 ≥60 的总小时数，越接近 0 越好；「停提组清晰小时」越接近最后那行理想基线越好，明显偏高说明本该淡忘的事被误报复习一直顶着。</div>
+<h2>策略对照</h2>
+<table><thead><tr><th>策略</th><th>常提保持</th><th>常提清晰（占比）</th><th>常提末权重</th><th>误提醒小时</th><th>停提组清晰小时</th><th>误报轮</th><th>真提召回</th></tr></thead><tbody>${rowScore}</tbody></table>
+<div class="box"><b>怎么读这张表</b>：<b>「常提保持」</b>= 用户提往事时一次都没漏，且相处到最后这件事仍然清楚（≥${KEEP_MIN_FINAL} 分）。清晰时间的占比只作参考——中间两天没联系，谁都不会全程记得清清楚楚。<b>「误提醒小时」「误报轮」</b>越接近 0 越好；<b>「停提组清晰小时」</b>越接近最后那行理想基线越好。</div>
 
 <h2>权重演化曲线</h2>
-<div class="box">红 = 每天常提的面馆；灰 = 从未被提的记忆；紫 = 每天道晚安。虚线为 60（细节清晰）与 40（冷记忆线）。</div>
-<div class="charts">${["A", "B2", "C", "E"].map((id) => chart(results.find((p) => p.id === id), [1, 7, 11])).join("")}</div>
+<div class="box">红 = 常聊的记忆；灰 = 从头到尾没提过的记忆。虚线为 ${LINES.clear}（记得清楚）与 ${LINES.cold}（冷记忆线）。D4-D5 那段没有对话，曲线会自然下滑。</div>
+<div class="charts">${["V1", "P1", "P2"].map((id) => chart(results.find((p) => p.id === id), [HOT_ID, NEVER_REP])).join("")}</div>
 
 <h2>逐条记忆明细（各档：清晰小时 / 峰值 / 末权重）</h2>
 <table><thead><tr><th>记忆</th><th>组</th>${results.map((p) => `<th>${p.id}</th>`).join("")}</tr></thead><tbody>${detailRows}</tbody></table>
 
-<h2>A 档：无意图轮次里被误命中的记忆（现状）</h2>
-<table><thead><tr><th>时刻</th><th>用户输入</th><th>命中</th><th>轮次类型</th></tr></thead><tbody>${aLog || '<tr><td colspan="4">无</td></tr>'}</tbody></table>
-
-<h2>C 档：同样轮次下的命中</h2>
-<table><thead><tr><th>时刻</th><th>用户输入</th><th>命中</th><th>轮次类型</th></tr></thead><tbody>${cLog || '<tr><td colspan="4">无</td></tr>'}</tbody></table>
+<h2>各档在闲聊/问候轮里的命中</h2>
+<table><thead><tr><th>档</th><th>时刻</th><th>用户输入</th><th>命中</th><th>轮次类型</th></tr></thead><tbody>${
+  results.map((p) => {
+    const rows = R[p.id].log.filter((x) => x.hits.length && !x.intent.length).slice(0, 8)
+      .map((x) => `<tr><td>${p.id}</td><td>D${Math.floor(x.t / 24) + 1} ${x.t % 24}h</td><td>${esc(x.q)}</td><td class="${p.id === "V1" ? "err" : ""}">${esc(x.hits.join("、"))}</td><td>${x.role}</td></tr>`)
+      .join("");
+    return rows;
+  }).join("") || '<tr><td colspan="5">三档都没有误命中</td></tr>'
+}</tbody></table>
 
 ${conclusion}
 
 <h2>评估边界</h2>
 <div class="box"><ul>
-<li>检索用真实 <code>tokenize.ts</code> + 停用词表 + 屏蔽词判定；SQL 粗召回用等价字符串包含模拟。衰减按 <code>decay.ts</code> 的 daily/priority 5 公式复刻（项目无 <code>node_modules</code>，别名模块无法直接 import）。</li>
+<li>检索用真实 <code>tokenize.ts</code> + 停用词表 + 屏蔽词判定 + <code>minHitScore</code> / <code>rankByOverlap</code>；SQL 粗召回用等价字符串包含模拟。衰减按 <code>decay.ts</code> 的 daily / priority 5 公式复刻（项目模块带 <code>@/</code> 别名，Node 里加载不了）。</li>
 <li>未纳入 episode 类型（按天衰减、下限 15）、权重优先级 1~9 差异、灵光一闪概率通道、Prompt 拼装细节。</li>
-<li>「会话闸门」（E 档）用轮次角色模拟运行时信号（距上轮时长 / 是否首条末条），不是从内容判意图。真实接入需把会话状态传进检索层。</li>
-<li>复跑：<code>node --experimental-strip-types tests/memory-weight.eval.mjs</code>，会重新生成本报告。</li>
+<li>复跑：<code>node tests/memory-weight.eval.mjs</code>，会重新生成本报告。</li>
 </ul></div>
 </div></body></html>`;
+mkdirSync(DOCS_DIR, { recursive: true });
 writeFileSync(OUT, html);
 console.log(`\n报告已生成: ${OUT}`);

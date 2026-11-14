@@ -3,27 +3,32 @@
 //
 // 未来事件不是独立的数据结构：约定、离职、考试、手术…都是 timestamp 在未来的记忆事件
 // （event_status = upcoming / caring / archived）。
-// - 到期前 24h：注入「xx快到了」，AI 在下一次回复里自然提起
-// - 过期且用户没提起：注入「xx已经过去了…找个契机关心一下」，持续注入
-// - 用户提起 或 关心满 48h：归档（事件留在记忆里可被检索，同时转成一条状态）
+// 提醒是**按次数**收敛的，一共给两次（nudge_count 计数），不再靠「用户是否提起」决定：
+// - 到期前 24h：注入「xx快到了」，只提一次
+// - 过期后 48h 内：注入「xx已经过去了…关心一下」，把剩下的次数用完即归档
+// - 用户自己提起（判定很难命中，命中就是提前收工）/ 次数满 / 关心满 48h → 归档
+// 归档只改状态：事件留在记忆里继续参与检索与衰减
 // ============================================================
 
 import dayjs from "dayjs";
 import {
   getUpcomingEvents,
   getUserInfo,
-  setUserInfo,
   updateEventStatus,
+  incrementEventNudge,
   EVENT_CARE_WINDOW_HOURS,
 } from "@/db/queries";
 import { getPrompts } from "@/prompt/config";
 import { replacePlaceholders } from "@/prompt/assembler";
 import { logDebug } from "@/store/chatStore";
 import { bigrams, scoreOverlap } from "@/memory/tokenize";
-import type { MemoryEvent, StateItem } from "@/types/schema";
+import type { MemoryEvent } from "@/types/schema";
 
 /** 「即将到来」判定窗口：到期前 24h 开始注入临近提示 */
 const REMIND_BEFORE_HOURS = 24;
+
+/** 提醒总次数上限：临近一次 + 过期后关心一次，用完就归档 */
+const MAX_NUDGES = 2;
 
 /** 用户是否提起了该事件（用户消息与事件文本有实质重合） */
 function isMentioned(userInput: string, eventText: string): boolean {
@@ -34,10 +39,9 @@ function isMentioned(userInput: string, eventText: string): boolean {
   return score >= 2 || (score >= 1 && grams.length <= 2);
 }
 
-/** 归档：事件转成一条状态（「[time]面试刚过去」），事件本身留在记忆里 */
-function archiveAppointment(event: MemoryEvent, states: StateItem[], now: dayjs.Dayjs): void {
+/** 归档：只推进状态，事件本身留在记忆里继续参与检索与衰减 */
+function archiveAppointment(event: MemoryEvent): void {
   updateEventStatus(event.id, "archived");
-  states.push({ text: `[time]${event.event_text}刚过去`, created_at: now.toISOString() });
 }
 
 /**
@@ -52,44 +56,44 @@ export function buildEventNudges(userInput: string): string | null {
 
   const userInfo = getUserInfo();
   const now = dayjs();
-  const states = userInfo ? [...userInfo.states] : [];
   const remindEvents: MemoryEvent[] = [];
   const careEvents: MemoryEvent[] = [];
-  let changed = false;
+  let archived = false;
 
   for (const event of upcoming) {
     const due = dayjs(event.timestamp);
     const overdue = now.isAfter(due);
+    const nudged = event.nudge_count ?? 0;
 
-    // 过期后用户提起过 → 归档（关心已经给到）
+    // 过期后用户自己提起了 → 归档（判定很难命中，命中了就少催一次）
     if (overdue && isMentioned(userInput, event.event_text)) {
-      archiveAppointment(event, states, now);
-      changed = true;
+      archiveAppointment(event);
+      archived = true;
       continue;
     }
 
     if (event.event_status === "upcoming" && overdue) {
       event.event_status = "caring";
       updateEventStatus(event.id, "caring");
-      changed = true;
     }
 
     if (event.event_status === "caring") {
-      // 关心窗口从约定时刻起算，满 48h 自动归档，不再催
-      if (now.diff(due, "hour") >= EVENT_CARE_WINDOW_HOURS) {
-        archiveAppointment(event, states, now);
-        changed = true;
+      // 次数已满，或关心窗口（从约定时刻起算）满 48h → 归档，不再催
+      if (nudged >= MAX_NUDGES || now.diff(due, "hour") >= EVENT_CARE_WINDOW_HOURS) {
+        archiveAppointment(event);
+        archived = true;
         continue;
       }
       careEvents.push(event);
+      incrementEventNudge(event.id);
     } else if (due.diff(now, "hour") <= REMIND_BEFORE_HOURS) {
+      // 临近只说一次：同一件事反复催「快到了」很吵
+      if (nudged >= 1) continue;
       remindEvents.push(event);
+      incrementEventNudge(event.id);
     }
   }
 
-  if (changed && userInfo) {
-    setUserInfo({ ...userInfo, states });
-  }
   if (remindEvents.length === 0 && careEvents.length === 0) return null;
 
   const prompts = getPrompts();
@@ -120,7 +124,7 @@ export function buildEventNudges(userInput: string): string | null {
 
   logDebug(
     "事件提醒",
-    `临近: ${remindEvents.map((e) => e.event_text).join("、") || "无"}\n关心: ${careEvents.map((e) => e.event_text).join("、") || "无"}${changed ? "\n已归档/转状态" : ""}`
+    `临近: ${remindEvents.map((e) => e.event_text).join("、") || "无"}\n关心: ${careEvents.map((e) => e.event_text).join("、") || "无"}${archived ? "\n已归档" : ""}`
   );
 
   return sections.join("\n");

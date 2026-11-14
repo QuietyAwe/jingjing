@@ -4,7 +4,7 @@
 // ============================================================
 
 import dayjs from "dayjs";
-import { tokenize, scoreOverlap } from "./tokenize";
+import { tokenize, scoreOverlap, singleCharKeywords } from "./tokenize";
 import { blockedWords, isBlockedGram } from "./identity";
 import { calculateWeight, calculateWeights, COLD_MEMORY_MAX_WEIGHT } from "./decay";
 import { getDB } from "@/db/connection";
@@ -23,7 +23,7 @@ export interface RetrievalResult {
   hitFragments: Map<number, MemoryFragment[]>;
   /** 被当前输入真正唤起的片段 id（内容与话题有实质重合）——只有它们回到「记得很清楚」，其余片段照常随年龄变模糊 */
   cuedFragmentIds: Set<number>;
-  /** 注入记忆区的事件（命中事件在前，再补高权重的「氛围记忆」），按实时权重排序 */
+  /** 注入记忆区的事件（本轮检索命中的事件） */
   topEvents: (MemoryEvent & { live_weight: number })[];
   /** 1 条冷记忆（灵光一闪，概率触发），带一句 gist 好让 AI 有话可说 */
   epiphany: (MemoryEvent & { gist: string }) | null;
@@ -31,12 +31,15 @@ export interface RetrievalResult {
   keywords: string[];
 }
 
-/** 相对截断：与最相关候选分数差距过大的不再注入，避免噪音凑数 */
-const HIT_SCORE_RATIO = 0.5;
-
-/** 命中门槛：短输入要求关键词全部命中，长输入至少 2 个不同关键词命中 */
+/**
+ * 命中门槛：短输入（1~2 个关键词）要求全部命中，长输入命中 1 个即可。
+ *
+ * 长句必然带一堆噪音 bigram，把门槛绑在「关键词总数」上会误杀真回忆：
+ * 「又想去吃面了」「那家面馆还开着吗」这类话只有一个实词对得上，要求 2 个就永远想不起来。
+ * 噪音由下面的「只认写入时抽的标签」挡住，不靠抬高门槛。
+ */
 function minHitScore(keywords: string[]): number {
-  return keywords.length <= 2 ? keywords.length : 2;
+  return keywords.length <= 2 ? keywords.length : 1;
 }
 
 /**
@@ -44,6 +47,10 @@ function minHitScore(keywords: string[]): number {
  *
  * SQL 侧只做粗召回（OR 匹配），真正的排序在这里做：
  * 重合数多的排在前面，同分时再用存储权重（= 最近是否被想起过）兜底。
+ *
+ * 不做相对截断：一句话提三件事时，「与最高分差一半以上」会把次要话题全丢掉；
+ * 数量已经由调用方的 Top3 控制。
+ *
  * @param pick 从候选里取出用于打分的文本
  */
 function rankByOverlap<T extends { active_weight: number }>(
@@ -52,12 +59,35 @@ function rankByOverlap<T extends { active_weight: number }>(
   keywords: string[]
 ): T[] {
   const min = minHitScore(keywords);
-  const ranked = candidates
+  return candidates
     .map((item) => ({ item, score: scoreOverlap(pick(item), keywords) }))
     .filter((x) => x.score >= min)
-    .sort((a, b) => b.score - a.score || b.item.active_weight - a.item.active_weight);
-  const top = ranked[0]?.score ?? 0;
-  return ranked.filter((x) => x.score >= top * HIT_SCORE_RATIO).map((x) => x.item);
+    .sort((a, b) => b.score - a.score || b.item.active_weight - a.item.active_weight)
+    .map((x) => x.item);
+}
+
+/** 命中归因：哪个检索词撞上了哪条记忆的哪个字段，口径与打分文本一致 */
+function describeHits(
+  events: MemoryEvent[],
+  keywords: string[],
+  aliases: Map<number, string>,
+  fragments: Map<number, MemoryFragment[]>
+): string {
+  return events
+    .map((e) => {
+      const frags = fragments.get(e.id) ?? [];
+      const hits: string[] = [];
+      for (const k of keywords) {
+        const where: string[] = [];
+        if (e.event_text.includes(k)) where.push("标题");
+        if ((aliases.get(e.id) ?? "").includes(k)) where.push("别名");
+        if (frags.some((f) => f.gist.includes(k))) where.push("印象");
+        if (frags.some((f) => f.keywords.includes(k))) where.push("检索词");
+        if (where.length > 0) hits.push(`「${k}」→${where.join("/")}`);
+      }
+      return `#${e.id} ${e.event_text.slice(0, 16)}：${hits.join("、") || "无直接命中"}`;
+    })
+    .join("\n");
 }
 
 /** 动态新近度窗口：超过这个时长，帖子不再算「刚发生」 */
@@ -151,9 +181,11 @@ export function retrieve(userInput: string): RetrievalResult {
   // 屏蔽词（默认是身份名：用户昵称 / AI 名称，可在「检索屏蔽词」设置里自定义高频词）
   // 不当检索词：几乎每条记忆都带名字，输入里一提名字就会把一堆无关记忆误命中
   const blocked = blockedWords();
-  const keywords = tokenize(userInput, 16, (g) => isBlockedGram(g, blocked));
+  const isStop = (g: string) => isBlockedGram(g, blocked);
+  const keywords = tokenize(userInput, 16, isStop);
+  /** 实际把记忆勾出来的那组词：常规分词，或单字兜底时的单字 */
+  let triggerKeywords = keywords;
 
-  // 2. 优先检索事件（标题或别名），排除默认事件"日常闲聊"与未到期的未来事件
   let hitEvents: MemoryEvent[] = [];
   /** 只靠别名命中（标题完全没对上）的事件数：排查合并是否让事件变得检索不到 */
   let aliasOnlyHits = 0;
@@ -161,15 +193,15 @@ export function retrieve(userInput: string): RetrievalResult {
   const db = getDB();
   const defaultEventId = getDefaultEventId();
 
-  if (keywords.length > 0) {
-    // 标题或别名命中都算：事件合并后旧标题存进 memory_event_aliases，
-    // 用户仍可能用旧说法提起它（否则合并反而让这段记忆检索不到了）
-    const eventConditions = keywords
-      .map(
-        () =>
-          "(e.event_text LIKE ? OR EXISTS(SELECT 1 FROM memory_event_aliases a WHERE a.event_id = e.id AND a.alias LIKE ?))"
-      )
-      .join(" OR ");
+  // 2. 两条召回通道：事件标题/别名、片段内容。任意一条对上都算「想起来」，一起排序取 Top3。
+  //
+  //    不能「标题没命中才看片段」：一句话提三件事时（「压力大，团子还生病了」），
+  //    一个弱标题命中（「团子」）会把另外两件吃掉。
+  //
+  //    片段只认 gist（一句话印象）+ keywords（写入时抽的标签）——这两样才是写入方对
+  //    「这段记忆关于什么」的判断。summary 是完整叙述，拿它撞词会被「有点/觉得/一个人」
+  //    这类虚词带偏（「地铁上有人吵架」撞进「和小陈吵架」）。
+  function search(kw: string[]): MemoryEvent[] {
     // upcoming 约定不参与记忆检索：它们由状态区的「安排」和时间提醒负责
     const excludeDefault = [
       defaultEventId ? `AND e.id != ${defaultEventId}` : "",
@@ -177,27 +209,84 @@ export function retrieve(userInput: string): RetrievalResult {
     ]
       .filter(Boolean)
       .join(" ");
-    const params = keywords.flatMap((k) => [`%${k}%`, `%${k}%`]);
+    const eventColumns = EVENT_COLUMNS.split(", ").map((c) => `e.${c}`).join(", ");
+    const likeParams = kw.flatMap((k) => [`%${k}%`, `%${k}%`]);
 
-    // 多取一些候选，再用「命中了几个关键词」精排——bigram 必然带噪音，不能命中即算数。
-    // 粗排用 last_accessed：active_weight 全仓写死 100，按它排等于按 id 排
-    const candidates = db.getAllSync<MemoryEvent>(
-      `SELECT ${EVENT_COLUMNS.split(", ")
-        .map((c) => `e.${c}`)
-        .join(", ")}
-       FROM memory_events e
-       WHERE 1 = 1 ${excludeDefault} AND (${eventConditions})
+    // 通道 1：标题或别名（合并后旧标题进 aliases，用户仍可能用旧说法提起）
+    const titleConditions = kw
+      .map(
+        () =>
+          "(e.event_text LIKE ? OR EXISTS(SELECT 1 FROM memory_event_aliases a WHERE a.event_id = e.id AND a.alias LIKE ?))"
+      )
+      .join(" OR ");
+    // 粗排用 last_accessed：引擎只把 active_weight 写成 100，按它排等于按 id 排
+    const titleRows = db.getAllSync<MemoryEvent>(
+      `SELECT ${eventColumns} FROM memory_events e
+       WHERE 1 = 1 ${excludeDefault} AND (${titleConditions})
        ORDER BY e.last_accessed DESC
        LIMIT 15`,
-      ...params
+      ...likeParams
     );
-    // 别名参与打分：只命中别名的事件若仍用 event_text 打分，会被「重合度 > 0」过滤掉
+
+    // 通道 2：片段内容
+    const fragConditions = kw.map(() => "(f.gist LIKE ? OR f.keywords LIKE ?)").join(" OR ");
+    const fragRows = db.getAllSync<MemoryEvent>(
+      `SELECT DISTINCT ${eventColumns} FROM memory_events e
+       INNER JOIN memory_fragments f ON e.id = f."index"
+       WHERE 1 = 1 ${excludeDefault}
+         AND LENGTH(f.summary) >= 10
+         AND (${fragConditions})
+       ORDER BY e.last_accessed DESC
+       LIMIT 10`,
+      ...likeParams
+    );
+
+    // 合并去重后统一打分：标题 + 别名 + 该事件所有片段的「印象 + 标签」
+    const byId = new Map<number, MemoryEvent>();
+    for (const row of [...titleRows, ...fragRows]) byId.set(row.id, row);
+    const candidates = [...byId.values()];
     const aliasText = getEventAliasText(candidates.map((e) => e.id));
-    hitEvents = rankByOverlap(
+    const frags = getFragmentsByEventIds(candidates.map((e) => e.id));
+    return rankByOverlap(
       candidates,
-      (e) => `${e.event_text} ${aliasText.get(e.id) ?? ""}`,
-      keywords
-    ).slice(0, 3);
+      (e) =>
+        `${e.event_text} ${aliasText.get(e.id) ?? ""} ${(frags.get(e.id) ?? [])
+          .map((f) => `${f.gist} ${f.keywords}`)
+          .join(" ")}`,
+      kw
+    );
+  }
+
+  if (keywords.length > 0) {
+    hitEvents = search(keywords).slice(0, 3);
+  }
+
+  // 3. 兜底：常规关键词一个都没命中时，拿单字线索再找一次。
+  //    「猫」这种单字在分词层就被丢掉，只走这里的单字通道才能想得起来。
+  //
+  //    只认「标签里恰好有一个单字标签」：标签是「吃面」时单字「吃」不算，
+  //    标题/正文里含「子」「它」这种字也不算——单字太泛，一旦按字面包含就会满盘误命中。
+  if (hitEvents.length === 0) {
+    const weak = singleCharKeywords(userInput, isStop);
+    if (weak.length > 0) {
+      const candidates = search(weak);
+      const frags = getFragmentsByEventIds(candidates.map((e) => e.id));
+      hitEvents = candidates
+        .filter((e) =>
+          (frags.get(e.id) ?? []).some((f) =>
+            f.keywords
+              .split(/[,，、\s]+/)
+              .filter((tag) => tag.length === 1)
+              .some((tag) => weak.includes(tag))
+          )
+        )
+        .slice(0, 3);
+      if (hitEvents.length > 0) triggerKeywords = weak;
+    }
+  }
+
+  const aliasText = getEventAliasText(hitEvents.map((e) => e.id));
+  if (hitEvents.length > 0) {
     aliasOnlyHits = hitEvents.filter((e) => {
       const alias = aliasText.get(e.id) ?? "";
       return (
@@ -206,45 +295,6 @@ export function retrieve(userInput: string): RetrievalResult {
         scoreOverlap(e.event_text, keywords) === 0
       );
     }).length;
-    hitEvents.forEach((e) => hitEventIds.add(e.id));
-  }
-
-  // 3. 如果事件未命中，再检索片段(gist + summary)，同样排除默认事件
-  if (hitEvents.length === 0 && keywords.length > 0) {
-    // keywords 一并参与：LLM 写入时抽的关键词（含同义说法）能把「我妈」和「妈妈」连上
-    const fragConditions = keywords
-      .map(() => "(f.summary LIKE ? OR f.gist LIKE ? OR f.keywords LIKE ?)")
-      .join(" OR ");
-    const excludeDefault = [
-      defaultEventId ? `AND e.id != ${defaultEventId}` : "",
-      "AND e.event_status != 'upcoming'",
-    ]
-      .filter(Boolean)
-      .join(" ");
-    const params = keywords.flatMap((k) => [`%${k}%`, `%${k}%`, `%${k}%`]);
-
-    const rows = db.getAllSync<MemoryEvent>(
-      `SELECT DISTINCT ${EVENT_COLUMNS.split(", ")
-        .map((c) => `e.${c}`)
-        .join(", ")} FROM memory_events e
-       INNER JOIN memory_fragments f ON e.id = f."index"
-       WHERE 1 = 1 ${excludeDefault}
-         AND LENGTH(f.summary) >= 10
-         AND (${fragConditions})
-       ORDER BY e.last_accessed DESC
-       LIMIT 10`,
-      ...params
-    );
-    // 片段打分：把该事件所有片段拼起来算总重合度（任一条片段对得上就可能唤起整段经历）
-    const frags = getFragmentsByEventIds(rows.map((e) => e.id));
-    hitEvents = rankByOverlap(
-      rows,
-      (e) =>
-        (frags.get(e.id) ?? [])
-          .map((f) => `${f.gist} ${f.summary} ${f.keywords}`)
-          .join(" "),
-      keywords
-    ).slice(0, 3);
     hitEvents.forEach((e) => hitEventIds.add(e.id));
   }
 
@@ -263,22 +313,13 @@ export function retrieve(userInput: string): RetrievalResult {
   // 5. 实时权重排序取 Top N（数量由 config 控制）
   //
   // 注意：不能用 active_weight 做预筛——该列在建事件与命中时都被写成 100，
-  // 全仓没有任何一处把它写低，按它排序等于不排序，候选集退化成「最早创建的事件」，
+  // 引擎不会写低它（设置页可手改，命中即刷回 100），按它排序等于不排序，候选集退化成「最早创建的事件」，
   // 事件数超过候选上限后新记忆就再也进不了记忆区。
   // 实时权重只依赖 last_accessed / priority，直接全量计算即可（本地数据量级可忽略）。
   const allActive = getAllActive();
-  const { context_active_events_limit } = getThresholds();
   const withLiveWeight = calculateWeights(allActive).sort(
     (a, b) => b.live_weight - a.live_weight
   );
-  const hitIdSet = new Set(hitEvents.map((e) => e.id));
-  // 记忆区顺序：**检索命中的放前面**（和当前话题相关），再补 1 条高权重的「氛围记忆」，
-  // 只为了保留「我们还有别的共同经历」的存在感——补多了会稀释相关记忆的注意力；
-  // 本轮无命中时一条都不补：近况（user_info.states）已经覆盖近期的事
-  const AMBIENT_LIMIT = hitEvents.length > 0 ? 1 : 0;
-  const ambient = withLiveWeight
-    .filter((e) => !hitIdSet.has(e.id))
-    .slice(0, Math.max(0, Math.min(context_active_events_limit, AMBIENT_LIMIT)));
   // updateWeight 刚把命中事件刷成 100/now，但 hitEvents 是刷新前 SELECT 出的旧对象，
   // 继续用 e.last_accessed 会把「刚被想起」算成低权重：截断时命中记忆反而最先被丢
   const hitAt = new Date().toISOString();
@@ -288,7 +329,8 @@ export function retrieve(userInput: string): RetrievalResult {
     last_accessed: hitAt,
     live_weight: calculateWeight(100, hitAt, e.priority, e.memory_kind),
   }));
-  const topEvents = [...hitWeighted, ...ambient].slice(0, context_active_events_limit);
+  // 记忆区只给本轮真正命中的事件（检索已限 Top3）；无关旧事由会话摘要与灵光一闪承担
+  const topEvents = hitWeighted;
 
   // 6. 灵光一闪：两条通道，只注入一条
   //    ① 近期动态：概率由新近度权重累加得出（用户刚评论/自己刚发帖 ≈ 0.85）
@@ -312,7 +354,7 @@ export function retrieve(userInput: string): RetrievalResult {
   if (recent.length > 0 && Math.random() < pRecent) {
     const picked = pickWeighted(recent, recent.map((c) => c.boost));
     markMomentRecalled(picked.fragment.id);
-    // 注入一句话印象，否则 AI 只拿到事件标题、根本没法接话
+    // 注入一句话印象；事件标题不显示，AI 得靠这句接得上话
     epiphany = { ...picked.event, gist: picked.fragment.gist || picked.event.event_text };
     epiphanyNote = `${picked.event.event_text.slice(0, 30)}（近期动态 x${picked.boost}, P=${pRecent.toFixed(2)}）`;
   } else if (keywords.length > 0 && Math.random() < epiphany_trigger_probability) {
@@ -336,7 +378,7 @@ export function retrieve(userInput: string): RetrievalResult {
   }
 
   // 8. 无命中时不注入任何兜底记忆：
-  //    近期的事已经由用户画像的近况（states）覆盖，硬塞「日常闲聊」只会
+  //    近期的事已经由状态区的「当前处境」覆盖，硬塞「日常闲聊」只会
   //    占记忆区预算、还可能引出与当前话题无关的内容
 
   // 9. 计算「被唤起的片段」：内容与当前输入有实质重合的片段才算刚想起来
@@ -359,9 +401,12 @@ export function retrieve(userInput: string): RetrievalResult {
     topEvents.length > 0
       ? `Top${topEvents.length}: ${topEvents.map((e) => e.event_text.slice(0, 20)).join(" | ")}`
       : "未命中：不注入记忆区";
+  const hitLine = describeHits(hitEvents, triggerKeywords, aliasText, hitFragments);
+  const viaNote =
+    triggerKeywords === keywords ? "" : ` → 单字兜底: ${triggerKeywords.join(", ")}`;
   logDebug(
     "检索",
-    `关键词: ${keywords.join(", ") || "无"}\n命中: ${hitEvents.length} 条事件（别名独中 ${aliasOnlyHits} 条，${Array.from(hitFragments.values()).reduce((s, f) => s + f.length, 0)} 片段，唤起 ${cuedFragmentIds.size} 条）\n${topLine}\n灵光一闪: ${epiphanyNote}`
+    `关键词: ${keywords.join(", ") || "无"}${viaNote}\n命中: ${hitEvents.length} 条事件（别名独中 ${aliasOnlyHits} 条，${Array.from(hitFragments.values()).reduce((s, f) => s + f.length, 0)} 片段，唤起 ${cuedFragmentIds.size} 条）\n触发:\n${hitLine || "无"}\n${topLine}\n灵光一闪: ${epiphanyNote}`
   );
 
   return { hitEvents, hitFragments, topEvents, epiphany, keywords, cuedFragmentIds };

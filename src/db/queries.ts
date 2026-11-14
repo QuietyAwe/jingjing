@@ -1,16 +1,10 @@
 import { getDB } from "./connection";
 import { EVENT_COLUMNS } from "./schema";
 import { bigrams } from "@/memory/tokenize";
-import {
-  EVENT_USER_MOMENT,
-  EVENT_AI_MOMENT,
-  EVENT_FRIEND_FEED,
-  MOMENT_EVENT_ALIASES,
-} from "@/moments/events";
+import { EVENT_AI_MOMENT, EVENT_FRIEND_FEED, EVENT_USER_MOMENT } from "@/moments/events";
 import type {
   SystemMetadata,
   UserInfo,
-  StateItem,
   AppointmentStatus,
   MemoryEvent,
   MemoryFragment,
@@ -66,11 +60,18 @@ export function getDefaultEventId(): number | null {
 }
 
 // ============================================================
-// P2-2: user_info 读写与增量 Merge（属性/状态 两桶；未来事件存在 memory_events）
+// P2-2: user_info 读写与增量 Merge（属性桶；处境是 memory_events 的 condition 事件）
 // ============================================================
 
-/** 状态注入有效期：超过这么多天未再被提及即停止注入（数据保留） */
-export const STATE_EXPIRE_DAYS = 7;
+/**
+ * 处境的「耐心期限」（天）：超过这么久没被再提起，注入时加一句「可能已经过去了」。
+ * 只影响措辞——不删数据、不改 closed_at，用户明确说好了才真正结束
+ */
+function conditionPatienceDays(priority: number): number {
+  if (priority >= 7) return 21;
+  if (priority <= 3) return 4;
+  return 7;
+}
 
 /** 事件关心里：过期后注入关心提示的窗口（小时），满窗自动归档 */
 export const EVENT_CARE_WINDOW_HOURS = 48;
@@ -81,14 +82,7 @@ function emptyProfile(): UserInfo {
     basic_identity: { nickname: "", gender: "", birthday: "", occupation: "", location: "" },
     social_graph: [],
     traits: [],
-    states: [],
   };
-}
-
-/** 仍注入状态区的活跃状态（超 STATE_EXPIRE_DAYS 未提及的不注入，数据保留） */
-export function activeStates(userInfo: UserInfo, now?: dayjs.Dayjs): StateItem[] {
-  const cutoff = (now ?? dayjs()).subtract(STATE_EXPIRE_DAYS, "day");
-  return userInfo.states.filter((s) => dayjs(s.created_at).isAfter(cutoff));
 }
 
 /**
@@ -112,6 +106,12 @@ export function updateEventStatus(eventId: number, status: AppointmentStatus): v
   db.runSync("UPDATE memory_events SET event_status = ? WHERE id = ?", status, eventId);
 }
 
+/** 记一次提醒注入：次数满了就归档，不再反复提醒 */
+export function incrementEventNudge(eventId: number): void {
+  const db = getDB();
+  db.runSync("UPDATE memory_events SET nudge_count = nudge_count + 1 WHERE id = ?", eventId);
+}
+
 /**
  * 写入 / 更新一条未来事件（约定、安排、重大节点都算）
  *
@@ -128,8 +128,12 @@ export function upsertFutureEvent(text: string, happensAt: string, priority: num
   );
   const status: AppointmentStatus = dayjs(happensAt).isAfter(dayjs()) ? "upcoming" : "caring";
   if (existing) {
+    // 已归档 + 时刻没变 = 同一件事被重复提取：保持归档，否则会重新提醒一轮
+    const sameMoment = existing.timestamp && dayjs(existing.timestamp).isSame(dayjs(happensAt), "minute");
+    if (existing.event_status === "archived" && sameMoment) return existing.id;
+    // 时刻变了 = 确实改期：状态重算，提醒次数清零
     db.runSync(
-      "UPDATE memory_events SET timestamp = ?, event_status = ?, priority = MAX(priority, ?), last_accessed = ? WHERE id = ?",
+      "UPDATE memory_events SET timestamp = ?, event_status = ?, priority = MAX(priority, ?), last_accessed = ?, nudge_count = 0 WHERE id = ?",
       happensAt,
       status,
       priority,
@@ -165,58 +169,12 @@ export function getUserInfo(): UserInfo | null {
     }
   };
 
-  // 旧版（五块）画像一次性迁移成两桶：preferences/psycho_state/life_quests 拆进 traits/states。
-  // 存量约定不迁移：约定已并入 memory_events，旧的 events 键读到时直接丢弃。
-  const legacyKeys = ["preferences", "psycho_state", "life_quests"].filter((k) => map.has(k));
-  if (legacyKeys.length > 0 && !map.has("traits")) {
-    const traits: string[] = [];
-    const states: StateItem[] = [];
-    const nowIso = dayjs().toISOString();
-
-    const prefs = safeParse("preferences", { likes: [] as string[], dislikes: [] as string[] });
-    for (const x of prefs.likes) if (x?.trim()) traits.push(`喜欢${x.trim()}`);
-    for (const x of prefs.dislikes) if (x?.trim()) traits.push(`讨厌${x.trim()}`);
-
-    const ps = safeParse("psycho_state", {
-      personality_traits: [] as string[],
-      current_stressors: [] as string[],
-      comm_preference: "",
-    });
-    for (const x of ps.personality_traits) if (x?.trim()) traits.push(x.trim());
-    if (ps.comm_preference?.trim()) traits.push(`沟通偏好：${ps.comm_preference.trim()}`);
-    for (const x of ps.current_stressors) if (x?.trim()) states.push({ text: x.trim(), created_at: nowIso });
-
-    const lq = safeParse("life_quests", {
-      long_term_goals: [] as string[],
-      ongoing_tasks: [] as Array<{ task_name: string; due_time?: string }>,
-    });
-    for (const x of lq.long_term_goals) if (x?.trim()) traits.push(`长期目标：${x.trim()}`);
-    for (const t of lq.ongoing_tasks) {
-      const text = t.task_name?.trim();
-      if (text) states.push({ text, created_at: nowIso });
-    }
-
-    for (const [k, v] of [["traits", traits], ["states", states]] as const) {
-      const value = JSON.stringify(v);
-      db.runSync(
-        'INSERT INTO user_info (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-        k,
-        value
-      );
-      map.set(k, value);
-    }
-  }
-  // 旧键残留直接删（恢复旧备份会再带进来，上面的迁移分支会重新处理）
-  for (const k of legacyKeys) {
-    db.runSync("DELETE FROM user_info WHERE key = ?", k);
-    map.delete(k);
-  }
-
+  // 旧版五块画像（preferences / psycho_state / life_quests）与 states 键都不再读取：
+  // 「当前处境」已迁到 memory_events 的 condition 事件，老键留作惰性死数据
   return {
     basic_identity: safeParse("basic_identity", emptyProfile().basic_identity),
     social_graph: safeParse("social_graph", []),
     traits: safeParse("traits", []),
-    states: safeParse("states", []),
   };
 }
 
@@ -246,7 +204,6 @@ export function setUserInfo(info: UserInfo): void {
     ["basic_identity", JSON.stringify(info.basic_identity)],
     ["social_graph", JSON.stringify(info.social_graph)],
     ["traits", JSON.stringify(info.traits)],
-    ["states", JSON.stringify(info.states)],
   ];
   for (const [key, value] of entries) {
     db.runSync(
@@ -307,24 +264,10 @@ function mergeUserInfoDelta(
     return Array.from(map.values()).slice(-30);
   };
 
-  // 状态：同一文本再次提及 = 刷新时效（回到活跃区）
-  const mergeStates = (a: StateItem[], b: string[] | undefined): StateItem[] => {
-    if (!b || b.length === 0) return a;
-    const map = new Map(a.map((s) => [s.text, s]));
-    for (const raw of b) {
-      const text = raw?.trim();
-      if (!text) continue;
-      map.delete(text);
-      map.set(text, { text, created_at: nowIso });
-    }
-    return Array.from(map.values()).slice(-20);
-  };
-
   const merged: UserInfo = {
     basic_identity: { ...existing.basic_identity, ...patch.basic_identity },
     social_graph: mergeSocialGraph(existing.social_graph, patch.social_graph),
     traits: mergeArray(existing.traits, patch.traits, 30),
-    states: mergeStates(existing.states, patch.states),
   };
 
   return merged;
@@ -395,6 +338,70 @@ export function insertEpisode(
   return eventId;
 }
 
+// ============================================================
+// 持续型处境（condition）
+// 仍成立时每轮参与对话；用户说「好了」写 closed_at，之后它就是一段普通过去经历
+// ============================================================
+
+/** 当前仍然成立的处境，最近被提起的在前 */
+export function getActiveConditions(): MemoryEvent[] {
+  const db = getDB();
+  return db.getAllSync<MemoryEvent>(
+    `SELECT ${EVENT_COLUMNS} FROM memory_events
+     WHERE memory_kind = 'condition' AND closed_at IS NULL
+     ORDER BY last_accessed DESC`
+  );
+}
+
+/** 同名且未结束的处境；已结束的不返回，所以「第二次感冒」必然新建一条 */
+export function findActiveConditionByLabel(label: string): MemoryEvent | null {
+  const db = getDB();
+  return (
+    db.getFirstSync<MemoryEvent>(
+      `SELECT ${EVENT_COLUMNS} FROM memory_events
+       WHERE memory_kind = 'condition' AND closed_at IS NULL AND event_text = ?
+       ORDER BY id DESC LIMIT 1`,
+      label
+    ) ?? null
+  );
+}
+
+/**
+ * 开始一个处境：同名未结束就刷新（取更高 priority），否则新建。
+ * timestamp 用 onset（本批对话时间），last_accessed 写当前时刻——衰减从「确认还在」起算
+ */
+export function startCondition(label: string, priority: number, onset: string): number {
+  const clamped = Math.min(9, Math.max(1, priority));
+  const existing = findActiveConditionByLabel(label);
+  if (existing) {
+    const db = getDB();
+    db.runSync(
+      "UPDATE memory_events SET last_accessed = ?, priority = MAX(priority, ?), active_weight = 100 WHERE id = ?",
+      dayjs().toISOString(),
+      clamped,
+      existing.id
+    );
+    return existing.id;
+  }
+  return insertEvent(label, 100, clamped, "condition", onset);
+}
+
+/** 结束一个处境：只写 closed_at，事件本身继续参与衰减与检索 */
+export function resolveCondition(eventId: number, endedAt: string): void {
+  const db = getDB();
+  db.runSync(
+    "UPDATE memory_events SET closed_at = ? WHERE id = ? AND closed_at IS NULL",
+    endedAt,
+    eventId
+  );
+}
+
+/** 处境是否已超过「耐心期限」没再被提起（只影响注入措辞，不动数据） */
+export function isConditionStale(event: MemoryEvent, now?: dayjs.Dayjs): boolean {
+  const days = (now ?? dayjs()).diff(dayjs(event.last_accessed), "day", true);
+  return days > conditionPatienceDays(event.priority);
+}
+
 /** 按文本查找 episode 事件 */
 function findEpisodeEvent(eventText: string): MemoryEvent | null {
   const db = getDB();
@@ -424,9 +431,11 @@ export function findSimilarEvent(text: string, excludeId?: number): MemoryEvent 
 
   const db = getDB();
   // 约定事件（未来才发生）不参与「普通记忆新建时」的相似合并：
-  // 把一条已发生的片段挂到「周五面试」这种约定上，检索时会出现时间错乱
+  // 把一条已发生的片段挂到「周五面试」这种约定上，检索时会出现时间错乱。
+  // 处境同理：它是「仍在持续的一句话状态」，普通片段被合并进去会挂错叙述
   const rows = db.getAllSync<MemoryEvent>(
-    `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE memory_kind != 'daily' AND event_status = 'none'`
+    `SELECT ${EVENT_COLUMNS} FROM memory_events
+     WHERE memory_kind NOT IN ('daily', 'condition') AND event_status = 'none'`
   );
   const targetBigrams = new Set(bigrams(target));
 
@@ -469,6 +478,24 @@ export function addEventAliases(eventId: number, aliases: string[]): void {
       alias
     );
   }
+}
+
+/** 列出事件的别名 */
+export function getEventAliases(eventId: number): string[] {
+  const db = getDB();
+  return db
+    .getAllSync<{ alias: string }>(
+      "SELECT alias FROM memory_event_aliases WHERE event_id = ? ORDER BY alias",
+      eventId
+    )
+    .map((row) => row.alias);
+}
+
+/** 覆盖事件的别名；多个别名用逗号或空格分隔 */
+export function replaceEventAliases(eventId: number, raw: string): void {
+  const db = getDB();
+  db.runSync("DELETE FROM memory_event_aliases WHERE event_id = ?", eventId);
+  addEventAliases(eventId, raw.split(/[,，、\s]+/));
 }
 
 /**
@@ -536,7 +563,14 @@ export function mergeEvents(keepId: number, mergeIds: number[], extraAliases: st
   let earliest = keep.timestamp;
   let latest = keep.timestamp;
   let weight = keep.active_weight;
+  // 提醒次数取大：合并后不该因为换了个宿主又多提醒一轮
+  let nudgeCount = keep.nudge_count ?? 0;
   let status: AppointmentStatus = keep.event_status ?? "none";
+  // 处境语义不能因为合并丢掉：任一方是 condition 就仍是 condition，
+  // 只要有任一条还没结束，合并结果就仍是「进行中」
+  let isCondition = keep.memory_kind === "condition";
+  let openCondition = keep.memory_kind === "condition" && !keep.closed_at;
+  let latestClosed: string | null = keep.closed_at;
   for (const id of targets) {
     const e = getEventById(id)!;
     aliases.push(e.event_text);
@@ -544,9 +578,17 @@ export function mergeEvents(keepId: number, mergeIds: number[], extraAliases: st
     if (e.timestamp < earliest) earliest = e.timestamp;
     if (e.timestamp > latest) latest = e.timestamp;
     weight = Math.max(weight, e.active_weight);
+    nudgeCount = Math.max(nudgeCount, e.nudge_count ?? 0);
     const s = e.event_status ?? "none";
     if (statusRank[s] > statusRank[status]) status = s;
+    if (e.memory_kind === "condition") {
+      isCondition = true;
+      if (!e.closed_at) openCondition = true;
+      if (e.closed_at && (!latestClosed || e.closed_at > latestClosed)) latestClosed = e.closed_at;
+    }
   }
+  const mergedKind = isCondition ? "condition" : keep.memory_kind;
+  const mergedClosedAt = isCondition ? (openCondition ? null : latestClosed) : keep.closed_at;
   // 约定取更晚的时刻（最近安排的那个），普通记忆取更早（事情实际发生的时间）
   const timestamp = status === "upcoming" ? latest : earliest;
 
@@ -567,99 +609,18 @@ export function mergeEvents(keepId: number, mergeIds: number[], extraAliases: st
   }
 
   db.runSync(
-    "UPDATE memory_events SET priority = ?, timestamp = ?, active_weight = ?, last_accessed = ?, event_status = ? WHERE id = ?",
+    "UPDATE memory_events SET priority = ?, timestamp = ?, active_weight = ?, last_accessed = ?, event_status = ?, memory_kind = ?, closed_at = ?, nudge_count = ? WHERE id = ?",
     priority,
     timestamp,
     weight,
     dayjs().toISOString(),
     status,
+    mergedKind,
+    mergedClosedAt,
+    nudgeCount,
     keepId
   );
   addEventAliases(keepId, aliases);
-}
-
-/**
- * 合并同名 episode 事件（自愈历史数据）
- * 用于早期版本每次对局新建事件留下的重复项，幂等。
- */
-export function mergeEpisodeDuplicates(): void {
-  const db = getDB();
-  const dupes = db.getAllSync<{ event_text: string; ids: string }>(
-    `SELECT event_text, GROUP_CONCAT(id) AS ids
-     FROM memory_events WHERE memory_kind = 'episode'
-     GROUP BY event_text HAVING COUNT(*) > 1`
-  );
-  if (dupes.length === 0) return;
-
-  const now = dayjs().toISOString();
-  for (const row of dupes) {
-    const ids = row.ids.split(",").map((s) => parseInt(s, 10)).filter((n) => Number.isFinite(n));
-    if (ids.length < 2) continue;
-    const keep = Math.min(...ids);
-    for (const id of ids) {
-      if (id === keep) continue;
-      db.runSync('UPDATE memory_fragments SET "index" = ? WHERE "index" = ?', keep, id);
-      db.runSync("DELETE FROM memory_events WHERE id = ?", id);
-    }
-    db.runSync(
-      "UPDATE memory_events SET active_weight = 100, last_accessed = ? WHERE id = ?",
-      now,
-      keep
-    );
-  }
-}
-
-/**
- * 自愈历史数据：旧版把动态互动单独记成「和[user]在动态下的互动」事件，
- * 现在互动片段并入帖子作者对应的事件（见 moments/events.ts）。
- * 这里把片段改挂过去、删掉旧事件，幂等。
- */
-export function mergeLegacyMomentInteractionEvent(): void {
-  const LEGACY_EVENT = "和[user]在动态下的互动";
-  const db = getDB();
-  const legacy = db.getFirstSync<{ id: number }>(
-    "SELECT id FROM memory_events WHERE event_text = ?",
-    LEGACY_EVENT
-  );
-  if (!legacy) return;
-
-  const target = db.getFirstSync<{ id: number }>(
-    "SELECT id FROM memory_events WHERE event_text = ?",
-    EVENT_USER_MOMENT
-  );
-  if (!target) {
-    // 目标事件还不存在：直接改名，片段不用动
-    db.runSync(
-      "UPDATE memory_events SET event_text = ? WHERE id = ?",
-      EVENT_USER_MOMENT,
-      legacy.id
-    );
-    return;
-  }
-
-  db.runSync('UPDATE memory_fragments SET "index" = ? WHERE "index" = ?', target.id, legacy.id);
-  db.runSync(
-    "UPDATE OR IGNORE memory_event_aliases SET event_id = ? WHERE event_id = ?",
-    target.id,
-    legacy.id
-  );
-  db.runSync("DELETE FROM memory_event_aliases WHERE event_id = ?", legacy.id);
-  db.runSync("DELETE FROM memory_events WHERE id = ?", legacy.id);
-}
-
-/**
- * 自愈历史数据：给已存在的动态事件补口语别名（别名机制上线前的库没有）。
- * 幂等。
- */
-export function ensureMomentEventAliases(): void {
-  const db = getDB();
-  const rows = db.getAllSync<{ id: number }>(
-    "SELECT id FROM memory_events WHERE event_text IN (?, ?, ?)",
-    EVENT_USER_MOMENT,
-    EVENT_AI_MOMENT,
-    EVENT_FRIEND_FEED
-  );
-  for (const row of rows) addEventAliases(row.id, MOMENT_EVENT_ALIASES);
 }
 
 /** 根据 ID 获取单个事件 */
@@ -668,6 +629,33 @@ export function getEventById(eventId: number): MemoryEvent | null {
   return db.getFirstSync<MemoryEvent>(
     `SELECT ${EVENT_COLUMNS} FROM memory_events WHERE id = ?`,
     eventId
+  );
+}
+
+/**
+ * 发动态可用的「最近共同经历」：近 N 天的记忆事件
+ *
+ * 排除三类：约定（还没发生，提前说怪）、处境（用户的持续状态，不适合当谈资）、
+ * 以及动态自己的三个事件——不然 AI 会拿自己的帖子当素材循环引用。
+ */
+export function getRecentSharedEvents(days: number, limit: number): MemoryEvent[] {
+  const db = getDB();
+  const defaultEventId = getDefaultEventId();
+  const excludeDefault = defaultEventId ? `AND id != ${defaultEventId}` : "";
+  const since = dayjs().subtract(days, "day").toISOString();
+  return db.getAllSync<MemoryEvent>(
+    `SELECT ${EVENT_COLUMNS} FROM memory_events
+     WHERE event_status NOT IN ('upcoming', 'caring')
+       AND memory_kind != 'condition'
+       ${excludeDefault}
+       AND timestamp >= ?
+       AND event_text NOT IN (?, ?, ?)
+     ORDER BY timestamp DESC LIMIT ?`,
+    since,
+    EVENT_USER_MOMENT,
+    EVENT_AI_MOMENT,
+    EVENT_FRIEND_FEED,
+    limit
   );
 }
 
@@ -753,7 +741,7 @@ export function getCandidateEvents(keywords: string[], limit: number = 5): Memor
  * 获取所有活跃事件（用于衰减计算，排除默认事件）
  *
  * 排除 upcoming 约定：还没发生的事不是「回忆」，由状态区的「安排」和时间通道负责，
- * 混进氛围记忆会让记忆区出现「明天才考试」这种未来时间的记忆行。
+ * 混进记忆区会出现「明天才考试」这种未来时间的记忆行。
  */
 export function getAllActive(): MemoryEvent[] {
   const db = getDB();
@@ -797,12 +785,14 @@ export function getActiveCount(): number {
   return row?.cnt ?? 0;
 }
 
-/** 更新事件文本 */
-export function updateEventText(eventId: number, newText: string): void {
+/** 更新事件的可编辑参数（设置页） */
+export function updateEventParams(eventId: number, text: string, priority: number, weight: number): void {
   const db = getDB();
   db.runSync(
-    "UPDATE memory_events SET event_text = ? WHERE id = ?",
-    newText,
+    "UPDATE memory_events SET event_text = ?, priority = ?, active_weight = ? WHERE id = ?",
+    text,
+    priority,
+    weight,
     eventId
   );
 }
@@ -877,6 +867,17 @@ export function getFragmentsByEventIds(eventIds: number[]): Map<number, MemoryFr
     else result.set(row.index, [row]);
   }
   return result;
+}
+
+/** 更新片段的可编辑参数（设置页）：检索词与优先级 */
+export function updateFragmentParams(fragmentId: number, keywords: string, priority: number): void {
+  const db = getDB();
+  db.runSync(
+    "UPDATE memory_fragments SET keywords = ?, priority = ? WHERE id = ?",
+    keywords,
+    priority,
+    fragmentId
+  );
 }
 
 /** 删除单条记忆片段 */
@@ -1604,7 +1605,7 @@ export function getFriendLastInteraction(friendId: number): string | null {
 }
 
 /**
- * 与该好友相关（提到名字）的记忆片段，供私聊与「按名字命中档案」使用。
+ * 与该好友相关（提到名字）的记忆片段，供私聊与按名字命中时使用。
  * 只做 LIKE 粗召回并按时间倒序，不做第二套检索。
  */
 export function getFragmentsMentioning(text: string, limit: number = 4): MemoryFragment[] {
