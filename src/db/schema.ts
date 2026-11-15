@@ -148,6 +148,21 @@ export function initSchema(): void {
       PRIMARY KEY (event_id, alias)
     );
     CREATE INDEX IF NOT EXISTS idx_event_aliases_alias ON memory_event_aliases(alias);
+
+    -- AI 检索判定记录：每轮判定的原始输出与结果，供复盘与反哺标注集
+    CREATE TABLE IF NOT EXISTS retrieval_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL,
+      user_text TEXT NOT NULL,
+      stage1_output TEXT,
+      stage2_output TEXT,
+      final_injected TEXT NOT NULL DEFAULT '',
+      fallback INTEGER NOT NULL DEFAULT 0,
+      event_count INTEGER NOT NULL DEFAULT 0,
+      expand_used INTEGER NOT NULL DEFAULT 0,
+      latency_ms INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_retrieval_logs_created ON retrieval_logs(created_at DESC);
   `);
 
   // 建表语句对已存在的表不生效：本版新增的列在这里补一次（幂等）

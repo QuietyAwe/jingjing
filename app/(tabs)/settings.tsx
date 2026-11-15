@@ -29,9 +29,12 @@ import {
   resetConfigOverride,
   loadConfigOverrides,
 } from "@/prompt/config";
-import { getUserInfo, setUserInfo as persistUserInfo, getTopActive, getActiveCount, clearAllData, updateEventParams, replaceEventAliases, getEventAliases, updateFragmentParams, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, mergeUserInfo, getDefaultEventId, getEventById, getUpcomingEvents, getActiveConditions, startCondition, resolveCondition } from "@/db/queries";
+import { getUserInfo, setUserInfo as persistUserInfo, getTopActive, getActiveCount, clearAllData, updateEventParams, replaceEventAliases, getEventAliases, updateFragmentParams, deleteEvent, getFragmentsByEventId, insertEvent, insertFragment, deleteFragment, deleteScheduleForWeek, getWeekSchedule, mergeUserInfo, getDefaultEventId, getEventById, getUpcomingEvents, getActiveConditions, startCondition, resolveCondition, getMeta } from "@/db/queries";
 import { getWeekStart } from "@/memory/scheduler";
+import { getLiveDay, getLateNight, dayKey, type LiveDay } from "@/memory/dailyLife";
+import { TIME_SLOT_LABELS, getCurrentDayOfWeek, getCurrentTimeSlot } from "@/memory/week";
 import { identityNames } from "@/memory/identity";
+import { calculateWeight } from "@/memory/decay";
 import {
   getAllFriends,
   updateFriendName,
@@ -42,7 +45,7 @@ import {
 import { rebuildFriendRoster, replaceFriend } from "@/friends/roster";
 import { friendAvatarText } from "@/friends/persona";
 import { formatTodayLine } from "@/utils/holidays";
-import { normalizePlaceholders } from "@/prompt/assembler";
+import { applyIdentityPlaceholders, normalizePlaceholders } from "@/prompt/assembler";
 import { fetchModels, getClient } from "@/llm/client";
 import { CollapsibleSection } from "@/components/CollapsibleSection";
 import { exportBackup, importBackup } from "../../src/utils/backup";
@@ -52,6 +55,11 @@ import type { UserInfo, MemoryEvent, MemoryFragment, ConsolidationResponse, Frie
 
 /** 人设提取结果：属性桶同巩固流，另加「仍在持续的处境」标签（落成 condition 事件） */
 type PersonaInfo = ConsolidationResponse["new_info"] & { conditions?: string[] };
+
+/** 事件的实际权重：库里存的 active_weight 是「上次被想起时的满分」，衰减要在读取时现算 */
+function liveWeightOf(e: MemoryEvent): number {
+  return calculateWeight(e.active_weight, e.last_accessed, e.priority);
+}
 
 // 替换片段中的 [user] [ai] [time] 占位符
 function replaceFragmentPlaceholder(text: string, timestamp: string, nickname: string, aiName?: string): string {
@@ -85,6 +93,10 @@ function replaceFragmentPlaceholder(text: string, timestamp: string, nickname: s
 const MEMORY_KIND_LABEL: Record<string, string> = { daily: "日常琐事", episode: "共同经历", condition: "持续处境" };
 const EVENT_STATUS_LABEL: Record<string, string> = { none: "普通", upcoming: "待发生", caring: "关心中", archived: "已归档" };
 
+/** 作息表展示用的短标签（与 TIME_SLOT_LABELS 同序） */
+const WEEK_DAY_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+const SHORT_SLOT_LABELS = ["早", "上午", "午", "下午", "晚"];
+
 // 配置项元数据
 interface ConfigField {
   key: string;
@@ -93,13 +105,25 @@ interface ConfigField {
   description?: string;
 }
 
+/** 模型选择器的标题：跟着设置项 key 走 */
+const MODEL_PICKER_TITLE: Record<"foreground_model" | "background_model" | "retrieval_model", string> = {
+  foreground_model: "前台对话模型",
+  background_model: "后台巩固模型",
+  retrieval_model: "后台检索模型",
+};
+
+/** 密文显示：只留尾部 4 位，截图或旁人扫一眼都看不到整串 Key */
+function maskApiKey(key: string): string {
+  return key.length <= 8 ? "••••••" : `••••••${key.slice(-4)}`;
+}
+
 const THRESHOLD_FIELDS: ConfigField[] = [
   { key: "consolidation_window_turns", label: "巩固最小窗口（轮）", type: "number", description: "少于这么多轮不触发巩固，避免每聊两句就调一次模型（默认 10）" },
   { key: "consolidation_token_budget", label: "巩固 token 预算", type: "number", description: "未巩固对话攒到这么多 token 就触发巩固（默认 10000，约 50 轮）" },
   { key: "consolidation_idle_minutes", label: "空闲巩固（分钟）", type: "number", description: "用户停多久后把不足预算的积压也消化掉（默认 30）" },
   { key: "context_history_rounds", label: "冷启动 / 好友私聊轮数", type: "number", description: "冷启动（还没有摘要，首次使用 / 旧数据）和好友私聊最多带多少轮历史；主聊天有了摘要后按巩固游标全量带上，不按轮数截断" },
   { key: "context_token_budget", label: "上下文总预算（token）", type: "number", description: "人设 + 状态区 + 摘要 + 历史 + 记忆区的目标预算（默认 18000）。超了只会降级/删除记忆区，未巩固的历史一条都不删——删了这段经历就永远进不了记忆" },
-  { key: "detail_visible_weight", label: "详细/简略切换权重", type: "number", description: "实时权重低于此值的记忆只显示一句话摘要（默认 60，调高=更多记忆变简略）" },
+  { key: "detail_visible_weight", label: "详细/简略切换权重", type: "number", description: "实时权重低于此值的记忆只显示一句话摘要（默认 60，调高=更多记忆变简略）。AI 检索判定开启时，这条只影响兜底路径的详略" },
   { key: "friend_roster_size", label: "好友人数", type: "number", description: "AI 熟人圈的固定人数（默认 5，重建花名册时生效）" },
   { key: "friend_moment_probability", label: "好友每日发帖概率", type: "number", description: "每位好友每天发一条动态的概率（0~1，默认 0.35），太高会抢主角戏份" },
   { key: "friend_comment_probability", label: "好友评论概率", type: "number", description: "每位好友「刷到这条动态」的概率（0~1，默认 0.5）。刷到的人设一起进提示词，由 AI 自己判断谁真的会留言——可以一个都不留，人数不设上限" },
@@ -132,6 +156,7 @@ const PROMPT_GROUPS: PromptGroup[] = [
     title: "后台任务",
     fields: [
       { key: "extraction_prompt", label: "记忆提取指令", type: "multiline", description: "按 token 预算或空闲触发，从对话中提取片段、更新画像并维护会话摘要。" },
+      { key: "retrieval_judge_prompt", label: "检索判定指令", type: "multiline", description: "每轮判断「这句话想起了哪些往事」的固定说明。清单由代码按固定格式拼接，改这段话只会影响判定口径。" },
     ],
   },
   {
@@ -159,17 +184,22 @@ const PROMPT_GROUPS: PromptGroup[] = [
 ];
 
 export default function SettingsScreen() {
-  const { apiKey, baseUrl, user_nickname, ai_name, stream_output, thinking_mode, auto_focus_input, blocked_keywords, friend_preferences, customColorsLight, customColorsDark, saveApiKey, saveBaseUrl, saveUserNickname, saveAiName, saveStreamOutput, saveThinkingMode, saveAutoFocusInput, saveBlockedKeywords, saveFriendPreferences, saveCustomColors } = useSettingsStore();
+  const { apiKey, baseUrl, user_nickname, ai_name, stream_output, thinking_mode, auto_focus_input, blocked_keywords, ai_retrieval_enabled, friend_preferences, customColorsLight, customColorsDark, saveApiKey, saveBaseUrl, saveUserNickname, saveAiName, saveStreamOutput, saveThinkingMode, saveAutoFocusInput, saveBlockedKeywords, saveAiRetrievalEnabled, saveFriendPreferences, saveCustomColors } = useSettingsStore();
   const clearMessages = useChatStore((s) => s.clearMessages);
   const colors = useTheme();
   const { themeMode, toggleTheme } = useThemeStore();
   const currentCustomColors = themeMode === "light" ? customColorsLight : customColorsDark;
 
   const [showKeyModal, setShowKeyModal] = useState(false);
+  /** API Key 输入框是否显示明文（默认密文） */
+  const [showKeyText, setShowKeyText] = useState(false);
   const [showUrlModal, setShowUrlModal] = useState(false);
   const [showNicknameModal, setShowNicknameModal] = useState(false);
   const [showAiNameModal, setShowAiNameModal] = useState(false);
   const [showBlockedModal, setShowBlockedModal] = useState(false);
+  /** 连续判定失败次数与原因：Key 过期这类故障会让检索静默退回本地，这里给个出口 */
+  const [retrievalFailStreak, setRetrievalFailStreak] = useState(0);
+  const [retrievalFailReason, setRetrievalFailReason] = useState("");
   const [inputKey, setInputKey] = useState("");
   const [inputUrl, setInputUrl] = useState("");
   const [inputNickname, setInputNickname] = useState("");
@@ -249,13 +279,16 @@ export default function SettingsScreen() {
 
   // 模型选择器
   const [modelPickerVisible, setModelPickerVisible] = useState(false);
-  const [modelPickerTarget, setModelPickerTarget] = useState<"foreground_model" | "background_model">("foreground_model");
+  const [modelPickerTarget, setModelPickerTarget] = useState<"foreground_model" | "background_model" | "retrieval_model">("foreground_model");
   const [modelList, setModelList] = useState<string[]>([]);
   const [modelLoading, setModelLoading] = useState(false);
   const [modelError, setModelError] = useState("");
 
   // 记忆数据
   const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
+  // AI 自己的作息：本周习惯表 + 今日实况（只读，用于和实际对话表现比对）
+  const [aiSchedule, setAiSchedule] = useState<{ weekStart: string; items: ReturnType<typeof getWeekSchedule> }>({ weekStart: "", items: [] });
+  const [aiTodayLive, setAiTodayLive] = useState<LiveDay | null>(null);
   // 用户信息编辑
   const [editFieldModalVisible, setEditFieldModalVisible] = useState(false);
   const [editFieldLabel, setEditFieldLabel] = useState("");
@@ -300,15 +333,29 @@ export default function SettingsScreen() {
   const [personaResult, setPersonaResult] = useState<PersonaInfo | null>(null);
   const [personaError, setPersonaError] = useState("");
 
-  /** 列表含兜底事件「日常闲聊」，新建/编辑/删除后也走这里刷新 */
+  /**
+   * 列表含兜底事件「日常闲聊」，新建/编辑/删除后也走这里刷新。
+   * 排序按现算的实际权重降序（同分再看最近被想起的时刻）——库里的 active_weight
+   * 命中时都刷成 100，按它排等于按创建顺序排，看不出谁快被忘了。
+   */
   const reloadEvents = useCallback(() => {
-    const allEvents = getTopActive(999);
     const defaultId = getDefaultEventId();
-    if (defaultId) {
-      const defaultEvt = getEventById(defaultId);
-      if (defaultEvt) allEvents.unshift(defaultEvt);
-    }
-    return allEvents;
+    const defaultEvt = defaultId ? getEventById(defaultId) : null;
+    const rest = getTopActive(999)
+      .filter((e) => e.id !== defaultId)
+      .sort(
+        (a, b) =>
+          liveWeightOf(b) - liveWeightOf(a) ||
+          (b.last_accessed ?? "").localeCompare(a.last_accessed ?? "")
+      );
+    return defaultEvt ? [defaultEvt, ...rest] : rest;
+  }, []);
+
+  /** 读一次 AI 的本周习惯表与今日实况：实况由聊天页/动态引擎生成，这里只读 */
+  const reloadAiRoutine = useCallback(() => {
+    const weekStart = getWeekStart();
+    setAiSchedule({ weekStart, items: getWeekSchedule(weekStart) });
+    setAiTodayLive(getLiveDay(dayKey()));
   }, []);
 
   useFocusEffect(
@@ -320,7 +367,10 @@ export default function SettingsScreen() {
       setModelRouting(getModelRouting());
       setEvents(reloadEvents());
       setFriends(getAllFriends().filter((f) => !f.is_deleted));
-    }, [reloadEvents]),
+      setRetrievalFailStreak(Number(getMeta("retrieval_fail_streak") ?? 0));
+      setRetrievalFailReason(getMeta("retrieval_fail_reason") ?? "");
+      reloadAiRoutine();
+    }, [reloadEvents, reloadAiRoutine]),
   );
 
   const handleSaveKey = async () => {
@@ -519,7 +569,7 @@ export default function SettingsScreen() {
   };
 
   // 获取模型列表
-  const handleFetchModels = async (target: "foreground_model" | "background_model") => {
+  const handleFetchModels = async (target: "foreground_model" | "background_model" | "retrieval_model") => {
     setModelPickerTarget(target);
     setModelPickerVisible(true);
     setModelLoading(true);
@@ -562,7 +612,7 @@ export default function SettingsScreen() {
   const renderStateTemplate = (template: string, ui: UserInfo): string => {
     const bi = ui.basic_identity;
     const sg = ui.social_graph;
-    const nickname = bi.nickname || "你";
+    const nickname = bi.nickname || "用户";
     const graphText = sg.length > 0 ? sg.map((s) => `${s.name}(${s.role})：${s.attitude}`).join("\n* ") : EMPTY;
     // 当前处境：仍在持续的 condition 事件，标出从哪天开始；未来事件带发生时刻
     const conditions = getActiveConditions();
@@ -698,7 +748,7 @@ export default function SettingsScreen() {
         lines.push(editorValue);
         lines.push("");
         lines.push("## 输出格式（严格 JSON）");
-        lines.push('{"new_info": {...}, "new_fragments": [{...}], "event_merges": [{"keep": 数字, "merge": [数字], "reason": "..."}], "session_digest": "..."}');
+        lines.push('{"new_info": {...}, "new_fragments": [{gist, summary, keywords, priority, target_event_index, new_event_text, happens_at, condition, condition_ended}], "event_merges": [{"keep": 数字, "merge": [数字], "reason": "..."}], "session_digest": "..."}');
         lines.push("");
         lines.push("━━━ [history] 游标之后的新对话（多条消息）━━━");
         lines.push("[21:02] （相邻消息断开 ≥30 分钟时，段首标一次时刻；同一天只写时刻，跨天补日期）");
@@ -983,11 +1033,75 @@ ${text}
     );
   };
 
+  /** AI 自己的作息：今日实况逐格对照习惯，外加本周习惯表（只读） */
+  const renderAiRoutine = () => {
+    const todayIdx = getCurrentDayOfWeek();
+    const nowSlot = getCurrentTimeSlot(dayjs().hour());
+    const live = aiTodayLive;
+    const baseOf = (day: number, slot: number) =>
+      applyIdentityPlaceholders(
+        aiSchedule.items.find((i) => i.day_of_week === day && i.time_slot === slot)?.activity ?? ""
+      );
+
+    const head = `今天 ${dayjs().format("M/D")}（${WEEK_DAY_LABELS[todayIdx]}）`;
+    const todayLines: string[] = [live ? head : `${head} · 今天还没有实况，聊天时按习惯表兜底`];
+    if (live) {
+      const meta = [
+        live.highlight ? `主线：${applyIdentityPlaceholders(live.highlight)}` : "",
+        live.mood ? `心情：${live.mood}` : "",
+        live.weather ? `天气：${live.weather}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ｜ ");
+      if (meta) todayLines.push(meta);
+    }
+    todayLines.push(`凌晨：${applyIdentityPlaceholders(live?.lateNight || getLateNight(dayKey()))}`);
+
+    for (let slot = 0; slot < 5; slot++) {
+      const liveText = applyIdentityPlaceholders(live?.slots[slot]?.trim() ?? "");
+      const baseText = baseOf(todayIdx, slot);
+      todayLines.push(`${TIME_SLOT_LABELS[slot]}${slot === nowSlot ? " ← 当前" : ""}`);
+      todayLines.push(`　实况：${liveText || (live ? "（留白，按习惯）" : "（还没生成）")}`);
+      todayLines.push(`　习惯：${baseText || "（没排）"}`);
+    }
+
+    const weekLines = WEEK_DAY_LABELS.map((label, day) => {
+      const items = aiSchedule.items
+        .filter((i) => i.day_of_week === day)
+        .sort((a, b) => a.time_slot - b.time_slot);
+      const body =
+        items.length > 0
+          ? items
+              .map((i) => `${SHORT_SLOT_LABELS[i.time_slot]} ${applyIdentityPlaceholders(i.activity)}`)
+              .join(" · ")
+          : "（没排）";
+      return `${day === todayIdx ? "▸ " : ""}${label}${day === todayIdx ? "（今天）" : ""}\n　${body}`;
+    });
+
+    return (
+      <>
+        <Text style={[styles.infoTitle, { color: colors.text }]}>今日实况 vs 习惯</Text>
+        <Text style={[styles.infoLine, { color: colors.text }]}>{todayLines.join("\n")}</Text>
+        <Text style={[styles.infoTitle, { color: colors.text, marginTop: 14 }]}>
+          本周习惯（{aiSchedule.weekStart || "—"} 起）
+        </Text>
+        {aiSchedule.items.length === 0 ? (
+          <Text style={[styles.emptyText, { color: colors.textMuted }]}>
+            本周习惯表还没生成，进一次聊天页会自动生成
+          </Text>
+        ) : (
+          <Text style={[styles.infoLine, { color: colors.text }]}>{weekLines.join("\n")}</Text>
+        )}
+      </>
+    );
+  };
+
   const thresholdsVal = thresholds as Record<string, number>;
   // 未来事件就是 timestamp 在未来的记忆事件，渲染时直接查一次
   const appointmentList = getUpcomingEvents();
   const bgRouting = modelRouting.background_extraction_config;
   const fgRouting = modelRouting.foreground_chat_config;
+  const judgeRouting = modelRouting.retrieval_judge_config;
 
   return (
     <ScrollView style={[styles.container, { backgroundColor: colors.bg }]}>
@@ -1091,9 +1205,9 @@ ${text}
           <Text style={[styles.label, { color: colors.text }]}>API 地址</Text>
           <Text style={[styles.value, { color: colors.textMuted }]} numberOfLines={1}>{baseUrl.replace(/^https?:\/\//, "")}</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={() => { setInputKey(apiKey); setShowKeyModal(true); }}>
+        <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={() => { setInputKey(apiKey); setShowKeyText(false); setShowKeyModal(true); }}>
           <Text style={[styles.label, { color: colors.text }]}>API Key</Text>
-          <Text style={[styles.value, { color: colors.textMuted }]}>{apiKey ? `${apiKey.slice(0, 8)}...` : "未设置"}</Text>
+          <Text style={[styles.value, { color: colors.textMuted }]}>{apiKey ? maskApiKey(apiKey) : "未设置"}</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={() => { setInputAiName(ai_name); setShowAiNameModal(true); }}>
           <Text style={[styles.label, { color: colors.text }]}>怎么称呼 TA</Text>
@@ -1153,7 +1267,7 @@ ${text}
         {/* 前台模型 */}
         <View style={[styles.modelRow, { borderBottomColor: colors.border }]}>
           <View style={styles.modelInfo}>
-            <Text style={[styles.label, { color: colors.text }]}>前台聊天模型</Text>
+            <Text style={[styles.label, { color: colors.text }]}>前台对话模型</Text>
             <Text style={[styles.rowDesc, { color: colors.textMuted }]}>用户交互用，建议高质量模型</Text>
           </View>
           <View style={styles.modelActions}>
@@ -1164,12 +1278,12 @@ ${text}
           </View>
         </View>
 
-        {renderConfigRow("模型路由", { key: "foreground_temperature", label: "前台温度", type: "number", description: "0-2，越高越有创意" }, String(fgRouting.temperature))}
+        {renderConfigRow("模型路由", { key: "foreground_temperature", label: "对话温度", type: "number", description: "0-2，越高越有创意" }, String(fgRouting.temperature))}
 
         {/* 后台模型 */}
         <View style={[styles.modelRow, { borderBottomColor: colors.border }]}>
           <View style={styles.modelInfo}>
-            <Text style={[styles.label, { color: colors.text }]}>后台提取模型</Text>
+            <Text style={[styles.label, { color: colors.text }]}>后台巩固模型</Text>
             <Text style={[styles.rowDesc, { color: colors.textMuted }]}>巩固用，建议低成本模型</Text>
           </View>
           <View style={styles.modelActions}>
@@ -1180,7 +1294,23 @@ ${text}
           </View>
         </View>
 
-        {renderConfigRow("模型路由", { key: "background_temperature", label: "后台温度", type: "number", description: "建议 0，追求结构稳定" }, String(bgRouting.temperature))}
+        {renderConfigRow("模型路由", { key: "background_temperature", label: "巩固温度", type: "number", description: "建议 0，追求结构稳定" }, String(bgRouting.temperature))}
+
+        {/* 检索判定模型 */}
+        <View style={[styles.modelRow, { borderBottomColor: colors.border }]}>
+          <View style={styles.modelInfo}>
+            <Text style={[styles.label, { color: colors.text }]}>后台检索模型</Text>
+            <Text style={[styles.rowDesc, { color: colors.textMuted }]}>每轮判断这句话想起哪些往事，建议用便宜快速的模型</Text>
+          </View>
+          <View style={styles.modelActions}>
+            <Text style={[styles.modelValue, { color: colors.accent }]} numberOfLines={1}>{judgeRouting.model}</Text>
+            <TouchableOpacity style={[styles.fetchBtn, { backgroundColor: colors.btnBg }]} onPress={() => handleFetchModels("retrieval_model")}>
+              <Text style={[styles.fetchBtnText, { color: colors.text }]}>获取</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {renderConfigRow("模型路由", { key: "retrieval_temperature", label: "检索温度", type: "number", description: "建议 0，判定要稳定" }, String(judgeRouting.temperature))}
       </CollapsibleSection>
 
       {/* 记忆检索 */}
@@ -1188,10 +1318,34 @@ ${text}
         <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={() => { setInputBlocked(blocked_keywords || identityNames().join("、")); setShowBlockedModal(true); }}>
           <View style={styles.rowLeft}>
             <Text style={[styles.label, { color: colors.text }]}>检索屏蔽词</Text>
-            <Text style={[styles.rowDesc, { color: colors.textMuted }]} numberOfLines={1}>高频词不参与召回，默认屏蔽你和 TA 的称呼</Text>
+            <Text style={[styles.rowDesc, { color: colors.textMuted }]} numberOfLines={1}>这些词不作为想起往事的依据（只发它们时不触发检索）</Text>
           </View>
           <Text style={[styles.value, { color: colors.textMuted }]} numberOfLines={1}>{blocked_keywords || identityNames().join("、")}</Text>
         </TouchableOpacity>
+
+        <View style={[styles.row, { borderBottomColor: colors.border }]}>
+          <View style={styles.rowLeft}>
+            <Text style={[styles.label, { color: colors.text }]}>AI 检索判定</Text>
+            <Text style={[styles.rowDesc, { color: colors.textMuted }]}>让 AI 判断这句话想起了哪些往事，比关键词更准；关闭即回到纯本地检索</Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.toggle, ai_retrieval_enabled ? styles.toggleOn : styles.toggleOff]}
+            onPress={() => saveAiRetrievalEnabled(!ai_retrieval_enabled)}
+          >
+            <Text style={[styles.toggleText, ai_retrieval_enabled ? styles.toggleTextOn : styles.toggleTextOff]}>
+              {ai_retrieval_enabled ? "开" : "关"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={[styles.sectionNote, { color: colors.textMuted }]}>
+          开启后每轮会把全部记忆的标题与一句印象发给模型接口（判定质量优先），记忆本身仍只存在本机
+        </Text>
+        {retrievalFailStreak >= 3 ? (
+          <Text style={styles.sectionWarn}>
+            已连续 {retrievalFailStreak} 次判定失败，当前在用本地检索，请检查 API Key 与网络
+            {retrievalFailReason ? `（${retrievalFailReason}）` : ""}
+          </Text>
+        ) : null}
       </CollapsibleSection>
 
       {/* 记忆流转阈值 */}
@@ -1228,6 +1382,19 @@ ${text}
           onPress={() => { setPersonaInput(""); setPersonaResult(null); setPersonaError(""); setPersonaModalVisible(true); }}
         >
           <Text style={[styles.actionText, { color: colors.accent }]}>✨ AI 提取人设</Text>
+        </TouchableOpacity>
+      </CollapsibleSection>
+
+      {/* AI 自己的作息：本周习惯 + 今日实况，用来和聊天里的状态注记比对 */}
+      <CollapsibleSection title="AI 作息" icon="🗓️" defaultExpanded={false}>
+        <View style={[styles.infoBlock, { borderBottomColor: colors.border }]}>
+          {renderAiRoutine()}
+        </View>
+        <TouchableOpacity
+          style={[styles.actionRow, { borderBottomColor: colors.border }]}
+          onPress={reloadAiRoutine}
+        >
+          <Text style={[styles.actionText, { color: colors.accent }]}>🔄 重新读取</Text>
         </TouchableOpacity>
       </CollapsibleSection>
 
@@ -1392,7 +1559,7 @@ ${text}
               <View style={[styles.rowLeft, { flex: 1 }]}>
                 <Text style={[styles.label, { color: colors.text, fontSize: 14, lineHeight: 20 }]}>{evt.event_text}</Text>
                 <Text style={[styles.rowDesc, { color: colors.textMuted }]}>
-                  权重 {evt.active_weight} · 优先级 {evt.priority} · {new Date(evt.timestamp).toLocaleDateString()}
+                  当前权重 {liveWeightOf(evt)} · 优先级 {evt.priority} · {new Date(evt.timestamp).toLocaleDateString()}
                 </Text>
               </View>
               <Text style={[styles.value, { color: colors.textMuted, fontSize: 12 }]}>#{evt.id}</Text>
@@ -1490,7 +1657,23 @@ ${text}
         <View style={styles.overlay}>
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>设置 API Key</Text>
-            <TextInput style={[styles.input, { borderColor: colors.border, color: colors.text }]} value={inputKey} onChangeText={setInputKey} placeholder="sk-..." placeholderTextColor={colors.placeholder} autoCapitalize="none" autoCorrect={false} autoFocus />
+            <TextInput
+              style={[styles.input, { borderColor: colors.border, color: colors.text }]}
+              value={inputKey}
+              onChangeText={setInputKey}
+              placeholder="sk-..."
+              placeholderTextColor={colors.placeholder}
+              autoCapitalize="none"
+              autoCorrect={false}
+              autoFocus
+              // 默认密文：旁边有人或录屏时不会把整串 Key 露出来
+              secureTextEntry={!showKeyText}
+            />
+            <TouchableOpacity onPress={() => setShowKeyText((v) => !v)}>
+              <Text style={[styles.keyToggleText, { color: colors.accent }]}>
+                {showKeyText ? "隐藏" : "显示明文"}
+              </Text>
+            </TouchableOpacity>
             <View style={styles.modalButtons}>
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowKeyModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
               <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveKey}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
@@ -1550,7 +1733,10 @@ ${text}
           <View style={styles.modal}>
             <Text style={styles.modalTitle}>检索屏蔽词</Text>
             <TextInput style={styles.input} value={inputBlocked} onChangeText={setInputBlocked} placeholder="用逗号分隔，如：小明、私藏" placeholderTextColor="#9B9A97" autoFocus />
-            <Text style={styles.modalHint}>高频词不参与记忆检索召回，默认屏蔽你和 TA 的称呼{"\n"}只影响检索，不会修改记忆内容；留空恢复默认</Text>
+            <Text style={styles.modalHint}>
+              这些词按停用词处理：整句只有它们时直接跳过 AI 判定，兜底检索也不会拿它们当关键词{"\n"}
+              默认是你们俩的称呼，留空恢复默认；不会改动记忆内容
+            </Text>
             <View style={styles.modalButtons}>
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowBlockedModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
               <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveBlocked}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
@@ -1626,7 +1812,7 @@ ${text}
               <Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text>
             </TouchableOpacity>
             <Text style={[styles.editorTitle, { color: colors.text }]}>
-              {modelPickerTarget === "foreground_model" ? "前台模型" : "后台模型"}
+              {MODEL_PICKER_TITLE[modelPickerTarget]}
             </Text>
             <View style={{ width: 50 }} />
           </View>
@@ -1763,7 +1949,7 @@ ${text}
               autoFocus
             />
             <View style={{ flexDirection: "row", alignItems: "center", marginTop: 12, gap: 8 }}>
-              <Text style={[styles.modalHint, { marginTop: 0 }]}>权重 (1-100):</Text>
+              <Text style={[styles.modalHint, { marginTop: 0 }]}>权重 (1-100，会随时间衰减):</Text>
               <TextInput
                 style={[styles.input, { flex: 1, marginTop: 0 }]}
                 value={newEventWeight}
@@ -1830,7 +2016,7 @@ ${text}
                     />
                   </View>
                   <View style={{ flex: 1 }}>
-                    <Text style={[styles.rowDesc, { color: colors.textMuted }]}>权重 (1-100)</Text>
+                    <Text style={[styles.rowDesc, { color: colors.textMuted }]}>权重 (1-100，想起时回到这个值，之后随时间衰减)</Text>
                     <TextInput
                       style={[styles.input, { marginTop: 4 }]}
                       value={editEventWeight}
@@ -1985,7 +2171,13 @@ ${text}
 
             <View style={[styles.detailMeta, { borderTopColor: colors.border, borderBottomColor: colors.border }]}>
               <View style={styles.detailMetaItem}>
-                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>权重</Text>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>当前权重</Text>
+                <Text style={[styles.detailMetaValue, { color: colors.text }]}>
+                  {selectedEvent ? liveWeightOf(selectedEvent) : ""}
+                </Text>
+              </View>
+              <View style={styles.detailMetaItem}>
+                <Text style={[styles.detailMetaLabel, { color: colors.textMuted }]}>想起时权重</Text>
                 <Text style={[styles.detailMetaValue, { color: colors.text }]}>{selectedEvent?.active_weight}</Text>
               </View>
               <View style={styles.detailMetaItem}>
@@ -2265,6 +2457,8 @@ const styles = StyleSheet.create({
   rowLeft: { flex: 1, marginRight: 12 },
   rowRight: { flexShrink: 0 },
   rowDesc: { fontSize: 12, color: "#9B9A97", marginTop: 2 },
+  sectionNote: { fontSize: 12, color: "#9B9A97", lineHeight: 18, paddingVertical: 10 },
+  sectionWarn: { fontSize: 12, color: "#E03E3E", lineHeight: 18, paddingBottom: 12 },
   label: { fontSize: 15, color: "#37352F" },
   friendActions: { flexDirection: "row", flexWrap: "wrap", gap: 16, marginTop: 8 },
   value: { fontSize: 14, color: "#9B9A97", maxWidth: 160, textAlign: "right" },
@@ -2303,6 +2497,8 @@ const styles = StyleSheet.create({
   // 用户属性编辑框：多行可换行，长内容不再挤成一条细长条
   editFieldInput: { minHeight: 120, maxHeight: 260, textAlignVertical: "top", lineHeight: 22 },
   modalHint: { fontSize: 12, color: "#9B9A97", marginTop: 8, lineHeight: 18 },
+  // 「显示明文 / 隐藏」：贴在 API Key 输入框下方右对齐
+  keyToggleText: { fontSize: 13, marginTop: 8, textAlign: "right" },
   modalButtons: { flexDirection: "row", justifyContent: "flex-end", marginTop: 20, gap: 12 },
   cancelBtn: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 6 },
   cancelText: { fontSize: 15, color: "#9B9A97" },
@@ -2370,7 +2566,8 @@ const styles = StyleSheet.create({
   previewContainer: { flex: 1, marginHorizontal: 20, marginTop: 12, backgroundColor: "#F7F7F5", borderRadius: 8, padding: 14 },
   previewText: { fontSize: 13, color: "#37352F", lineHeight: 20, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" },
   // 开关
-  toggle: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, minWidth: 50, alignItems: "center" },
+  // flexShrink: 0：左侧说明文字再长也不能把开关挤扁、挤出屏幕
+  toggle: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, minWidth: 50, alignItems: "center", flexShrink: 0 },
   toggleOn: { backgroundColor: "#2F81F7" },
   toggleOff: { backgroundColor: "#F0F0EE" },
   toggleText: { fontSize: 14, fontWeight: "600" },

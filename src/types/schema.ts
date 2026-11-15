@@ -23,13 +23,13 @@ export interface MemoryFragment {
 
 /** 记忆类型：决定衰减速度，模拟真实记忆的分层 */
 export type MemoryKind =
-  /** 日常琐事：按小时衰减，几天内淡忘 */
+  /** 日常琐事：默认事件与手动新建事件用，衰减同其他类型，只看优先级 */
   | "daily"
-  /** 共同经历（游戏、深度对话等）：按天衰减且有下限，数月甚至数年后仍可被想起 */
+  /** 共同经历（游戏、深度对话等）：巩固流、游戏、动态记忆用 */
   | "episode"
   /**
    * 持续型处境（感冒中、在搬家、刚分手）：仍成立时每轮参与对话，
-   * 结束时写 closed_at 变成一段普通过去经历。衰减同 episode
+   * 结束时写 closed_at，变成一段普通过去经历
    */
   | "condition";
 
@@ -225,6 +225,8 @@ export interface PromptsConfig {
   friend_comment_prompt: string;
   /** 多人候选的好友留言生成指令：谁开口由模型自己决定，可以一个都不回 */
   friend_comments_prompt: string;
+  /** AI 检索判定的固定说明（system 段，要求逐字节稳定以命中前缀缓存） */
+  retrieval_judge_prompt: string;
 }
 
 export interface DefaultPlaceholders {
@@ -277,6 +279,8 @@ export interface ModelConfig {
 export interface ModelRoutingConfig {
   background_extraction_config: ModelConfig;
   foreground_chat_config: ModelConfig;
+  /** AI 检索判定：每轮都要调，单独配一个便宜快速的模型 */
+  retrieval_judge_config: ModelConfig;
 }
 
 /** 应用配置 (PRD 4.3 app_config) */
@@ -393,7 +397,7 @@ export interface DailyLog {
   slots: string;
   /** 今天整体心情（沿用心情标签集合） */
   mood: string;
-  /** 今日主线，如「面试的一天」 */
+  /** 今日主线，如「赶稿的一天」 */
   highlight: string;
   /** 0-6 点的深夜状态（当天凌晨），喂给清晨的实况生成 */
   late_night: string;
@@ -420,4 +424,44 @@ export interface ChatMessage {
   is_game_summary?: boolean;
   /** AI 的情境旁白：进模型上下文、不显示在聊天界面 */
   is_state_note?: boolean;
+}
+
+// --- AI 检索判定 ---
+
+/** 档位：core=正在谈这件事本身；related=只提到相关的人/物/地点，话题不是它 */
+export type RecallLevel = "core" | "related";
+
+/** 判定结果的一条：注入哪条事件、多详细、指认哪条片段 */
+export interface RecallPlanItem {
+  id: number;
+  level: RecallLevel;
+  /** 只可能是清单里展示过的两条片段之一；指认不到为 null */
+  fragId: number | null;
+}
+
+/** 判定单段的原始输出（字段全可选，模型可能给字符串，校验都在 judge.ts 里做） */
+export interface JudgeOutput {
+  hits?: Array<{ id?: number | string; level?: string; frag?: number | string }>;
+  expand?: Array<number | string>;
+}
+
+/** 判定记录（retrieval_logs）：复盘判定过程、筛选反哺标注集 */
+export interface RetrievalLog {
+  id: number;
+  created_at: string;
+  user_text: string;
+  /** 第一段完整 JSON 原文 */
+  stage1_output: string | null;
+  /** 第二段完整 JSON 原文，未触发为 null */
+  stage2_output: string | null;
+  /** 最终注入的事件编号 JSON 数组 */
+  final_injected: string;
+  /** 1=本地兜底接管 */
+  fallback: number;
+  /** 清单事件条数 */
+  event_count: number;
+  /** 是否触发第二段 */
+  expand_used: number;
+  /** 判定总耗时 */
+  latency_ms: number;
 }

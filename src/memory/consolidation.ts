@@ -13,6 +13,7 @@ import {
   getMeta,
   setMeta,
   updateEventPriority,
+  updateWeight,
   getDefaultEventId,
   getEventById,
   findSimilarEvent,
@@ -472,6 +473,9 @@ export async function runConsolidation(
 
         insertFragment(targetEventId, frag.gist, frag.summary, priority, (frag.keywords ?? []).join(","), fragTs);
         updateEventPriority(targetEventId, priority);
+        // 又聊到这件事 = 刚被想起一次：刷回满分。否则淡出检索线的旧事件会一直
+        // 被追加片段、却永远检索不到，变成只进不出的黑洞（默认事件不参与检索，不刷）
+        if (targetEventId !== defaultEventId) updateWeight(targetEventId, 100);
         written.push(`  · [${targetEventId}] ${frag.gist}`);
       }
     });

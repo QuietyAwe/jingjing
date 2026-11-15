@@ -48,13 +48,14 @@ export function pseudoWeather(day: string): string {
 }
 
 // --- 深夜状态（0-6 点）：由日期种子决定，同一天凌晨保持一致 ---
+// 统一以 [ai] 开头：旁白直接拼接，不靠渲染层补主语
 const LATE_NIGHT_STATES = [
-  "还醒着，窝在被子里刷手机",
-  "刚迷迷糊糊睡着，又被消息震醒",
-  "失眠，翻来覆去好久了",
-  "做了个乱七八糟的梦，刚醒",
-  "熬到现在，眼皮已经睁不开",
-  "醒了，脑子还在转白天的事",
+  "[ai]还醒着，窝在被子里刷手机",
+  "[ai]刚迷迷糊糊睡着，又被消息震醒",
+  "[ai]失眠，翻来覆去好久了",
+  "[ai]做了个乱七八糟的梦，刚醒",
+  "[ai]熬到现在，眼皮已经睁不开",
+  "[ai]醒了，脑子还在转白天的事",
 ];
 
 export function lateNightStateFor(day: string): string {
@@ -252,7 +253,8 @@ function buildUserContext(now: dayjs.Dayjs): string {
     }
   }
   if (latestLateChat) {
-    lines.push(`[user] 昨晚和你聊到 ${latestLateChat.format("HH:mm")}`);
+    // 数据区不出现「你」：模型会把它当成用户写进正文
+    lines.push(`[user] 昨晚和[ai]聊到 ${latestLateChat.format("HH:mm")}`);
   }
 
   // 昨天发过心情动态 → 今天的心情可能还受影响

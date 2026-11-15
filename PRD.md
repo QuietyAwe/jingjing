@@ -2,7 +2,7 @@
 
 ## 1. 一句话定义与 MVP 范围
 
-一款基于 Expo (React Native) + 本地 SQLite 实现的、具备增量补丁式短期记忆巩固、近期动态优先的「灵光一闪」、轻量纯 JS 分词匹配与全方位冷启动兼容机制的端侧隐私型情感陪伴记忆引擎。
+一款基于 Expo (React Native) + 本地 SQLite 实现的、具备增量补丁式短期记忆巩固、近期动态优先的「灵光一闪」、AI 判定检索（全量清单 + 两段判定，本地分词检索兜底）与全方位冷启动兼容机制的端侧隐私型情感陪伴记忆引擎。
 
 ### IN 范围（开发涉及）
 
@@ -12,7 +12,7 @@
 * **增量巩固机制**：未巩固对话攒到 token 预算或空闲超阈值时（至少 10 轮）异步发送「固定指令 + 新对话 + 关键词倒排候选事件」至后台模型，返回画像增量、记忆片段、事件归并指令与会话摘要，按 token 预算分批消化，带超时解锁。
 
 
-* **轻量本地检索**：纯 JS 中文分词过滤停用词，利用 SQLite `LIKE` 模糊查询非归档数据，限制检索词上限。
+* **AI 检索判定**：把未被遗忘的记忆按 id 升序摆成全量清单交给后台模型判断「这句话想起了哪些事」（档位 + 片段指认，拿不准时第二段补看细节）；纯 JS 分词 + IDF 加权检索降级为兜底，无 Key / 失败 / 关闭开关时接管。
 * **参数配置解耦**：提示词、流转阈值、艾宾浩斯衰减系数、模型路由参数、冷启动模板与默认占位符完全解耦。
 
 
@@ -37,35 +37,19 @@
 * 若 `user_info` 各项字段为空（初次打开 App），则拼装层不渲染空标签，直接使用解耦配置中的 `cold_start_template` 注入上下文，引导 AI 主动提问；若部分字段缺失，则采用配置中的 `default_placeholders` 进行安全兜底渲染，防止 JS `undefined` 崩溃。
 
 
-2. **输入与切词**：用户发送消息后，纯 JS 分词对每段连续汉字做 **2 字滑窗（bigram）**，上限 16 个关键词、超长输入均匀抽样；身份名（用户昵称 / AI 名）作为屏蔽词剔除。中文没有空格，硬切词反而会漏召回——bigram 保证「妈妈」这类词必以某个 gram 出现。
-3. **本地检索（先事件、后片段）**：
-* 事件层粗召回（标题或别名命中，排除默认事件「日常闲聊」与未到期的未来事件），SQL 只做 OR 粗筛，排序在 JS 里按「命中了几个不同关键词」（重合度）精排，避免命中即算数：
-```sql
-SELECT e.* FROM memory_events e
-WHERE e.id != :default_event_id
-  AND e.event_status != 'upcoming'
-  AND (e.event_text LIKE '%词1%'
-       OR EXISTS(SELECT 1 FROM memory_event_aliases a
-                 WHERE a.event_id = e.id AND a.alias LIKE '%词1%'))
-ORDER BY e.last_accessed DESC
-LIMIT 15;
-```
-* 事件未命中时再检索片段（`gist` / `summary` / `keywords` 三者都参与），命中片段的父事件即视为命中事件。
-* 命中后把事件的 `active_weight` 刷为 100、更新 `last_accessed`——权重刷新是**事件级**，渲染才是**片段级**分层。
+2. **判定闸门**：用户发送消息后先做覆盖检查（去空白 / 标点 / emoji，用停用词表做最长匹配）。整句只有寒暄、时间与天气提问时当轮零事件、不调模型；游戏回合的空输入同样跳过。表与检索停用词共用一张，绝不收情感词、身体状态、具名事物、动作。
+3. **AI 判定**：把未被遗忘的记忆（实时权重 ≥15，排除默认事件「日常闲聊」与未到期的未来事件）按 **id 升序**摆成清单，每行「`#id 标题 — 绝对日期 — 最近/最早各一条带编号的一句话印象`」；后台模型两段判定——第一段给相关事件、档位（core=正在谈这件事 / related=只提到相关人物）与指认的片段编号，事件级拿不准时第二段补看最近 ≤8 条片段再定档。`[time]` 渲染成绝对日期、`[user]`/`[ai]` 渲染成固定称呼，清单逐字节稳定，靠前缀缓存压成本。
+4. **擦亮与兜底**：判 core/related 的事件把 `active_weight` 刷为 100、更新 `last_accessed`（二值，无中间档）；解析失败、请求失败、未配置 Key 或开关关闭时，用本地 bigram 检索接管（IDF 加权 + 相对截断 50% + Top3，候选池同样排除权重 <15）。每轮判定写 `retrieval_logs`，供复盘与反哺标注集。
 
 
 
 
-4. **惰性衰减与记忆区拼装**：
-* 对未命中的事件，读取时根据时间差（**单位：小时**）按艾宾浩斯公式实时计算当前实际权重。
-
-
-* 从数据库中提取非归档、且当前计算权重最高的 Top 10 事件。
+5. **惰性衰减**：读取时根据时间差实时计算当前权重——遗忘速度只看优先级，全部随基准等比缩放（6 级约 20 天跌到遗忘线，每差一级 1.88 倍；7 级以上有 15 分下限），记忆类型不参与。主路径只用它做三件事：清单过滤（<15 已被遗忘）、灵光一闪冷池（<40）、兜底排序；注入与否与详略都不再读权重。
 
 
 
 
-5. **“灵光一闪”扰动事件抽取**：
+6. **“灵光一闪”扰动事件抽取**：
 * 每次检索最多注 1 条，两条通道：
   1. **近期动态优先**：按 6 小时内各动态事件的新近度（AI 刚发帖 / 用户刚评论 4×，用户刚发 / 刚浏览 2.5×，好友刚发 1.5×）累加出概率 `0.05 + Σ(boost × recent_moment_recall_weight)`（默认权重 0.2 → 4× 约 0.85，上限 0.9），命中即取该事件 6 小时内最新片段；
   2. **冷记忆**：没有近期动态、或动态通道没掷中时，按 `epiphany_trigger_probability`（默认 0.05）从实时权重低于 40 的冷记忆里抽一条，优先与当前输入弱关联的。
@@ -74,14 +58,14 @@ LIMIT 15;
 
 
 
-6. **Prompt 拼装与截断**：
+7. **Prompt 拼装与截断**：
 * 按照：`系统人设 + 状态区 + 会话摘要 + 未巩固历史 + 记忆区(检索命中事件 + 灵光一闪) + 游戏区` 顺序拼接；记忆区与游戏区后置，避免记忆变化打断历史段的前缀缓存。
 
 
 * 检查总字符长度，若超出配置的 Token 预算限制，则从低到高依次剔除记忆区事件，优先保护当前预算内的未巩固对话与状态区的完整性。
 
 
-7. **响应输出**：调用前台聊天模型生成回复。
+8. **响应输出**：调用前台聊天模型生成回复。
 
 ### 2.2 异步巩固流（含双重关联写入）
 
@@ -170,8 +154,10 @@ CREATE TABLE IF NOT EXISTS memory_events (
     active_weight INTEGER NOT NULL CHECK(active_weight BETWEEN 1 AND 100),
     last_accessed TEXT NOT NULL,
     priority INTEGER NOT NULL DEFAULT 5,         -- 1~9
-    memory_kind TEXT NOT NULL DEFAULT 'daily',   -- daily / episode
-    event_status TEXT NOT NULL DEFAULT 'none'    -- none / upcoming / caring / archived
+    memory_kind TEXT NOT NULL DEFAULT 'daily',   -- daily / episode / condition
+    event_status TEXT NOT NULL DEFAULT 'none',   -- none / upcoming / caring / archived
+    closed_at TEXT,                              -- 处境结束时刻，NULL = 仍成立
+    nudge_count INTEGER NOT NULL DEFAULT 0        -- 未来事件已提醒次数
 );
 CREATE INDEX IF NOT EXISTS idx_events_weight ON memory_events(active_weight DESC);
 
@@ -182,11 +168,26 @@ CREATE TABLE IF NOT EXISTS memory_event_aliases (
     PRIMARY KEY (event_id, alias)
 );
 
--- 表四：系统元数据表（巩固游标 / 锁 / 会话摘要 / 浏览与提过记录）
+-- 表四：系统元数据表（巩固游标 / 锁 / 会话摘要 / 浏览与提过记录 / AI 判定失败计数）
 CREATE TABLE IF NOT EXISTS system_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- 表五：AI 检索判定记录（每轮判定的原始输出与结果，只留最近 5000 条）
+CREATE TABLE IF NOT EXISTS retrieval_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    user_text TEXT NOT NULL,
+    stage1_output TEXT,
+    stage2_output TEXT,                          -- 未触发第二段为 NULL
+    final_injected TEXT NOT NULL DEFAULT '',
+    fallback INTEGER NOT NULL DEFAULT 0,         -- 1 = 本地兜底接管
+    event_count INTEGER NOT NULL DEFAULT 0,
+    expand_used INTEGER NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_retrieval_logs_created ON retrieval_logs(created_at DESC);
 
 ```
 
@@ -229,6 +230,11 @@ $$W_{now} = \max\left(1, \left\lfloor W_{last} \cdot e^{-d \cdot t_{\Delta}} \ri
     "foreground_chat_config": {
       "model": "gpt-4o",
       "temperature": 0.7
+    },
+    "retrieval_judge_config": {
+      "model": "gpt-4o-mini",
+      "temperature": 0.0,
+      "response_format": { "type": "json_object" }
     }
   }
 }

@@ -19,6 +19,7 @@ import type {
   MemoryFragment,
   ChatMessage,
   DefaultPlaceholders,
+  RecallPlanItem,
 } from "@/types/schema";
 import { getPrompts, getPlaceholders, getThresholds } from "./config";
 import { DETAIL_VISIBLE_WEIGHT, calculateWeight } from "@/memory/decay";
@@ -92,7 +93,8 @@ export function assemblePrompt(
   tokenBudget: number = getThresholds().context_token_budget,
   cuedFragmentIds?: Set<number>,
   friendMention?: FriendMentionContext,
-  sessionDigest?: string
+  sessionDigest?: string,
+  plan?: Map<number, RecallPlanItem>
 ): AssembledPrompt {
   const prompts = getPrompts();
   const now = dayjs(); // 预计算当前时间，复用
@@ -111,7 +113,8 @@ export function assemblePrompt(
     epiphany,
     hitFragments,
     cuedFragmentIds,
-    friendMention
+    friendMention,
+    plan
   );
 
   // 3. 转换历史为 API 格式（用户消息一律带时间戳，AI 消息不带）
@@ -398,13 +401,10 @@ export interface FriendMentionContext {
 }
 
 /**
- * 命中事件注入的片段条数上限
+ * 兜底路径的片段条数上限
  *
- * 「被检索唤起」时应该给完整细节，但一个积累几十条片段的事件会一次撑爆预算，
- * 于是整块被截断、一条都留不下。取最近 3 条 + 最早 1 条，既有近因也有头绪。
- *
- * 被当前话题唤起的片段（cuedIds）必须入选——想不起来的细节可以省，
- * 刚想起来的那条不能省；超额时先丢「没被唤起且更旧」的。
+ * 一个积累几十条片段的事件会一次撑爆预算，于是整块被截断、一条都留不下。
+ * 取最近 3 条 + 最早 1 条，既有近因也有头绪；被当前话题唤起的片段必须入选。
  */
 function capFragments(fragments: MemoryFragment[], cuedIds?: Set<number>): MemoryFragment[] {
   if (fragments.length <= 4) return fragments;
@@ -422,9 +422,10 @@ function capFragments(fragments: MemoryFragment[], cuedIds?: Set<number>): Memor
 }
 
 /**
- * 详细/简略切换阈值：实时权重低于它的记忆整块只注入一句话 gist
- * 片段自身的 priority 参与：重大片段把阈值压低，
- * 也就是衰减到更低的权重才开始变模糊——重要的事确实会记得更久
+ * 兜底路径的详细/简略切换阈值：实时权重低于它只注入一句话 gist
+ *
+ * 主路径（AI 判定）按档位与指认的片段决定详略，不读这个阈值。
+ * 片段自身的 priority 参与：重大片段把阈值压低，也就是衰减到更低的权重才开始变模糊。
  */
 function detailThreshold(priority: number): number {
   const base = getThresholds().detail_visible_weight || DETAIL_VISIBLE_WEIGHT;
@@ -434,8 +435,8 @@ function detailThreshold(priority: number): number {
 /**
  * 构建记忆区：只给本轮命中事件的片段，替换 [user] [time] 占位符
  *
- * 命中事件逐条分层：被当前话题唤起的片段给完整 summary，其余按各自年龄
- * 过遗忘曲线决定 summary/gist——想起一件事不会把整段往事全部擦亮
+ * 主路径（有 plan）详略跟 AI 档位与指认走：core 只把指认的那条展开成完整段落，
+ * 其余留一行印象；related 连细节都不展开。兜底路径沿用年龄曲线。
  */
 function buildMemorySection(
   userInfo: UserInfo | null,
@@ -443,7 +444,8 @@ function buildMemorySection(
   epiphany: (MemoryEvent & { gist: string }) | null,
   hitFragments?: Map<number, MemoryFragment[]>,
   cuedFragmentIds?: Set<number>,
-  friendMention?: FriendMentionContext
+  friendMention?: FriendMentionContext,
+  plan?: Map<number, RecallPlanItem>
 ): MemoryBlock[] {
   const now = dayjs(); // 预计算当前时间，复用
 
@@ -477,26 +479,55 @@ function buildMemorySection(
 
     const detailLines: string[] = [];
     const briefLines: string[] = [];
-    // 命中事件：逐条分层——被唤起的片段给完整 summary（刚想起来的细节），
-    // 其余按各自年龄过遗忘曲线决定 summary/gist（想起一件事不会把整段往事全部擦亮）。
-    // detail 已是逐条分层结果，整块不再降级；budget 截断时仍可退到全 gist 的 brief
     const fragments = hitFragments?.get(event.id);
     if (!fragments || fragments.length === 0) continue;
-    for (const frag of capFragments(fragments, cuedFragmentIds)) {
-      const cued = cuedFragmentIds?.has(frag.id) ?? false;
-      // 片段自身年龄权重：写入时刻≈经历时刻，priority 参与阈值（重大细节保持更久）
-      const fragLive = calculateWeight(
-        event.active_weight,
-        frag.timestamp,
-        frag.priority,
-        event.memory_kind ?? "daily"
-      );
-      const vivid = cued || fragLive >= detailThreshold(frag.priority);
-      const shortText = frag.gist || frag.summary.slice(0, 24);
-      detailLines.push(
-        `  · ${withFriendHint(anchorLine(vivid ? frag.summary : shortText, frag.timestamp, userInfo, now))}`
-      );
-      briefLines.push(`  · ${withFriendHint(anchorLine(shortText, frag.timestamp, userInfo, now))}`);
+
+    const shortOf = (f: MemoryFragment) => f.gist || f.summary.slice(0, 24);
+    /** vividId 那条给完整 summary，其余只给一句话 */
+    const pushFragments = (list: MemoryFragment[], vividId: number | null) => {
+      for (const frag of list) {
+        const shortText = shortOf(frag);
+        detailLines.push(
+          `  · ${withFriendHint(
+            anchorLine(frag.id === vividId ? frag.summary : shortText, frag.timestamp, userInfo, now)
+          )}`
+        );
+        briefLines.push(`  · ${withFriendHint(anchorLine(shortText, frag.timestamp, userInfo, now))}`);
+      }
+    };
+
+    const planned = plan?.get(event.id);
+    if (planned?.level === "related") {
+      // 只是提到相关的人/物/地点：一行标题 + 一句印象，不展开任何细节
+      const frag = fragments[fragments.length - 1];
+      const title = replacePlaceholders(event.event_text, event.timestamp, userInfo, now);
+      const closed =
+        event.memory_kind === "condition" && event.closed_at ? "（已经过去了）" : "";
+      const line = `  · ${withFriendHint(
+        anchorLine(`${title} — ${shortOf(frag)}`, frag.timestamp, userInfo, now)
+      )}${closed}`;
+      // related 的细节已经压到一行，超预算时先丢它
+      blocks.push({ weight: 1, isEpiphany: false, detail: line, brief: line, degraded: false });
+      continue;
+    }
+
+    if (planned) {
+      // core：指认到的那条（没指认就取最近一条）给完整段落，其余一行，合计 ≤4 条
+      const designated =
+        (planned.fragId ? fragments.find((f) => f.id === planned.fragId) : undefined) ??
+        fragments[fragments.length - 1];
+      const rest = fragments.filter((f) => f.id !== designated.id).slice(-3);
+      const list = [designated, ...rest].sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+      pushFragments(list, designated.id);
+    } else {
+      // 兜底路径：被唤起的片段给完整 summary，其余按各自年龄过遗忘曲线
+      for (const frag of capFragments(fragments, cuedFragmentIds)) {
+        // 片段自身年龄权重：写入时刻≈经历时刻，priority 参与阈值（重大细节保持更久）
+        const fragLive = calculateWeight(event.active_weight, frag.timestamp, frag.priority);
+        const vivid =
+          (cuedFragmentIds?.has(frag.id) ?? false) || fragLive >= detailThreshold(frag.priority);
+        pushFragments([frag], vivid ? frag.id : null);
+      }
     }
 
     // 已结束的处境：标题不显示时，把标注挂在首行片段

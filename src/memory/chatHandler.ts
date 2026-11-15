@@ -45,17 +45,18 @@ export interface ChatContext {
  * @param userInput 用户输入文本
  * @param chatHistory 最近对话历史（已截断为 15 轮）
  */
-export function buildChatContext(
+export async function buildChatContext(
   userInput: string,
   chatHistory: ChatMessage[],
   game?: GameParts,
-): ChatContext {
+): Promise<ChatContext> {
   // 1. 冷启动检测
   const userInfo = getUserInfo();
   const isColdStart = !userInfo;
 
-  // 2. 本地检索（PRD 2.1 节第 2-5 步）
-  const { topEvents, epiphany, keywords, hitFragments, cuedFragmentIds } = retrieve(userInput);
+  // 2. 检索（AI 判定，失败或不可用时本地兜底）
+  const { topEvents, epiphany, keywords, hitFragments, cuedFragmentIds, plan } =
+    await retrieve(userInput);
   // 本轮已召回的片段：按名字命中那几条不必再重复给
   const recalledFragmentIds = new Set<number>();
   for (const list of hitFragments.values()) for (const frag of list) recalledFragmentIds.add(frag.id);
@@ -116,7 +117,8 @@ export function buildChatContext(
             })),
         }
       : undefined,
-    sessionDigest
+    sessionDigest,
+    plan
   );
 
   const memoryCount = topEvents.length + (epiphany ? 1 : 0);

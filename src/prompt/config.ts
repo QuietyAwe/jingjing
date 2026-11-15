@@ -63,6 +63,7 @@ export function getConfigDefault(key: string): string {
   const decay = config.weight_decay;
   const bg = config.model_routing.background_extraction_config;
   const fg = config.model_routing.foreground_chat_config;
+  const judge = config.model_routing.retrieval_judge_config;
 
   const defaults: Record<string, string> = {
     consolidation_window_turns: String(thresholds.consolidation_window_turns),
@@ -84,6 +85,8 @@ export function getConfigDefault(key: string): string {
     background_temperature: String(bg.temperature),
     foreground_model: fg.model,
     foreground_temperature: String(fg.temperature),
+    retrieval_model: judge.model,
+    retrieval_temperature: String(judge.temperature),
     // 以下模板缺省值必须列出：设置页用「当前值 ≠ 缺省值」判断「已修改」标记，
     // 漏列会让这些字段永远显示已修改（缺省比对恒为空串）
     system_prompt: config.prompts.system_prompt,
@@ -96,6 +99,7 @@ export function getConfigDefault(key: string): string {
     friend_moment_generation_prompt: config.prompts.friend_moment_generation_prompt,
     friend_comment_prompt: config.prompts.friend_comment_prompt,
     friend_comments_prompt: config.prompts.friend_comments_prompt,
+    retrieval_judge_prompt: config.prompts.retrieval_judge_prompt,
     state_injection_template: config.prompts.state_injection_template,
     cold_start_template: config.prompts.cold_start_template,
     schedule_generation_prompt: config.prompts.schedule_generation_prompt,
@@ -147,6 +151,7 @@ export function getPrompts() {
     friend_moment_generation_prompt: getOverride("friend_moment_generation_prompt", config.prompts.friend_moment_generation_prompt),
     friend_comment_prompt: getOverride("friend_comment_prompt", config.prompts.friend_comment_prompt),
     friend_comments_prompt: getOverride("friend_comments_prompt", config.prompts.friend_comments_prompt),
+    retrieval_judge_prompt: getOverride("retrieval_judge_prompt", config.prompts.retrieval_judge_prompt),
   };
 }
 
@@ -161,6 +166,11 @@ export function getModelRouting() {
     foreground_chat_config: {
       model: getOverride("foreground_model", config.model_routing.foreground_chat_config.model),
       temperature: getOverride("foreground_temperature", config.model_routing.foreground_chat_config.temperature),
+    },
+    retrieval_judge_config: {
+      model: getOverride("retrieval_model", config.model_routing.retrieval_judge_config.model),
+      temperature: getOverride("retrieval_temperature", config.model_routing.retrieval_judge_config.temperature),
+      response_format: config.model_routing.retrieval_judge_config.response_format,
     },
   };
 }
@@ -197,7 +207,7 @@ export function getWeightDecay() {
  */
 export function getPlaceholders(): Required<DefaultPlaceholders> {
   const defaults: DefaultPlaceholders = {
-    nickname: "你",
+    nickname: "用户",
     location: "未知地方",
     occupation: "神秘职业",
     comm_preference: "喜欢温柔诚恳的沟通风格",

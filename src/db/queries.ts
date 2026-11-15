@@ -23,6 +23,7 @@ import type {
   PostPlanStatus,
   FriendPersona,
   DailyLog,
+  RetrievalLog,
 } from "@/types/schema";
 import dayjs from "dayjs";
 
@@ -57,6 +58,37 @@ export function getDefaultEventId(): number | null {
     "SELECT value FROM system_metadata WHERE key = 'default_event_id'"
   );
   return row ? parseInt(row.value, 10) : null;
+}
+
+// ============================================================
+// AI 检索判定记录（retrieval_logs）
+// ============================================================
+
+/** 判定记录上限：超出后滚动清理，只留最近这些条 */
+export const RETRIEVAL_LOG_LIMIT = 5000;
+
+/** 写一条判定记录（调用返回处唯一写入点），顺带做滚动清理 */
+export function insertRetrievalLog(log: Omit<RetrievalLog, "id">): void {
+  const db = getDB();
+  db.runSync(
+    `INSERT INTO retrieval_logs
+       (created_at, user_text, stage1_output, stage2_output, final_injected, fallback, event_count, expand_used, latency_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    log.created_at,
+    log.user_text,
+    log.stage1_output,
+    log.stage2_output,
+    log.final_injected,
+    log.fallback,
+    log.event_count,
+    log.expand_used,
+    log.latency_ms
+  );
+  // 空表时 MAX(id) - N 为 NULL，比较恒不成立，不会误删
+  db.runSync(
+    "DELETE FROM retrieval_logs WHERE id <= (SELECT MAX(id) - ? FROM retrieval_logs)",
+    RETRIEVAL_LOG_LIMIT
+  );
 }
 
 // ============================================================
@@ -869,6 +901,66 @@ export function getFragmentsByEventIds(eventIds: number[]): Map<number, MemoryFr
   return result;
 }
 
+/** 清单里展示的一条片段：只要短字段，不把 summary 拉进内存 */
+export interface FragmentEdge {
+  id: number;
+  timestamp: string;
+  /** gist；写入方漏填的老数据用 summary 前 24 字兜底 */
+  gist: string;
+}
+
+/**
+ * 每个事件最早 / 最近各一条片段（检索清单用）
+ *
+ * 清单每行只摆两条：编号用于「指认细节」，全量片段会稀释注意力。
+ * 用窗口函数在库里取边界，避免把所有片段读进 JS。
+ */
+export function getFragmentEdges(
+  eventIds: number[]
+): Map<number, { first: FragmentEdge | null; last: FragmentEdge | null }> {
+  const result = new Map<number, { first: FragmentEdge | null; last: FragmentEdge | null }>();
+  if (eventIds.length === 0) return result;
+  const db = getDB();
+  const placeholders = eventIds.map(() => "?").join(",");
+  const rows = db.getAllSync<{
+    id: number;
+    index: number;
+    timestamp: string;
+    gist: string;
+    rn_asc: number;
+    rn_desc: number;
+  }>(
+    `SELECT id, "index", timestamp, gist, rn_asc, rn_desc FROM (
+       SELECT id, "index", timestamp,
+         CASE WHEN gist <> '' THEN gist ELSE substr(summary, 1, 24) END AS gist,
+         ROW_NUMBER() OVER (PARTITION BY "index" ORDER BY timestamp ASC, id ASC) AS rn_asc,
+         ROW_NUMBER() OVER (PARTITION BY "index" ORDER BY timestamp DESC, id DESC) AS rn_desc
+       FROM memory_fragments WHERE "index" IN (${placeholders})
+     ) WHERE rn_asc = 1 OR rn_desc = 1`,
+    ...eventIds
+  );
+  for (const row of rows) {
+    const cur = result.get(row.index) ?? { first: null, last: null };
+    const edge: FragmentEdge = { id: row.id, timestamp: row.timestamp, gist: row.gist };
+    if (row.rn_asc === 1) cur.first = edge;
+    if (row.rn_desc === 1) cur.last = edge;
+    result.set(row.index, cur);
+  }
+  return result;
+}
+
+/** 该事件最近 N 条片段（第二段展开用，只要编号与印象） */
+export function getRecentFragments(eventId: number, limit: number = 8): FragmentEdge[] {
+  const db = getDB();
+  return db.getAllSync<FragmentEdge>(
+    `SELECT id, timestamp,
+       CASE WHEN gist <> '' THEN gist ELSE substr(summary, 1, 24) END AS gist
+     FROM memory_fragments WHERE "index" = ? ORDER BY timestamp DESC, id DESC LIMIT ?`,
+    eventId,
+    limit
+  );
+}
+
 /** 更新片段的可编辑参数（设置页）：检索词与优先级 */
 export function updateFragmentParams(fragmentId: number, keywords: string, priority: number): void {
   const db = getDB();
@@ -902,6 +994,7 @@ export function clearAllData(): void {
   db.runSync("DELETE FROM post_plan");
   db.runSync("DELETE FROM daily_log");
   db.runSync("DELETE FROM friend_personas");
+  db.runSync("DELETE FROM retrieval_logs");
 
   // 重新初始化默认事件"日常闲聊"
   const now = dayjs().toISOString();

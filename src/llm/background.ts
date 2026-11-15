@@ -17,8 +17,7 @@ import type {
 import { MOOD_TAGS } from "@/types/schema";
 import { getActiveConditions, getUpcomingEvents } from "@/db/queries";
 import type { ScheduleItem } from "@/db/queries";
-import { stripIdentityKeywords } from "@/memory/identity";
-import { ensureTimePlaceholder } from "@/utils/text";
+import { stripIdentityKeywords, normalizeMemoryText, restoreIdentityNames } from "@/memory/identity";
 import { applyIdentityPlaceholders } from "@/prompt/assembler";
 
 /**
@@ -36,7 +35,7 @@ function fillIdentity(text: string): string {
 function normalizeFragment(raw: NewFragment): NewFragment {
   // 事发时间写死具体日期（如「10月10日」）的记忆过几天就成了错误信息，
   // 一律换回 [time] 占位符（渲染时输出「昨天/前天」等相对时间）
-  const summary = ensureTimePlaceholder(raw.summary.trim());
+  const summary = normalizeMemoryText(raw.summary.trim());
   const priority = Number(raw.priority);
   // 未来才发生的事：发生时刻合法才保留，否则当普通记忆
   const rawHappensAt = typeof raw.happens_at === "string" ? raw.happens_at.trim() : "";
@@ -49,14 +48,14 @@ function normalizeFragment(raw: NewFragment): NewFragment {
   return {
     summary,
     // gist 缺失时从 summary 截一句，保证分层渲染始终有「一句话」可用
-    gist: ensureTimePlaceholder(raw.gist?.trim() || "") || summary.slice(0, 24),
+    gist: normalizeMemoryText(raw.gist?.trim() || "") || summary.slice(0, 24),
     // 身份词（用户昵称 / AI 名称）不入库当关键词：每条记忆都有名字，命中没有区分度
     keywords: stripIdentityKeywords(
       (raw.keywords ?? []).map((k) => String(k).trim()).filter(Boolean)
     ).slice(0, 8),
     priority: Number.isFinite(priority) && priority >= 1 && priority <= 9 ? priority : 5,
     target_event_index: Number(raw.target_event_index) || -1,
-    new_event_text: (raw.new_event_text ?? "").trim(),
+    new_event_text: restoreIdentityNames((raw.new_event_text ?? "").trim()),
     happens_at: happensAt?.isValid() ? happensAt.toISOString() : undefined,
     condition: condition || undefined,
     condition_ended: condition ? undefined : conditionEnded || undefined,
@@ -336,6 +335,11 @@ export async function generateSchedule(
   lastWeekActuals?: string,
 ): Promise<ScheduleGenerationResult | null> {
   const { schedule_generation_prompt } = getPrompts();
+  // 指令被清空时不出请求：调用方会用默认时间表与默认发帖计划兜底
+  if (!schedule_generation_prompt.trim()) {
+    logDebug("时间表", "时间表生成指令为空，跳过生成");
+    return null;
+  }
   const routing = getModelRouting();
   const config = routing.background_extraction_config;
 
@@ -355,8 +359,9 @@ export async function generateSchedule(
     lastWeekText = lines.join("\n") || "（无上周时间表）";
   }
 
-  const prompt = (schedule_generation_prompt || DEFAULT_SCHEDULE_PROMPT)
+  const prompt = schedule_generation_prompt
     .replace("{{persona}}", () => fillIdentity(systemPrompt))
+    // 上周实况原样保留 [user]/[ai]：模型照抄占位符，渲染层再换成当前称呼
     .replace("{{last_week}}", lastWeekText);
 
   const controller = new AbortController();
@@ -413,6 +418,9 @@ export async function generateSchedule(
         theme_hint: String(p.theme_hint).slice(0, 20),
       }));
 
+    if (items.length < 35) {
+      logDebug("时间表返回", `只有 ${items.length}/35 格，缺的时段没有兜底`);
+    }
     logDebug("时间表返回", `解析成功: 作息 ${items.length} 条，发帖计划 ${postPlan.length} 条`);
     return { schedule: items, post_plan: postPlan };
   } catch (err: unknown) {
@@ -426,30 +434,6 @@ export async function generateSchedule(
     return null;
   }
 }
-
-const DEFAULT_SCHEDULE_PROMPT = `请根据以下人设信息，生成一份本周的行为时间表。
-
-## 人设信息
-{{persona}}
-
-## 上周时间表（参考）
-{{last_week}}
-
-## 要求
-1. 根据人设推断合理的日常作息
-2. 工作日和周末要有区别
-3. 活动描述简洁（20字以内），生活化
-4. 可以有重复，但不要每天都完全一样
-5. 周末可以安排休闲、社交活动
-
-## 输出格式
-JSON 对象，包含 schedule 数组，每个元素：
-- day: 0-6（0=周一，6=周日）
-- slot: 0-4（0=早6-9点，1=上午9-12点，2=午12-15点，3=下午15-18点，4=晚18-23点）
-- activity: 活动描述（20字以内）
-
-输出示例：
-{"schedule": [{"day": 0, "slot": 0, "activity": "晨跑"}, ...]}`;
 
 // ============================================================
 // 心情动态：AI 发帖 / 评论文案生成
@@ -636,17 +620,17 @@ export async function generateDailyLife(
   if (!daily_life_generation_prompt) return null;
 
   // 模板正文里的「和[user]有关的事」也要换成昵称：整段再过滤一遍
-  const prompt = fillIdentity(
-    daily_life_generation_prompt
-      .replace("{{persona}}", () => fillIdentity(systemPrompt))
-      .replace("{{date}}", ctx.date)
-      .replace("{{day_context}}", ctx.dayContext)
-      .replace("{{weather}}", ctx.weather)
-      .replace("{{baseline}}", ctx.baseline)
-      .replace("{{yesterday}}", ctx.yesterday)
-      .replace("{{late_night}}", ctx.lateNight)
-      .replace("{{user_context}}", ctx.userContext)
-  );
+  // [user] / [ai] 保持占位符原样进请求：模型照着写，渲染时才换成当前称呼
+  // （名字写死进 activity 会在改称呼后对不上）
+  const prompt = daily_life_generation_prompt
+    .replace("{{persona}}", () => fillIdentity(systemPrompt))
+    .replace("{{date}}", ctx.date)
+    .replace("{{day_context}}", ctx.dayContext)
+    .replace("{{weather}}", ctx.weather)
+    .replace("{{baseline}}", ctx.baseline)
+    .replace("{{yesterday}}", ctx.yesterday)
+    .replace("{{late_night}}", ctx.lateNight)
+    .replace("{{user_context}}", ctx.userContext);
 
   const parsed = await requestBackgroundJson(prompt, timeoutMs, "每日实况", 0.8);
   if (!parsed) return null;

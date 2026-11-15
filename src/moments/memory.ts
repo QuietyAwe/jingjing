@@ -13,8 +13,7 @@
 
 import { getClient } from "@/llm/client";
 import { getModelRouting } from "@/prompt/config";
-import { stripIdentityKeywords } from "@/memory/identity";
-import { ensureTimePlaceholder } from "@/utils/text";
+import { stripIdentityKeywords, normalizeMemoryText } from "@/memory/identity";
 import { logDebug } from "@/store/chatStore";
 import {
   insertEpisode,
@@ -120,8 +119,8 @@ async function extractMomentMemory(
     const priority = Number(parsed.priority);
     return {
       // 事发时间写死具体日期的记忆过几天就错了，兜底换回 [time] 占位符
-      gist: ensureTimePlaceholder(parsed.gist?.trim() || "") || parsed.summary.slice(0, 24),
-      summary: ensureTimePlaceholder(parsed.summary),
+      gist: normalizeMemoryText(parsed.gist?.trim() || "") || parsed.summary.slice(0, 24),
+      summary: normalizeMemoryText(parsed.summary),
       keywords: stripIdentityKeywords(
         (parsed.keywords ?? []).map((k) => String(k).trim()).filter(Boolean)
       ).slice(0, 8),

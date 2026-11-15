@@ -13,7 +13,7 @@ import type { ChatMessage } from "@/types/schema";
 import dayjs from "dayjs";
 
 export interface DebugLog {
-  /** 单调递增，供调试弹窗记录哪条日志被展开（日志列表会滚动淘汰） */
+  /** 单调递增，供列表定位（日志会滚动淘汰，id 不复用） */
   id: number;
   time: string;
   tag: string;
@@ -213,8 +213,8 @@ export const useChatStore = create<ChatState>()(
           const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
           const id = ++debugLogSeq;
           const logs = [...state.debugLogs, { id, time, tag, text }];
-          // 保留最近 50 条
-          return { debugLogs: logs.slice(-50) };
+          // 保留最近 100 条：判定一轮要写好几条（请求 / 返回 / 用量 / 结果），50 条只够十来轮
+          return { debugLogs: logs.slice(-100) };
         }),
 
       clearDebugLogs: () => set({ debugLogs: [] }),

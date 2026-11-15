@@ -22,7 +22,7 @@ import dayjs from "dayjs";
 
 import ChatBubble, { StreamingBubble } from "@/components/ChatBubble";
 import { InputBar } from "@/components/InputBar";
-import { useChatStore, logDebug, formatUsage } from "@/store/chatStore";
+import { useChatStore, logDebug, formatUsage, type DebugLog } from "@/store/chatStore";
 import { genMsgId } from "@/utils/id";
 import { revealTotalMsForText } from "@/utils/text";
 import { useMetaStore } from "@/store/metaStore";
@@ -31,7 +31,7 @@ import { buildChatContext } from "@/memory/chatHandler";
 import { streamChat } from "@/llm/foreground";
 import { hasApiKey } from "@/llm/client";
 import { shouldConsolidate, runConsolidation } from "@/memory/consolidation";
-import { checkAndGenerateSchedule, getCurrentScene, formatScene } from "@/memory/scheduler";
+import { checkAndGenerateSchedule, getCurrentScene, formatSceneNote } from "@/memory/scheduler";
 import { ensureDailyLife } from "@/memory/dailyLife";
 import { checkAndGenerateFriends } from "@/friends/roster";
 import {
@@ -232,6 +232,8 @@ export default function ChatScreen() {
 
   const colors = useTheme();
   const insets = useSafeAreaInsets();
+  // 弹窗是独立窗口，个别机型取不到 inset：兜一个常见状态栏高度，别把按钮顶进状态栏
+  const topInset = Math.max(insets.top, 24);
   const router = useRouter();
 
   // 面向用户的 AI 称呼：未设置时用「对方」，绝不显示「AI」二字（情感陪伴场景，破 immersion）
@@ -307,8 +309,15 @@ export default function ChatScreen() {
   const [urlInput, setUrlInput] = useState("https://api.deepseek.com");
   const [nicknameInput, setNicknameInput] = useState("");
   const [showDebug, setShowDebug] = useState(false);
-  /** 调试日志里被展开看全文的条目 id */
-  const [expandedLogs, setExpandedLogs] = useState<Set<number>>(new Set());
+  /** 调试日志详情：覆盖层看全文，不改变列表滚动位置 */
+  const [logDetail, setLogDetail] = useState<DebugLog | null>(null);
+  const debugScrollRef = useRef<ScrollView>(null);
+  // 只在打开面板时定位到最后一条：之后来新日志不再抢滚动位置（想看就自己往上翻）
+  useEffect(() => {
+    if (!showDebug) return;
+    const timer = setTimeout(() => debugScrollRef.current?.scrollToEnd({ animated: false }), 100);
+    return () => clearTimeout(timer);
+  }, [showDebug]);
   const [dotsCount, setDotsCount] = useState(0);
   const flatListRef = useRef<FlatList>(null);
   // 回复完成后自动弹起输入框（设置「自动弹起输入框」可关）
@@ -884,7 +893,7 @@ export default function ChatScreen() {
     try {
       const history = getHistory();
       const lastUserMsg = [...history].reverse().find((m) => m.role === "user" && !m.is_state_note);
-      const context = buildChatContext(lastUserMsg?.content || "", history);
+      const context = await buildChatContext(lastUserMsg?.content || "", history);
       setDebugInfo(context.systemPrompt, context.keywords, context.memoryCount);
 
       let fullResponse = "";
@@ -1435,7 +1444,7 @@ export default function ChatScreen() {
     setStreamingGameId(targetGameId);
     let ok = false;
     try {
-      const context = buildChatContext("", getHistory(), { section, hint });
+      const context = await buildChatContext("", getHistory(), { section, hint });
       let full = "";
       await streamChat(context.messages, {
         onDelta: (delta) => {
@@ -1859,7 +1868,7 @@ export default function ChatScreen() {
 
       // 开场白在框内打字，别先在框外冒出来再跳进去
       setStreamingGameId(session.id);
-      const context = buildChatContext("", getHistory(), {
+      const context = await buildChatContext("", getHistory(), {
         section: buildGameSection(session),
         hint: buildGameStartHint(session),
       });
@@ -1954,7 +1963,11 @@ export default function ChatScreen() {
     if (!getUserInfo()) return;
     const scene = getCurrentScene();
     if (!scene) return;
-    const content = `[旁白] ${formatScene(scene)}`;
+    // 上一格的旁白如果还在当前上下文里，就不再重复写一遍
+    const history = getHistory();
+    const content = `[旁白] ${formatSceneNote(scene, undefined, (text) =>
+      history.some((m) => m.is_state_note && m.content.includes(text))
+    )}`;
     const { messages, addMessage } = useChatStore.getState();
     const last = [...messages].reverse().find((m) => m.is_state_note);
     if (last?.content === content) return;
@@ -2131,7 +2144,7 @@ export default function ChatScreen() {
       }
 
       const history = getHistory();
-      const context = buildChatContext(text, history, gameParts);
+      const context = await buildChatContext(text, history, gameParts);
       setDebugInfo(context.systemPrompt, context.keywords, context.memoryCount);
       // 打字过程就发生在目标框内（replyGameId 为空 = 框外普通消息）
       setStreamingGameId(replyGameId ?? null);
@@ -2987,11 +3000,15 @@ export default function ChatScreen() {
       </Modal>
 
       {/* 调试弹窗 */}
-      <Modal visible={showDebug} animationType="slide" onRequestClose={() => setShowDebug(false)}>
+      <Modal
+        visible={showDebug}
+        animationType="slide"
+        onRequestClose={() => { setShowDebug(false); setLogDetail(null); }}
+      >
         <View style={[styles.debugContainer, { backgroundColor: colors.bg }]}>
-          <View style={[styles.debugHeader, { backgroundColor: colors.sectionBg, borderBottomColor: colors.border }]}>
+          <View style={[styles.debugHeader, { backgroundColor: colors.sectionBg, borderBottomColor: colors.border, paddingTop: topInset + 16 }]}>
             <Text style={[styles.debugTitle, { color: colors.text }]}>🔧 开发者调试</Text>
-            <TouchableOpacity onPress={() => setShowDebug(false)}>
+            <TouchableOpacity hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }} onPress={() => { setShowDebug(false); setLogDetail(null); }}>
               <Text style={[styles.debugClose, { color: colors.accent }]}>关闭</Text>
             </TouchableOpacity>
           </View>
@@ -2999,13 +3016,10 @@ export default function ChatScreen() {
             <Text style={[styles.debugUsageText, { color: colors.textMuted }]}>{formatUsage(lastUsage)}</Text>
           </View>
 
-          <ScrollView
-            ref={(ref) => { if (ref && debugLogs.length > 0) setTimeout(() => ref.scrollToEnd({ animated: false }), 100); }}
-            style={styles.debugScroll}
-          >
+          <ScrollView ref={debugScrollRef} style={styles.debugScroll}>
             <View style={styles.debugLogHeader}>
               <Text style={[styles.debugLabel, { color: colors.textMuted }]}>运行日志</Text>
-              <TouchableOpacity onPress={clearDebugLogs}>
+              <TouchableOpacity onPress={() => { clearDebugLogs(); setLogDetail(null); }}>
                 <Text style={[styles.debugClearLog, { color: colors.accent }]}>清空</Text>
               </TouchableOpacity>
             </View>
@@ -3014,24 +3028,17 @@ export default function ChatScreen() {
             ) : (
               debugLogs.map((log) => {
                 const isLong = log.text.length > 500;
-                const expanded = expandedLogs.has(log.id);
-                const shown = isLong && !expanded ? log.text.slice(0, 500) : log.text;
                 return (
                   <View key={log.id} style={[styles.debugLogEntry, { backgroundColor: colors.sectionBg, borderColor: colors.border }]}>
                     <Text style={[styles.debugLogTime, { color: colors.textMuted }]}>{log.time}</Text>
                     <Text style={[styles.debugLogTag, { color: colors.accent }]}>{log.tag}</Text>
-                    <Text style={[styles.debugLogText, { color: colors.text }]} selectable>{shown}</Text>
+                    <Text style={[styles.debugLogText, { color: colors.text }]} selectable>
+                      {isLong ? `${log.text.slice(0, 500)}…` : log.text}
+                    </Text>
                     {isLong && (
-                      <TouchableOpacity onPress={() => {
-                        setExpandedLogs((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(log.id)) next.delete(log.id);
-                          else next.add(log.id);
-                          return next;
-                        });
-                      }}>
+                      <TouchableOpacity onPress={() => setLogDetail(log)}>
                         <Text style={[styles.debugExpandText, { color: colors.accent }]}>
-                          {expanded ? "收起 ▴" : `展开全文（共 ${log.text.length} 字） ▾`}
+                          {`查看全文（共 ${log.text.length} 字） ▸`}
                         </Text>
                       </TouchableOpacity>
                     )}
@@ -3040,6 +3047,25 @@ export default function ChatScreen() {
               })
             )}
           </ScrollView>
+
+          {/* 日志全文：覆盖层显示，列表位置与排版都不动 */}
+          {logDetail && (
+            <View style={[styles.logDetailOverlay, { paddingTop: topInset + 12, paddingBottom: insets.bottom + 12 }]}>
+              <View style={[styles.logDetailCard, { backgroundColor: colors.bg, borderColor: colors.border }]}>
+                <View style={[styles.logDetailHeader, { backgroundColor: colors.sectionBg, borderBottomColor: colors.border }]}>
+                  <Text style={[styles.debugLogTag, { color: colors.text }]}>
+                    {logDetail.time} · {logDetail.tag}（{logDetail.text.length} 字）
+                  </Text>
+                  <TouchableOpacity hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }} onPress={() => setLogDetail(null)}>
+                    <Text style={[styles.debugClose, { color: colors.accent }]}>关闭</Text>
+                  </TouchableOpacity>
+                </View>
+                <ScrollView style={styles.logDetailScroll} contentContainerStyle={styles.logDetailContent}>
+                  <Text selectable style={[styles.debugLogText, { color: colors.text }]}>{logDetail.text}</Text>
+                </ScrollView>
+              </View>
+            </View>
+          )}
         </View>
       </Modal>
     </KeyboardAvoidingView>
@@ -3317,7 +3343,7 @@ const styles = StyleSheet.create({
   debugContainer: { flex: 1 },
   debugHeader: {
     flexDirection: "row", justifyContent: "space-between", alignItems: "center",
-    paddingTop: 56, paddingBottom: 16, paddingHorizontal: 20,
+    paddingBottom: 16, paddingHorizontal: 20,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   debugTitle: { fontSize: 18, fontWeight: "700" },
@@ -3334,6 +3360,12 @@ const styles = StyleSheet.create({
   debugUsageBar: { paddingHorizontal: 20, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth },
   debugUsageText: { fontSize: 12 },
   debugExpandText: { fontSize: 12, fontWeight: "600", marginTop: 8 },
+  // 日志全文覆盖层：盖在列表上，不改动列表排版与滚动位置
+  logDetailOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.45)", padding: 16 },
+  logDetailCard: { flex: 1, borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, overflow: "hidden" },
+  logDetailHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth },
+  logDetailScroll: { flex: 1 },
+  logDetailContent: { padding: 16 },
   // 操作菜单
   overlay: { flex: 1, justifyContent: "flex-end" },
   actionSheet: { borderTopLeftRadius: 16, borderTopRightRadius: 16, paddingBottom: 34, paddingTop: 8 },

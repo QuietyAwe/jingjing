@@ -22,10 +22,12 @@ import {
 } from "@/db/queries";
 import { generateSchedule } from "@/llm/background";
 import { getPrompts } from "@/prompt/config";
+import { applyIdentityPlaceholders } from "@/prompt/assembler";
 import { logDebug } from "@/store/chatStore";
 import type { PostPlanDraft } from "@/types/schema";
 import { getWeekStart, getCurrentTimeSlot, getCurrentDayOfWeek } from "./week";
 import { getLiveDay, getLateNight, formatPastDaysForWeekly, dayKey } from "./dailyLife";
+import { restoreIdentityNames } from "./identity";
 
 /** 周/时段换算对外仍从本模块导出（调用方不必感知拆分） */
 export { getWeekStart, getCurrentTimeSlot, getCurrentDayOfWeek };
@@ -138,13 +140,15 @@ function planForRestOfWeek(
  * 用途：让 AI 在深夜/午休等场景下表现出符合自身作息的状态感
  */
 export interface AIScene {
-  /** 当前活动短语，例如「在窗边看书」「凌晨才睡着，还困着」 */
+  /** 当前活动的完整一句（`[ai]` 开头、提到用户写 `[user]`），如「[ai]在窗边看书」 */
   activity: string;
+  /** 上一个时段（同一段"今天"里紧挨着的那格）：留白或与当前相同为 null */
+  prev: { slot: number; activity: string } | null;
   /** 今天已完成的事（只作为“记得今天做过什么”的素材，不再复述成流水账） */
   done: string[];
   /** 今天整体心情（来自当日实况） */
   mood: string;
-  /** 今日主线，如「面试的一天」 */
+  /** 今日主线，如「赶稿的一天」 */
   highlight: string;
   /** 伪天气（当天稳定） */
   weather: string;
@@ -163,6 +167,7 @@ export function getCurrentScene(now: dayjs.Dayjs = dayjs()): AIScene | null {
   if (timeSlot === -1) {
     return {
       activity: getLateNight(today),
+      prev: null,
       done: [],
       mood: live?.mood ?? "",
       highlight: live?.highlight ?? "",
@@ -182,8 +187,21 @@ export function getCurrentScene(now: dayjs.Dayjs = dayjs()): AIScene | null {
     ? live.slots.slice(0, timeSlot).filter(Boolean)
     : getEndedActivities(dayOfWeek, timeSlot, weekStart);
 
+  // 只取紧挨着的那一格：留白就真的不给，不往回找（避免时段与内容错位）
+  let prev: AIScene["prev"] = null;
+  if (timeSlot > 0) {
+    const prevSlot = timeSlot - 1;
+    const prevActivity = live
+      ? live.slots[prevSlot]?.trim()
+      : getCurrentActivity(dayOfWeek, prevSlot, weekStart);
+    if (prevActivity && prevActivity !== activity) {
+      prev = { slot: prevSlot, activity: prevActivity };
+    }
+  }
+
   return {
     activity,
+    prev,
     done,
     mood: live?.mood ?? "",
     highlight: live?.highlight ?? "",
@@ -202,25 +220,80 @@ function timeOfDay(hour: number): string {
   return "晚上";
 }
 
+/** 模型偶尔会把时段写进正文：时段由代码按当前时刻给，重复了就成「晚上，晚上…」 */
+const LEAD_TIME = /^(?:深夜|清晨|上午|中午|下午|晚上)\s*[，,]\s*/;
+
+/** 正文入口：把模型写死的真名换回占位符，并去掉重复的时段前缀 */
+function sceneText(activity: string): string {
+  return restoreIdentityNames(activity).replace(LEAD_TIME, "").trim();
+}
+
+/** 各时段的自然说法（下标与 AIScene.prev.slot 一致） */
+const SLOT_TIME_WORDS = ["清晨", "上午", "中午", "下午", "晚上"];
+
+/** 正文：去重复时段/主语，末尾句号交给调用方；违规的「你」按用户处理 */
+function sceneBody(activity: string): string {
+  return sceneText(activity)
+    .replace(/^(?:我|你)\s*[，,]?\s*/, "")
+    .replace(/你/g, "[user]")
+    .replace(/[。.]+$/, "");
+}
+
+/** 去掉开头主语（[ai]/我/你），用于和历史里已有的旁白比对 */
+function stripSceneSubject(body: string): string {
+  return body.replace(/^(?:\[ai\]|我|你)\s*[，,]?\s*/i, "");
+}
+
 /**
- * 把 AI 当前情境拼成一句当下处境，供状态注记与发帖取景。
+ * 把 AI 当前情境拼成一句当下处境，供发动态与生成好友取景（第二人称）。
  *
- * 刻意只给一句：真人不复述自己一天的流水账（「今天已经晨跑、看书」），
- * done 列表留作 remark 素材——AI 需要时能提，但不主动报备。
+ * 这两处提示词都是对着 AI 说「你」，所以正文里的 `[ai]`（不论在开头还是句中）
+ * 全部换成「你」，不带上一个时段。
  */
 export function formatScene(scene: AIScene, now: dayjs.Dayjs = dayjs()): string {
-  return `${timeOfDay(now.hour())}，你${scene.activity}`;
+  const body = sceneBody(scene.activity).replace(/\[ai\]/gi, "你");
+  return applyIdentityPlaceholders(`${timeOfDay(now.hour())}，${body}`);
+}
+
+/**
+ * 聊天历史里的旁白：第三人称，「上一个时段。刚刚，此刻」。
+ *
+ * 例：「下午，静静在常去的咖啡馆改稿。刚刚，静静在窗边看书。」
+ * - 主语由 activity 自带（`[ai]`），代码不补；开头的「我/你」是写错的主语，去掉
+ * - 上一格留白、与当前相同、或已经存在当前上下文里（`isPrevSeen` 命中）时不重复写
+ * - 句中残留的「你」只可能指用户，按用户渲染
+ */
+export function formatSceneNote(
+  scene: AIScene,
+  now: dayjs.Dayjs = dayjs(),
+  isPrevSeen?: (text: string) => boolean
+): string {
+  const current = sceneBody(scene.activity);
+  const prev = scene.prev ? sceneBody(scene.prev.activity) : "";
+  // 用于比对"上一格是不是已经在提示词里"：去掉主语，渲染成模型实际看到的说法
+  const prevText = prev ? applyIdentityPlaceholders(stripSceneSubject(prev)) : "";
+  const showPrev =
+    prev.length > 0 &&
+    prev !== current &&
+    prevText.length > 0 &&
+    !isPrevSeen?.(prevText);
+
+  if (!showPrev || !scene.prev) {
+    return applyIdentityPlaceholders(`${timeOfDay(now.hour())}，${current}。`);
+  }
+  const prevWord = SLOT_TIME_WORDS[scene.prev.slot] ?? "刚才";
+  return applyIdentityPlaceholders(`${prevWord}，${prev}。刚刚，${current}。`);
 }
 
 /** 默认时间表（LLM 生成失败时的兜底） */
 function getDefaultSchedule(): ScheduleItem[] {
   const defaults = [
-    "睡觉",        // 早 0-6
-    "起床洗漱",    // 早 6-9
-    "工作/学习",   // 上午 9-12
-    "午休",        // 午 12-15
-    "工作/学习",   // 下午 15-18
-    "休息放松",    // 晚 18-23
+    "睡觉",            // 早 0-6
+    "[ai]起床洗漱",    // 早 6-9
+    "[ai]工作/学习",   // 上午 9-12
+    "[ai]午休",        // 午 12-15
+    "[ai]工作/学习",   // 下午 15-18
+    "[ai]休息放松",    // 晚 18-23
   ];
 
   const items: ScheduleItem[] = [];

@@ -13,6 +13,7 @@
 
 import { getUserInfo } from "@/db/queries";
 import { useSettingsStore } from "@/store/settingsStore";
+import { ensureTimePlaceholder } from "@/utils/text";
 
 /** 参与过滤的身份名：用户昵称 + AI 名称（长度 ≥2 才有 bigram，才需要过滤） */
 export function identityNames(): string[] {
@@ -57,4 +58,28 @@ export function isBlockedGram(gram: string, words: string[]): boolean {
 export function stripIdentityKeywords(keywords: string[]): string[] {
   const names = identityNames();
   return keywords.filter((k) => !isBlockedGram(k, names));
+}
+
+/**
+ * 写入侧：把正文里的真实称呼换回 `[user]` / `[ai]` 占位符
+ *
+ * 模型偶尔直接写「静静」「哥哥」而不是占位符。名字写死进正文，后果是改名后记忆里的
+ * 说法不跟着变，而且判定清单整份换一次字样、前缀缓存全废。只换长度 ≥2 的名字。
+ */
+export function restoreIdentityNames(text: string): string {
+  if (!text) return text;
+  const info = getUserInfo();
+  const nickname =
+    info?.basic_identity?.nickname?.trim() ||
+    useSettingsStore.getState().user_nickname.trim();
+  const aiName = useSettingsStore.getState().ai_name.trim() || "私藏";
+  let out = text;
+  if (aiName.length >= 2) out = out.split(aiName).join("[ai]");
+  if (nickname.length >= 2 && nickname !== aiName) out = out.split(nickname).join("[user]");
+  return out;
+}
+
+/** 写入侧统一入口：先补 `[time]`，再把真实称呼换回占位符 */
+export function normalizeMemoryText(text: string): string {
+  return restoreIdentityNames(ensureTimePlaceholder(text));
 }

@@ -57,6 +57,8 @@ const SLOT_HOURS: Array<[number, number]> = [
 
 /** 计划行 → 本时段内的随机触发时刻（首次见到时掷骰，之后稳定） */
 const fireAtMap = new Map<number, number>();
+/** 好友「想了想又没发」的概率：比 AI 更随性，做成固定值（不值得为它开一个设置项） */
+const FRIEND_POST_SKIP_PROBABILITY = 0.15;
 /** 发帖中（in-flight，防轮询重入） */
 let posting = false;
 let friendPosting = false;
@@ -131,9 +133,13 @@ export async function checkAndPostDueMoments(): Promise<void> {
         continue;
       }
       // 临场放弃：想发又没发
-      if (Math.random() < getThresholds().moment_post_skip_probability) {
+      const skipProbability = getThresholds().moment_post_skip_probability;
+      if (Math.random() < skipProbability) {
         updatePostPlanStatus(plan.id, "skipped");
-        logDebug("动态", `发帖计划 #${plan.id} 临场放弃（想了想又没发）`);
+        logDebug(
+          "动态",
+          `发帖计划 #${plan.id} 临场放弃：掷到 ${Math.round(skipProbability * 100)}% 的「想了想又没发」，不是失败`
+        );
         continue;
       }
       fireAt = now + Math.random() * remaining;
@@ -315,12 +321,16 @@ export async function checkAndPostFriendMoments(): Promise<void> {
       const remaining = slotRemainingMs(slot);
       if (remaining <= 0) {
         updatePostPlanStatus(plan.id, "skipped");
+        logDebug("动态", `好友发帖计划 #${plan.id} 错过时段，跳过`);
         continue;
       }
-      // 好友也会「想了想又没发」，但比 AI 更随性一点
-      if (Math.random() < 0.15) {
+      // 好友也会「想了想又没发」，比 AI 更随性一点
+      if (Math.random() < FRIEND_POST_SKIP_PROBABILITY) {
         updatePostPlanStatus(plan.id, "skipped");
-        logDebug("动态", `好友发帖计划 #${plan.id} 临场放弃`);
+        logDebug(
+          "动态",
+          `好友发帖计划 #${plan.id} 临场放弃：掷到 ${Math.round(FRIEND_POST_SKIP_PROBABILITY * 100)}% 的「想了想又没发」，不是失败`
+        );
         continue;
       }
       fireAt = now + Math.random() * remaining;

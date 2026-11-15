@@ -125,7 +125,7 @@ function summarize(session: GameSession, status: "won" | "lost"): string {
 /**
  * 把对局写入长期记忆（episode 类型）
  * 由后台模型从整局流水里提取：既包含谜底与胜负，也包含过程中闲聊透露的内容。
- * 按天衰减 + 权重下限，很久以后仍可能被灵光一闪唤起。
+ * 保留时长由优先级决定：7 级以上有 15 分下限，很久以后仍可能被灵光一闪唤起。
  */
 async function writeGameMemory(
   session: GameSession,

@@ -1,74 +1,60 @@
 // ============================================================
 // P3-2: 分层衰减计算器
 //
-// 模拟真实记忆的两类遗忘速度：
-// - daily（日常琐事）：按小时衰减，几天内淡忘
-// - episode（共同经历：游戏、深度对话）与 condition（持续处境）：按天衰减且有下限，
-//   数月乃至数年后仍能停留在"可被偶然想起"的权重区间
+// 遗忘速度只看优先级，记忆类型不参与；所有档位都随基准 ebbinghaus_decay_rate 等比缩放：
+// - 6 级在基准 0.02 下跌到遗忘线（15 分）需要 20 天
+// - 每差一级，速度快/慢 1.88 倍（3 级约 3 天、9 级约 133 天）
+// - 7 级及以上保留 15 分下限，永不彻底遗忘
 // ============================================================
 
 import dayjs from "dayjs";
 import { getWeightDecay } from "@/prompt/config";
-import type { MemoryKind } from "@/types/schema";
 
-/**
- * 日常记忆衰减的基准系数（**按小时**）。
- *
- * 取 0.02/小时：priority 5 的片段约 1 天跌到 DETAIL_VISIBLE_WEIGHT（60）以下
- * 开始只剩一句话、约 1.9 天跌到冷记忆线（40），
- * 与真人「昨天聊过的事今天还记得清清楚楚」一致。此前取 0.06/小时，
- * 15 小时就只剩一句话，记忆几乎立刻变淡，体感就是「什么都记不住」。
- */
-const DEFAULT_BASE_RATE = 0.02;
+/** 配置里 ebbinghaus_decay_rate 的默认值；它翻倍，所有档位的衰减速度都翻倍 */
+const REFERENCE_BASE_RATE = 0.02;
 
-/** episode 记忆：每天衰减系数（约 0.06/天，一个月后权重落到下限附近） */
-const EPISODE_DECAY_PER_DAY = 0.06;
-/** episode 记忆的权重下限：永远不会被彻底遗忘，仍可被灵光一闪唤起 */
-const EPISODE_MIN_WEIGHT = 15;
+/** 重要记忆的权重下限：永远不会被彻底遗忘，仍可被灵光一闪唤起 */
+const IMPORTANT_MIN_WEIGHT = 15;
+/** 达到这个优先级才享受 15 分下限 */
+const IMPORTANT_MIN_PRIORITY = 7;
 
-/**
- * 根据优先级计算日常记忆的衰减系数
- * priority 1（琐事）→ 衰减快
- * priority 9（重大）→ 衰减慢
- * 基准系数由配置 ebbinghaus_decay_rate 控制（默认 0.06）
- */
-function getDecayRate(priority: number): number {
-  const baseRate = getWeightDecay().ebbinghaus_decay_rate || DEFAULT_BASE_RATE;
-  // 以 baseRate 为中位数（priority 5），线性映射到 priority 1-9
-  // priority 1 → baseRate * 2, priority 5 → baseRate, priority 9 → baseRate * 0.5
-  const clamped = Math.max(1, Math.min(9, priority));
-  const factor = 2 - (clamped - 1) * (1.5 / 8);
-  return baseRate * factor;
+/** 权重从满分跌到遗忘线所需的衰减量 */
+const DECAY_TO_FORGET = Math.log(100 / IMPORTANT_MIN_WEIGHT);
+
+/** 锚点：6 级在参考基准下跌到遗忘线的天数 */
+const ANCHOR_DAYS = 20;
+/** 锚点对应的优先级 */
+const ANCHOR_PRIORITY = 6;
+/** 每差一级，衰减速度相差的倍数（由「3 级约 3 天、6 级约 20 天」倒推） */
+const PRIORITY_STEP = 1.88;
+
+/** 某优先级下一小时的衰减系数：天数越小衰减越快，基准放大时整体加快 */
+function decayRatePerHour(priority: number): number {
+  const base = getWeightDecay().ebbinghaus_decay_rate || REFERENCE_BASE_RATE;
+  const days =
+    ANCHOR_DAYS *
+    Math.pow(PRIORITY_STEP, priority - ANCHOR_PRIORITY) *
+    (REFERENCE_BASE_RATE / base);
+  return DECAY_TO_FORGET / days / 24;
 }
 
 /**
  * 计算当前权重（惰性求值，读取时计算）
  * @param lastWeight 最后一次访问时的权重
  * @param lastAccessed ISO8601 时间戳
- * @param priority 重要性权重 1-9（默认 5）
- * @param kind 记忆类型（默认 daily）
+ * @param priority 重要性 1-9（默认 5）
  */
 export function calculateWeight(
   lastWeight: number,
   lastAccessed: string,
-  priority: number = 5,
-  kind: MemoryKind = "daily"
+  priority: number = 5
 ): number {
-  const now = dayjs();
-
-  if (kind === "episode" || kind === "condition") {
-    // 共同经历与持续处境：以「天」为单位衰减，并保留下限——
-    // 「在考研」「在还房贷」这类处境不该因为几天没被提起就掉进冷池
-    const daysDiff = now.diff(dayjs(lastAccessed), "day", true);
-    const decayed = lastWeight * Math.exp(-EPISODE_DECAY_PER_DAY * daysDiff);
-    return Math.max(EPISODE_MIN_WEIGHT, Math.min(100, Math.floor(decayed)));
-  }
-
-  // 日常记忆：以「小时」为单位衰减
-  const hoursDiff = now.diff(dayjs(lastAccessed), "hour", true);
-  const decayRate = getDecayRate(priority);
-  const decayed = lastWeight * Math.exp(-decayRate * hoursDiff);
-  return Math.max(1, Math.floor(decayed));
+  const p = Math.max(1, Math.min(9, priority));
+  const hoursDiff = dayjs().diff(dayjs(lastAccessed), "hour", true);
+  const decayed = lastWeight * Math.exp(-decayRatePerHour(p) * hoursDiff);
+  // 7 级以上永不彻底遗忘；其余可以一路跌到 1
+  const floor = p >= IMPORTANT_MIN_PRIORITY ? IMPORTANT_MIN_WEIGHT : 1;
+  return Math.max(floor, Math.min(100, Math.floor(decayed)));
 }
 
 /**
@@ -80,27 +66,19 @@ export function calculateWeights<
     active_weight: number;
     last_accessed: string;
     priority: number;
-    memory_kind?: MemoryKind;
   }
 >(events: T[]): (T & { live_weight: number })[] {
   return events.map((e) => ({
     ...e,
-    live_weight: calculateWeight(
-      e.active_weight,
-      e.last_accessed,
-      e.priority,
-      e.memory_kind ?? "daily"
-    ),
+    live_weight: calculateWeight(e.active_weight, e.last_accessed, e.priority),
   }));
 }
 
 /**
- * 细节可见阈值（详细/简略切换的默认值，可在设置「记忆流转阈值」覆盖）：
- * 权重低于此值时只注入一句话 gist，细节已模糊。
+ * 细节可见阈值（默认值，可在设置「记忆流转阈值」覆盖）：权重低于此值时只注入一句话 gist。
  *
- * 取 60：priority 5 约 1 天跌到该线以下开始「只剩一句话」，
- * 记忆区不再全是大段 summary；此前取 40 时约 1.9 天才降级，
- * 几乎所有记忆都停留在完整详情档。
+ * 只在兜底路径（AI 检索判定不可用）参与详略；主路径按判定档位与指认的片段决定。
+ * 取 60：priority 6 约 5.4 天跌到该线以下开始「只剩一句话」。
  */
 export const DETAIL_VISIBLE_WEIGHT = 60;
 

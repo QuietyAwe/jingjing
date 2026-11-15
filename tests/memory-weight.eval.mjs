@@ -6,7 +6,7 @@
 // 分词/门槛/打分取自真实源码；衰减公式按 src/memory/decay.ts 复刻（项目模块带 @/ 别名，Node 里加载不了）。
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { DOCS_DIR, loadDecayBaseRate, loadRetrievalCore, loadWeightLines } from "./lib/harness.mjs";
+import { DOCS_DIR, loadDecaySpec, loadRetrievalCore, loadWeightLines } from "./lib/harness.mjs";
 import { ALL_FIELDS, SCORED_FIELDS, buildPool, createRetriever } from "./lib/retrieval-sim.mjs";
 import { RETRIEVABLE } from "./cases/memories.mjs";
 import {
@@ -57,9 +57,18 @@ const retrievers = Object.fromEntries(
 // ── 时间线 ──
 const T = TIMELINE.map(([t, role, q, intent]) => ({ t, role, q, intent }));
 
-// ── 衰减（复刻 decay.ts：priority 5 的系数 = 2 - (5-1)*(1.5/8)） ──
-const RATE = loadDecayBaseRate() * (2 - (5 - 1) * (1.5 / 8));
-const decay = (w, hours) => Math.max(1, Math.floor(w * Math.exp(-RATE * hours)));
+// ── 衰减（复刻 decay.ts：6 级 20 天到遗忘线为锚，每级差 1.88 倍，全档随基准缩放）──
+const SPEC = loadDecaySpec();
+const decay = (w, hours, priority = 5) => {
+  const p = Math.max(1, Math.min(9, priority));
+  const days =
+    SPEC.anchorDays *
+    Math.pow(SPEC.priorityStep, p - SPEC.anchorPriority) *
+    (SPEC.referenceBaseRate / SPEC.baseRate);
+  const rate = Math.log(100 / SPEC.importantMinWeight) / days / 24;
+  const floor = p >= SPEC.importantMinPriority ? SPEC.importantMinWeight : 1;
+  return Math.max(floor, Math.min(100, Math.floor(w * Math.exp(-rate * hours))));
+};
 
 // ── 策略：同一套「命中即 100」的强化规则，只换检索判据 ──
 const POLICIES = [
@@ -241,7 +250,7 @@ th{background:#f4f1ec;text-align:left;padding:9px 10px;font-weight:600;color:#55
 code{background:#f1eee9;padding:1px 5px;border-radius:4px;font-size:12px}ul{margin:8px 0 0;padding-left:20px}li{margin:5px 0}
 </style></head><body><div class="wrap">
 <h1>记忆强化时序评估</h1>
-<div class="meta">jingjing · ${WINDOW_HOURS / 24} 天 / ${T.length} 轮 / ${POOL.length} 条记忆 / ${WINDOW_HOURS} 小时窗口 · 检索取自真实源码，衰减按 <code>decay.ts</code> 复刻（基准 ${RATE.toFixed(4)}/小时）· 生成于 ${new Date().toLocaleString("zh-CN")}</div>
+<div class="meta">jingjing · ${WINDOW_HOURS / 24} 天 / ${T.length} 轮 / ${POOL.length} 条记忆 / ${WINDOW_HOURS} 小时窗口 · 检索取自真实源码，衰减按 <code>decay.ts</code> 复刻（${SPEC.anchorPriority} 级 ${SPEC.anchorDays} 天到遗忘线，每级差 ${SPEC.priorityStep} 倍，基准 ${SPEC.baseRate}；7 级以上有 ${SPEC.importantMinWeight} 分下限）· 生成于 ${new Date().toLocaleString("zh-CN")}</div>
 
 <h2>用例设计</h2>
 <div class="box">模拟一段真实陪伴（${WINDOW_HOURS / 24} 天 ${T.length} 轮）：每天打招呼、闲聊、道别，中间穿插真正提起往事。剧情里特意安排了两件真实会发生的事——<b>D4-D5 连续两天完全没联系</b>（忙碌期，记忆最容易变淡），<b>D8 一晚上说了 11 句</b>（话多的一天，误命中最容易堆积）。记忆按被提起的方式分四组：
@@ -278,8 +287,8 @@ ${conclusion}
 
 <h2>评估边界</h2>
 <div class="box"><ul>
-<li>检索用真实 <code>tokenize.ts</code> + 停用词表 + 屏蔽词判定 + <code>rankByOverlap</code>；SQL 粗召回用等价字符串包含模拟。衰减按 <code>decay.ts</code> 的 daily / priority 5 公式复刻（项目模块带 <code>@/</code> 别名，Node 里加载不了）。</li>
-<li>未纳入 episode 类型（按天衰减、下限 15）、权重优先级 1~9 差异、灵光一闪概率通道、Prompt 拼装细节。</li>
+<li>检索用真实 <code>tokenize.ts</code> + 停用词表 + 屏蔽词判定 + <code>rankByOverlap</code>；SQL 粗召回用等价字符串包含模拟。衰减按 <code>decay.ts</code> 的优先级分档公式复刻（项目模块带 <code>@/</code> 别名，Node 里加载不了）。</li>
+<li>评估里的记忆没有单独标优先级，一律按 5 级计算（约 10.6 天跌到遗忘线）；未纳入 7 级以上的下限行为、灵光一闪概率通道、Prompt 拼装细节。</li>
 <li>复跑：<code>node tests/memory-weight.eval.mjs</code>，会重新生成本报告。</li>
 </ul></div>
 </div></body></html>`;

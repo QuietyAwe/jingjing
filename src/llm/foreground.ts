@@ -4,6 +4,7 @@
 // ============================================================
 
 import { getClient } from "./client";
+import { pickUsage, type RawUsage } from "./usage";
 import { getModelRouting } from "@/prompt/config";
 import { logDebug, formatUsage, useChatStore } from "@/store/chatStore";
 import type { LlmUsage } from "@/store/chatStore";
@@ -13,23 +14,6 @@ import EventSource from "react-native-sse";
 /** 格式化消息列表用于日志显示（不截断） */
 function formatMessagesForLog(msgs: { role: string; content: string }[]): string {
   return msgs.map((m, i) => `[${i}] ${m.role.toUpperCase()}\n${m.content}`).join("\n\n");
-}
-
-/** 响应里的 usage 字段（DeepSeek / OpenAI 兼容端点字段名不一，两处都认） */
-type RawUsage = {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  prompt_cache_hit_tokens?: number;
-  prompt_tokens_details?: { cached_tokens?: number };
-};
-
-function pickUsage(raw: RawUsage | undefined): LlmUsage | null {
-  if (!raw?.prompt_tokens) return null;
-  return {
-    promptTokens: raw.prompt_tokens,
-    cachedTokens: raw.prompt_cache_hit_tokens ?? raw.prompt_tokens_details?.cached_tokens ?? 0,
-    completionTokens: raw.completion_tokens ?? 0,
-  };
 }
 
 /** 记下用量并打日志：命中率是前缀是否稳定的唯一证据 */

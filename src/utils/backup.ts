@@ -28,6 +28,8 @@ interface BackupData {
     friend_personas: any[];
     daily_log: any[];
     memory_event_aliases: any[];
+    /** AI 检索判定记录（复盘用，缺字段的老备份按空数组处理） */
+    retrieval_logs: any[];
   };
 }
 
@@ -56,6 +58,7 @@ export async function exportBackup(): Promise<{ success: boolean; message: strin
     const friend_personas = db.getAllSync("SELECT * FROM friend_personas");
     const daily_log = db.getAllSync("SELECT * FROM daily_log");
     const memory_event_aliases = db.getAllSync("SELECT * FROM memory_event_aliases");
+    const retrieval_logs = db.getAllSync("SELECT * FROM retrieval_logs");
 
     const backup: BackupData = {
       version: BACKUP_VERSION,
@@ -74,6 +77,7 @@ export async function exportBackup(): Promise<{ success: boolean; message: strin
         friend_personas,
         daily_log,
         memory_event_aliases,
+        retrieval_logs,
       },
     };
 
@@ -153,6 +157,8 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
     db.execSync("DELETE FROM daily_log");
     // 别名指向 memory_events.id：不先清会让旧别名挂到恢复后被复用 id 的另一条事件上
     db.execSync("DELETE FROM memory_event_aliases");
+    // 判定记录跟着备份走，不先清会混着上一台设备的旧记录
+    db.execSync("DELETE FROM retrieval_logs");
 
     // 恢复 memory_events（memory_kind / event_status / closed_at 必须一并恢复，
     // 否则共同经历会退化成日常琐事、处境会变回普通记忆）
@@ -185,6 +191,25 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
       db.runSync(
         "INSERT OR IGNORE INTO memory_event_aliases (event_id, alias) VALUES (?, ?)",
         row.event_id, row.alias
+      );
+    }
+
+    // 恢复检索判定记录（老备份里没有这一项，按空数组处理）
+    for (const row of backup.sqlite.retrieval_logs ?? []) {
+      db.runSync(
+        `INSERT INTO retrieval_logs
+           (id, created_at, user_text, stage1_output, stage2_output, final_injected, fallback, event_count, expand_used, latency_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        row.id,
+        row.created_at,
+        row.user_text,
+        row.stage1_output ?? null,
+        row.stage2_output ?? null,
+        row.final_injected ?? "",
+        row.fallback ?? 0,
+        row.event_count ?? 0,
+        row.expand_used ?? 0,
+        row.latency_ms ?? 0
       );
     }
 

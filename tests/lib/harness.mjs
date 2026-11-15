@@ -96,6 +96,25 @@ export function loadDecayBaseRate() {
   return base;
 }
 
+/** 衰减分档参数（读 decay.ts，机制改了评估自动跟着变） */
+export function loadDecaySpec() {
+  const src = readSource("src/memory/decay.ts");
+  const read = (name) => {
+    const m = src.match(new RegExp(`const ${name} = ([\\d.]+);`));
+    if (!m) throw new Error(`无法从 src/memory/decay.ts 解析 ${name}`);
+    return Number(m[1]);
+  };
+  return {
+    baseRate: loadDecayBaseRate(),
+    referenceBaseRate: read("REFERENCE_BASE_RATE"),
+    anchorDays: read("ANCHOR_DAYS"),
+    anchorPriority: read("ANCHOR_PRIORITY"),
+    priorityStep: read("PRIORITY_STEP"),
+    importantMinWeight: read("IMPORTANT_MIN_WEIGHT"),
+    importantMinPriority: read("IMPORTANT_MIN_PRIORITY"),
+  };
+}
+
 /**
  * 校验人工标注集：标注里写了库里不存在的记忆名，多半是改名后忘了同步，直接报错而不是静默漏召回
  * @param cases [{ q, expect }]
