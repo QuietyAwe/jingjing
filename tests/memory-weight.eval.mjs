@@ -8,7 +8,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DOCS_DIR, loadDecayBaseRate, loadRetrievalCore, loadWeightLines } from "./lib/harness.mjs";
 import { ALL_FIELDS, SCORED_FIELDS, buildPool, createRetriever } from "./lib/retrieval-sim.mjs";
-import { MEMORIES, RETRIEVABLE } from "./cases/memories.mjs";
+import { RETRIEVABLE } from "./cases/memories.mjs";
 import {
   GROUP_OF,
   KEEP_MIN_FINAL,
@@ -22,19 +22,15 @@ const OUT = path.join(DOCS_DIR, "memory-weight-eval.html");
 const real = await loadRetrievalCore();
 const LINES = loadWeightLines();
 
-// ── 记忆库：全部可检索记忆都参演，id 按 ORDER 的顺序（同分时按池子顺序） ──
-const missing = RETRIEVABLE.filter((m) => !ORDER.includes(m.name)).map((m) => m.name);
-if (missing.length) {
-  throw new Error(`weight.cases.mjs 的 ORDER 漏了：${missing.join("、")}（新加记忆必须登记，否则会被悄悄排除在检索池外）`);
-}
+// ── 记忆库：ORDER 里的 11 条是剧情「参演记忆」，其余可检索记忆作背景进池子参与竞争 ──
 const CHOSEN = ORDER.map((name) => {
-  const m = MEMORIES.find((x) => x.name === name);
+  const m = RETRIEVABLE.find((x) => x.name === name);
   if (!m) throw new Error(`weight.cases.mjs 的 ORDER 里写了不存在的记忆「${name}」`);
-  if (m.kind) throw new Error(`「${name}」是未来事件/兜底事件，不进检索池，不该出现在 ORDER 里`);
   if (!GROUP_OF[name]) throw new Error(`weight.cases.mjs 的 GROUP_OF 缺少「${name}」的分组`);
   return { ...m, group: GROUP_OF[name] };
 });
-const POOL = buildPool(CHOSEN);
+const BACKDROP = RETRIEVABLE.filter((m) => !ORDER.includes(m.name));
+const POOL = buildPool([...CHOSEN, ...BACKDROP.map((m) => ({ ...m, group: "backdrop" }))]);
 
 // 标注里写了不在记忆库里的名字 = 改名后忘了同步，直接报错而不是静默漏评
 for (const [, , q, intent] of TIMELINE) {
@@ -47,8 +43,8 @@ for (const [, , q, intent] of TIMELINE) {
 
 // ── 三套检索判据 ──
 const RETRIEVE = {
-  // 当前实现：真实 minHitScore / rankByOverlap（印象+标签打分，长句命中 1 个就算）
-  current: { fields: SCORED_FIELDS, useRealRank: true },
+  // 当前实现：拆段 + IDF 加权 + 50% 截断（印象+标签打分，长句命中 1 个就算）
+  current: { fields: SCORED_FIELDS, idf: true, relCut: 0.5, clauses: true },
   // 上一版：两段式、全字段打分、长句要求 2 个关键词、与最高分差一半以上截断
   previous: { fields: ALL_FIELDS, minFn: (kw) => (kw.length <= 2 ? kw.length : 2), ratio: 0.5, staged: true },
   // 更早：两段式、全字段、命中即算
@@ -255,7 +251,7 @@ code{background:#f1eee9;padding:1px 5px;border-radius:4px;font-size:12px}ul{marg
 <li><b style="color:#4a6fa5">stopped</b> ${namesOf("stopped")} —— 提过一两次就不再提，应该自然淡忘</li>
 <li><b style="color:#7a746c">never</b> 从头到尾没真提过的 ${idsOf("never").length} 条（${namesOf("never")}）—— 一旦被闲聊误撞并长期占位，就是「莫名单曲循环」</li>
 </ul>
-库里只有「人真的会记住的事」：寒暄、问候、道别不是记忆事件，所以「晚安」「早上好」在剧情里出现，却<b>不该命中任何往事</b>。每轮先跑检索，再按策略强化，最后按真实衰减曲线逐小时采样。<b>权重线</b>：≥${LINES.clear} = 细节记得清楚；≥${LINES.cold} = 还在记忆里；&lt;${LINES.cold} = 冷记忆，只在灵光一闪时才冒头。「误提醒小时」= 从头到尾没被提过、却处于 ≥${LINES.clear} 的总小时数。剧情与标注在 <code>tests/cases/weight.cases.mjs</code>。</div>
+检索池里另有 <b>${BACKDROP.length} 条背景记忆</b>：真实库不会只有十几条往事，它们不出场，但同样参与检索竞争、挤占注入名额，误撞了也会被擦亮。库里只有「人真的会记住的事」：寒暄、问候、道别不是记忆事件，所以「晚安」「早上好」在剧情里出现，却<b>不该命中任何往事</b>。每轮先跑检索，再按策略强化，最后按真实衰减曲线逐小时采样。<b>权重线</b>：≥${LINES.clear} = 细节记得清楚；≥${LINES.cold} = 还在记忆里；&lt;${LINES.cold} = 冷记忆，只在灵光一闪时才冒头。「误提醒小时」= 从头到尾没被提过、却处于 ≥${LINES.clear} 的总小时数。剧情与标注在 <code>tests/cases/weight.cases.mjs</code>。</div>
 
 <h2>策略对照</h2>
 <table><thead><tr><th>策略</th><th>常提保持</th><th>常提清晰（占比）</th><th>常提末权重</th><th>误提醒小时</th><th>停提组清晰小时</th><th>误报轮</th><th>真提召回</th></tr></thead><tbody>${rowScore}</tbody></table>
@@ -282,7 +278,7 @@ ${conclusion}
 
 <h2>评估边界</h2>
 <div class="box"><ul>
-<li>检索用真实 <code>tokenize.ts</code> + 停用词表 + 屏蔽词判定 + <code>minHitScore</code> / <code>rankByOverlap</code>；SQL 粗召回用等价字符串包含模拟。衰减按 <code>decay.ts</code> 的 daily / priority 5 公式复刻（项目模块带 <code>@/</code> 别名，Node 里加载不了）。</li>
+<li>检索用真实 <code>tokenize.ts</code> + 停用词表 + 屏蔽词判定 + <code>rankByOverlap</code>；SQL 粗召回用等价字符串包含模拟。衰减按 <code>decay.ts</code> 的 daily / priority 5 公式复刻（项目模块带 <code>@/</code> 别名，Node 里加载不了）。</li>
 <li>未纳入 episode 类型（按天衰减、下限 15）、权重优先级 1~9 差异、灵光一闪概率通道、Prompt 拼装细节。</li>
 <li>复跑：<code>node tests/memory-weight.eval.mjs</code>，会重新生成本报告。</li>
 </ul></div>

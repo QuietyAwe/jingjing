@@ -54,12 +54,14 @@ function evaluate(retriever, label) {
 const V = [
   // 上一版：全字段打分，标题命中就短路，长句要求 ≥2 个关键词 + 相对截断
   { label: "上一版 全字段 / 长≥2 / 截断", retriever: createRetriever(real, POOL, { fields: ALL_FIELDS, minFn: (kw) => (kw.length <= 2 ? kw.length : 2), ratio: 0.5, staged: true }) },
-  // 当前实现：两条通道合并，只认「一句话印象 + 写入时抽的标签」，长句命中 1 个就算
-  { label: "当前实现 印象+标签 / 长≥1", retriever: createRetriever(real, POOL, { fields: SCORED_FIELDS, useRealRank: true }) },
+  // 当前实现：拆段 + IDF 加权 + 50% 截断，同分按最近被想起
+  { label: "当前实现 拆段+IDF+截断 / 印象+标签", retriever: createRetriever(real, POOL, { fields: SCORED_FIELDS, idf: true, relCut: 0.5, clauses: true }) },
   // 参照：更早的实现（全字段、命中即算、标题命中就短路）
   { label: "更早 命中即算（全字段 / 两段式）", retriever: createRetriever(real, POOL, { fields: ALL_FIELDS, minFn: () => 1, staged: true }) },
   // 参照：只放宽门槛、不动字段，用来说明「字段」才是关键
   { label: "只放宽门槛 全字段 / 长≥1 / 两段式", retriever: createRetriever(real, POOL, { fields: ALL_FIELDS, minFn: (kw) => (kw.length <= 2 ? kw.length : 1), staged: true }) },
+  // 实验：编辑距离兜底（独立成词 + 同位置一字 + 唯一候选）——已评估、决定不转正，留档备查
+  { label: "实验 编辑距离兜底（未转正）", retriever: createRetriever(real, POOL, { fields: SCORED_FIELDS, idf: true, relCut: 0.5, clauses: true, fuzzy: true }) },
 ];
 const results = V.map((v) => evaluate(v.retriever, v.label));
 const before = results[0];
@@ -82,6 +84,19 @@ const groups = [...new Set(C.map((c) => c.g))];
 for (const g of groups) {
   const rs = after.rows.filter((r) => r.g === g);
   console.log(`${g}: ${rs.filter((r) => r.ok).length}/${rs.length}`);
+}
+console.log("\n=== 实验档与当前实现的逐条差异 ===");
+for (const r of results.slice(4)) {
+  const diff = r.rows.filter((x, i) => x.ok !== after.rows[i].ok);
+  if (!diff.length) {
+    console.log(`[${r.label}] 判定无翻转`);
+    continue;
+  }
+  console.log(`[${r.label}] ${diff.length} 条判定翻转：`);
+  for (const x of diff) {
+  const base = after.rows.find((b) => b.q === x.q);
+  console.log(`  ${base.ok ? "变坏" : "变好"} 「${x.q}」 当前[${base.hits.join(",") || "无"}] → 实验[${x.hits.join(",") || "无"}]  期望[${x.e.join(",") || "无"}]`);
+  }
 }
 
 // ── HTML 报告 ──
@@ -168,7 +183,7 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
 
 <h2>实现对照</h2>
 <table><thead><tr><th>实现</th><th>逐例完全正确</th><th>Precision</th><th>Recall</th><th>副作用误触发</th><th>TP / FP / FN</th></tr></thead><tbody>${results.map((r) => `<tr><td>${esc(r.label)}</td><td><b>${r.perfect}/${r.total}</b> (${pct(r.perfect / r.total)})</td><td>${pct(r.precision)}</td><td>${pct(r.recall)}</td><td class="${r.sideEffects ? "bad" : "good"}">${r.sideEffects} 例</td><td>${r.tp} / ${r.fp} / ${r.fn}</td></tr>`).join("")}</tbody></table>
-<div class="box">三行是三代实现：<b>更早</b>（全字段、命中即算）→ <b>上一版</b>（全字段、长句要 ≥2 个词、相对截断、标题命中就停）→ <b>当前</b>（标题与片段两条通道合并、只认「一句话印象 + 标签」、长句命中 1 个就算）。最后一行是参照组：只放宽门槛、不动字段，用来说明问题不在门槛。</div>
+<div class="box">三行是三代实现：<b>更早</b>（全字段、命中即算）→ <b>上一版</b>（全字段、长句要 ≥2 个词、相对截断、标题命中就停）→ <b>当前</b>（按标点拆段、两通道合并、IDF 加权 + 50% 截断、同分按最近被想起排，标签按写入侧新规范：情绪词进标签、时间词/泛称禁入）。第四行是参照组：只放宽门槛、不动字段，用来说明问题不在门槛。最后一行是 <b>编辑距离兜底实验</b>（未转正）：带四道闸（独立成词、同位置换一字、唯一候选、拼音差 ≤1 字）能零误报捞回「拉铁↔拿铁」，但只对「用户单独打出两字错字」这一个窄场景生效，且要引入拼音依赖——收益配不上复杂度，决定不进产品代码。</div>
 
 <h2>分组表现</h2>
 <table><thead><tr><th>场景组</th><th>上一版正确</th><th>当前实现正确</th><th>当前仍误命中</th></tr></thead><tbody>${groupRows}</tbody></table>
@@ -178,7 +193,7 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
 
 <h2>评估边界</h2>
 <div class="box"><ul>
-<li>分词（<code>tokenize.ts</code>）、屏蔽词（<code>isBlockedGram</code>）、门槛与打分（<code>minHitScore</code> / <code>rankByOverlap</code>）均取自真实源码并实际执行；SQL 粗召回用等价的字符串包含模拟。</li>
+<li>分词（<code>tokenize.ts</code>）、屏蔽词（<code>isBlockedGram</code>）、IDF 加权与相对截断（<code>rankByOverlap</code>）均取自真实源码并实际执行；SQL 粗召回用等价的字符串包含模拟。</li>
 <li>不含权重衰减、灵光一闪概率通道、Prompt 拼装；别名用事件自带的 alias 字段模拟（真实库是 memory_event_aliases 表），每条事件只有 1 条 gist + 1 条 summary，真实库片段更多，召回可能略高于本评估。</li>
 <li>理想命中按「真实陪伴场景下什么算恰当」人工标注，情绪类用例带有语义期待，纯字符串检索天然难以满足——这正是评估要暴露的。</li>
 <li>复跑：<code>node tests/retrieval.eval.mjs</code>，会重新生成本报告。</li>
@@ -193,9 +208,11 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
 
 3. 两条召回通道必须合并：上一版「标题命中就停」，于是「最近压力大，团子还生病了，都没好好吃饭」只想得起团子；合并后加班、团子、发烧三件都能想起来。分组变化——变差：${worseText}；变好：${betterText}。
 
-4. 剩下 ${after.total - after.perfect} 条是机制与人的差距清单：单字「猫」在分词层被丢掉；纯情绪的「今天好累」没有任何字面线索；「加班」这类通用词会顺带擦到面馆；否定句「不是吃面，是火锅」挡不住；「有点想家」库里没写「想家」这个标签；一次说四件事时注入上限只给三条。
+4. 剩下 ${after.total - after.perfect} 条是机制与人的差距清单：否定句（「不是吃面，是火锅」「不是加班，是去唱K」）挡不住；硬干扰（「我妈公司楼下的面馆」撞上拉面/咖啡店）指的是别家；近邻挑不净（「妈妈的体检」也勾出自己的体检报告，gist/标题里的「周三」「朋友圈」「想去」这类字面照样撞）；纯情绪（「今天好累」）没有任何字面线索；Top3 注入上限——一次说四件事只给三条，跨段合并后第 4 件仍进不来；单字兜底只扫前 8 个字，句尾的「猫粮」够不着；英文同义词（overtime / coffee）没有对应标签，数字不参与分词（「38.5度」）；噪音 bigram（「跳槽的念头」里的「槽的」）会抬高相对截断线，把该召回的挤下去。
 
-5. 情绪倾诉组 ${dGroupBefore.text} → ${dGroupAfter.text}：纯字符串检索无法从「累」联想到「加班」，属架构层面的差距，不是调参能补的。</div>
+5. 情绪倾诉组 ${dGroupBefore.text} → ${dGroupAfter.text}：纯字符串检索无法从「累」联想到「加班」，属架构层面的差距，不是调参能补的。
+
+6. 编辑距离兜底：评估后决定不转正。四道闸（独立成词、同位置换一字、唯一候选、拼音差 ≤1 字）确实能零误报捞回「拉铁↔拿铁」${results[4].perfect}/${results[4].total}，但四道闸缺一不可——去掉「独立成词」闸，时序剧情里「看到一只→到期」「越来越大了→大理」的噪音 bigram 立刻误报；去掉拼音闸，「拉铁」分不清拿铁和拉面。能安全生效的场景只剩「用户单独打出两字错字」这一种，收益配不上复杂度与拼音依赖，留档备查、等语义层（命中后模型复核）整体覆盖。</div>
 </div></body></html>`;
 mkdirSync(DOCS_DIR, { recursive: true });
 writeFileSync(OUT, html);

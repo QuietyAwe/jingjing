@@ -56,13 +56,11 @@ export async function loadTokenizer() {
   };
 }
 
-/** 真实检索内核：分词 + 屏蔽词 + 命中门槛 + 打分排序 */
+/** 真实检索内核：分词 + 屏蔽词 + 命中门槛（打分与排序在 retrieval-sim 里镜像产品逻辑） */
 export async function loadRetrievalCore() {
   const tokenizeUrl = pathToFileURL(path.join(ROOT, "src/memory/tokenize.ts")).href;
   const parts = [
     extractFrom("src/memory/identity.ts", /function isBlockedGram\([\s\S]*?\n\}/, "isBlockedGram"),
-    extractFrom("src/memory/retrieval.ts", /function minHitScore\([\s\S]*?\n\}/, "minHitScore"),
-    extractFrom("src/memory/retrieval.ts", /function rankByOverlap<[\s\S]*?\n\}/, "rankByOverlap"),
   ];
   const dir = path.join(tmpdir(), "jingjing-eval");
   mkdirSync(dir, { recursive: true });
@@ -72,7 +70,7 @@ export async function loadRetrievalCore() {
     [
       `import { scoreOverlap } from "${tokenizeUrl}";`,
       ...parts,
-      `export { isBlockedGram, minHitScore, rankByOverlap };`,
+      `export { isBlockedGram };`,
     ].join("\n\n")
   );
   const core = await import(pathToFileURL(file).href + `?v=${Date.now()}`);

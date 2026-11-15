@@ -32,38 +32,83 @@ export interface RetrievalResult {
 }
 
 /**
- * 命中门槛：短输入（1~2 个关键词）要求全部命中，长输入命中 1 个即可。
- *
- * 长句必然带一堆噪音 bigram，把门槛绑在「关键词总数」上会误杀真回忆：
- * 「又想去吃面了」「那家面馆还开着吗」这类话只有一个实词对得上，要求 2 个就永远想不起来。
- * 噪音由下面的「只认写入时抽的标签」挡住，不靠抬高门槛。
+ * 关键词的 IDF 权重：词在库里越常见越没区分度（「加班」撞三条记忆 ≈ 无效词，
+ * 「团子」独一份 ≈ 强线索）。df 按「标题/别名/印象/标签」统计，与打分文本同源；
+ * 本地量级直接逐词 COUNT，代价可忽略。
  */
-function minHitScore(keywords: string[]): number {
-  return keywords.length <= 2 ? keywords.length : 1;
+function idfWeights(
+  db: ReturnType<typeof getDB>,
+  kw: string[],
+  defaultEventId: number | null
+): Map<string, number> {
+  const excludeDefault = defaultEventId ? `AND e.id != ${defaultEventId}` : "";
+  const n =
+    db.getFirstSync<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM memory_events e WHERE e.event_status != 'upcoming' ${excludeDefault}`
+    )?.n ?? 0;
+  const map = new Map<string, number>();
+  for (const k of kw) {
+    const row = db.getFirstSync<{ n: number }>(
+      `SELECT COUNT(DISTINCT e.id) AS n
+       FROM memory_events e
+       LEFT JOIN memory_event_aliases a ON a.event_id = e.id
+       LEFT JOIN memory_fragments f ON f."index" = e.id
+       WHERE e.event_status != 'upcoming' ${excludeDefault}
+         AND (e.event_text LIKE ? OR a.alias LIKE ? OR f.gist LIKE ? OR f.keywords LIKE ?)`,
+      `%${k}%`,
+      `%${k}%`,
+      `%${k}%`,
+      `%${k}%`
+    );
+    const df = row?.n ?? 0;
+    map.set(k, Math.log((n + 1) / (df + 1)) + 1);
+  }
+  return map;
 }
 
+/** 相对截断线：加权分低于最高分一半的候选视为「通用词带出来的弱命中」丢弃 */
+const REL_CUT = 0.5;
+
 /**
- * 按「关键词重合度」给候选事件排序
+ * 按「IDF 加权重合度」给候选事件排序
  *
  * SQL 侧只做粗召回（OR 匹配），真正的排序在这里做：
- * 重合数多的排在前面，同分时再用存储权重（= 最近是否被想起过）兜底。
+ * 分数 = 命中的每个关键词的 IDF 之和，通用词带分少、独一份的词带分多；
+ * 与最高分差一半以上的弱命中截掉，防止「周末」「心情」这类词把不相干往事顶进 Top3。
  *
- * 不做相对截断：一句话提三件事时，「与最高分差一半以上」会把次要话题全丢掉；
- * 数量已经由调用方的 Top3 控制。
+ * 同分不再按创建顺序兜底（那等于永远偏向最早的记忆），改按 last_accessed——
+ * 更近被想起过的事件更可能是当前话题。
  *
  * @param pick 从候选里取出用于打分的文本
  */
-function rankByOverlap<T extends { active_weight: number }>(
+function rankByOverlap<T extends { last_accessed: string }>(
   candidates: T[],
   pick: (item: T) => string,
-  keywords: string[]
-): T[] {
-  const min = minHitScore(keywords);
-  return candidates
-    .map((item) => ({ item, score: scoreOverlap(pick(item), keywords) }))
-    .filter((x) => x.score >= min)
-    .sort((a, b) => b.score - a.score || b.item.active_weight - a.item.active_weight)
-    .map((x) => x.item);
+  keywords: string[],
+  idf: Map<string, number>
+): Array<{ item: T; score: number }> {
+  // 命中 1 个关键词即入候选：门槛不再按关键词总数计——短句里夹一个跨词噪音 bigram
+  // （「有点想家」的「点想」）就会让「必须全中」整句失效。噪音交给 IDF 与相对截断挡。
+  const scored = candidates
+    .map((item) => {
+      const text = pick(item);
+      let score = 0;
+      let hits = 0;
+      for (const k of keywords) {
+        if (text.includes(k)) {
+          score += idf.get(k) ?? 1;
+          hits += 1;
+        }
+      }
+      return { item, score, hits };
+    })
+    .filter((x) => x.hits >= 1);
+  if (scored.length === 0) return [];
+  const top = Math.max(...scored.map((x) => x.score));
+  return scored
+    .filter((x) => x.score >= top * REL_CUT)
+    .sort((a, b) => b.score - a.score || (b.item.last_accessed ?? "").localeCompare(a.item.last_accessed ?? ""))
+    .map((x) => ({ item: x.item, score: x.score }));
 }
 
 /** 命中归因：哪个检索词撞上了哪条记忆的哪个字段，口径与打分文本一致 */
@@ -170,11 +215,19 @@ function pickWeighted<T>(items: T[], weights: number[]): T {
   return items[items.length - 1];
 }
 
+/** 长句按标点/换行拆段：每段独立提词检索，实体词不靠「关键词抽样」的运气 */
+function splitClauses(text: string): string[] {
+  const parts = text
+    .split(/[，。！？；、,.!?;\n\r…]+/)
+    .map((s) => s.trim())
+    .filter((s) => /[一-鿿a-zA-Z]{2,}/.test(s));
+  return parts.length > 0 ? parts : [text];
+}
+
 /**
  * 完整本地检索流程
  *
- * 检索策略：优先检索事件(event_text)，未命中再检索片段(gist + summary)
- * 命中事件时直接返回关联片段，无需额外检索
+ * 输入按标点拆段，每段独立走「两条召回通道合并排序」，最后按得分合并取 Top3
  */
 export function retrieve(userInput: string): RetrievalResult {
   // 1. 分词（bigram，见 tokenize.ts 的说明）
@@ -182,9 +235,10 @@ export function retrieve(userInput: string): RetrievalResult {
   // 不当检索词：几乎每条记忆都带名字，输入里一提名字就会把一堆无关记忆误命中
   const blocked = blockedWords();
   const isStop = (g: string) => isBlockedGram(g, blocked);
-  const keywords = tokenize(userInput, 16, isStop);
-  /** 实际把记忆勾出来的那组词：常规分词，或单字兜底时的单字 */
-  let triggerKeywords = keywords;
+  /** 实际把记忆勾出来的那组词：各段分词去重后的并集，或单字兜底时的单字 */
+  let triggerKeywords: string[] = [];
+  /** 命中来路：单字兜底时为真（用于日志） */
+  let usedWeak = false;
 
   let hitEvents: MemoryEvent[] = [];
   /** 只靠别名命中（标题完全没对上）的事件数：排查合并是否让事件变得检索不到 */
@@ -193,7 +247,7 @@ export function retrieve(userInput: string): RetrievalResult {
   const db = getDB();
   const defaultEventId = getDefaultEventId();
 
-  // 2. 两条召回通道：事件标题/别名、片段内容。任意一条对上都算「想起来」，一起排序取 Top3。
+  // 2. 两条召回通道：事件标题/别名、片段内容。任意一条对上都算「想起来」，合并排序。
   //
   //    不能「标题没命中才看片段」：一句话提三件事时（「压力大，团子还生病了」），
   //    一个弱标题命中（「团子」）会把另外两件吃掉。
@@ -201,7 +255,7 @@ export function retrieve(userInput: string): RetrievalResult {
   //    片段只认 gist（一句话印象）+ keywords（写入时抽的标签）——这两样才是写入方对
   //    「这段记忆关于什么」的判断。summary 是完整叙述，拿它撞词会被「有点/觉得/一个人」
   //    这类虚词带偏（「地铁上有人吵架」撞进「和小陈吵架」）。
-  function search(kw: string[]): MemoryEvent[] {
+  function search(kw: string[]): Array<{ item: MemoryEvent; score: number }> {
     // upcoming 约定不参与记忆检索：它们由状态区的「安排」和时间提醒负责
     const excludeDefault = [
       defaultEventId ? `AND e.id != ${defaultEventId}` : "",
@@ -253,12 +307,32 @@ export function retrieve(userInput: string): RetrievalResult {
         `${e.event_text} ${aliasText.get(e.id) ?? ""} ${(frags.get(e.id) ?? [])
           .map((f) => `${f.gist} ${f.keywords}`)
           .join(" ")}`,
-      kw
+      kw,
+      idfWeights(db, kw, defaultEventId)
     );
   }
 
-  if (keywords.length > 0) {
-    hitEvents = search(keywords).slice(0, 3);
+  // 每段独立检索再合并：跨段重复命中的事件得分累加（多次被提到 ≈ 更相关）
+  const merged = new Map<number, { event: MemoryEvent; score: number }>();
+  for (const part of splitClauses(userInput)) {
+    const kw = tokenize(part, 16, isStop);
+    if (kw.length === 0) continue;
+    triggerKeywords = [...new Set([...triggerKeywords, ...kw])];
+    for (const { item, score } of search(kw)) {
+      const cur = merged.get(item.id);
+      if (cur) cur.score += score;
+      else merged.set(item.id, { event: item, score });
+    }
+  }
+  if (merged.size > 0) {
+    hitEvents = [...merged.values()]
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          (b.event.last_accessed ?? "").localeCompare(a.event.last_accessed ?? "")
+      )
+      .slice(0, 3)
+      .map((x) => x.event);
   }
 
   // 3. 兜底：常规关键词一个都没命中时，拿单字线索再找一次。
@@ -270,20 +344,26 @@ export function retrieve(userInput: string): RetrievalResult {
     const weak = singleCharKeywords(userInput, isStop);
     if (weak.length > 0) {
       const candidates = search(weak);
-      const frags = getFragmentsByEventIds(candidates.map((e) => e.id));
+      const frags = getFragmentsByEventIds(candidates.map((x) => x.item.id));
       hitEvents = candidates
-        .filter((e) =>
-          (frags.get(e.id) ?? []).some((f) =>
+        .filter(({ item }) =>
+          (frags.get(item.id) ?? []).some((f) =>
             f.keywords
               .split(/[,，、\s]+/)
               .filter((tag) => tag.length === 1)
               .some((tag) => weak.includes(tag))
           )
         )
-        .slice(0, 3);
-      if (hitEvents.length > 0) triggerKeywords = weak;
+        .slice(0, 3)
+        .map((x) => x.item);
+      if (hitEvents.length > 0) {
+        triggerKeywords = weak;
+        usedWeak = true;
+      }
     }
   }
+
+  const keywords = triggerKeywords;
 
   const aliasText = getEventAliasText(hitEvents.map((e) => e.id));
   if (hitEvents.length > 0) {
@@ -366,7 +446,7 @@ export function retrieve(userInput: string): RetrievalResult {
       // 优先挑「和当前输入有弱关联」的冷记忆——真实的突然想起是被什么触发的，不是掷骰子
       const scored = cold
         .map((e) => ({ e, s: scoreOverlap(e.event_text, keywords) }))
-        .filter((x) => x.s >= minHitScore(keywords))
+        .filter((x) => x.s >= 1)
         .sort((a, b) => b.s - a.s);
       const pool = scored.length > 0 ? scored.slice(0, 3).map((x) => x.e) : cold;
       const picked = pool[Math.floor(Math.random() * pool.length)];
@@ -402,8 +482,7 @@ export function retrieve(userInput: string): RetrievalResult {
       ? `Top${topEvents.length}: ${topEvents.map((e) => e.event_text.slice(0, 20)).join(" | ")}`
       : "未命中：不注入记忆区";
   const hitLine = describeHits(hitEvents, triggerKeywords, aliasText, hitFragments);
-  const viaNote =
-    triggerKeywords === keywords ? "" : ` → 单字兜底: ${triggerKeywords.join(", ")}`;
+  const viaNote = usedWeak ? ` → 单字兜底: ${triggerKeywords.join(", ")}` : "";
   logDebug(
     "检索",
     `关键词: ${keywords.join(", ") || "无"}${viaNote}\n命中: ${hitEvents.length} 条事件（别名独中 ${aliasOnlyHits} 条，${Array.from(hitFragments.values()).reduce((s, f) => s + f.length, 0)} 片段，唤起 ${cuedFragmentIds.size} 条）\n触发:\n${hitLine || "无"}\n${topLine}\n灵光一闪: ${epiphanyNote}`
