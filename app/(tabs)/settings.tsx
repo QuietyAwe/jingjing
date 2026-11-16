@@ -48,7 +48,7 @@ import { formatTodayLine } from "@/utils/holidays";
 import { applyIdentityPlaceholders, normalizePlaceholders } from "@/prompt/assembler";
 import { fetchModels, getClient } from "@/llm/client";
 import { CollapsibleSection } from "@/components/CollapsibleSection";
-import { exportBackup, importBackup } from "../../src/utils/backup";
+import { exportBackup, importBackup, listAutoBackups, restoreFromUri } from "../../src/utils/backup";
 import * as Updates from "expo-updates";
 import { RELEASE_VERSION } from "@/version";
 import type { UserInfo, MemoryEvent, MemoryFragment, ConsolidationResponse, FriendPersona } from "@/types/schema";
@@ -332,6 +332,22 @@ export default function SettingsScreen() {
   const [personaExtracting, setPersonaExtracting] = useState(false);
   const [personaResult, setPersonaResult] = useState<PersonaInfo | null>(null);
   const [personaError, setPersonaError] = useState("");
+
+  // 自动备份恢复列表
+  const [showAutoBackupList, setShowAutoBackupList] = useState(false);
+  const [autoBackupFiles, setAutoBackupFiles] = useState<{ name: string; uri: string; time: string }[]>([]);
+  const [restoringBackup, setRestoringBackup] = useState<string | null>(null);
+
+  /** 恢复备份后统一刷新各内存缓存，手动导入与自动备份恢复共用 */
+  const reloadAfterRestore = useCallback(async () => {
+    await useChatStore.getState().reloadMessages();
+    await useSettingsStore.getState().loadApiKey();
+    // 备份会覆盖 config_overrides，内存缓存必须跟着刷新
+    await loadConfigOverrides();
+    setThresholds(getThresholds());
+    setModelRouting(getModelRouting());
+    setSystemPromptState(getSystemPrompt());
+  }, []);
 
   /**
    * 列表含兜底事件「日常闲聊」，新建/编辑/删除后也走这里刷新。
@@ -1586,12 +1602,27 @@ ${text}
         </TouchableOpacity>
         <View style={{ paddingHorizontal: 16, paddingBottom: 12 }}>
           <Text style={[styles.rowDesc, { color: colors.textMuted }]}>
-            自动备份：每天一次，保留最近 3 份（仅存应用内，卸载会一并删除）。
+            自动备份：每次记忆更新都会保存一份，全部保留（仅存应用内，卸载会一并删除）。可在下方「从自动备份恢复」里查看和还原。
             {getMeta("last_auto_backup_at")
               ? ` 最近：${new Date(getMeta("last_auto_backup_at")!).toLocaleString()}`
               : " 尚未生成"}
           </Text>
         </View>
+        <TouchableOpacity style={[styles.actionRow, { borderBottomColor: colors.border }]} onPress={async () => {
+          try {
+            const files = await listAutoBackups();
+            if (files.length === 0) {
+              Alert.alert("自动备份", "还没有自动备份。等记忆更新一次后会自动生成。");
+              return;
+            }
+            setAutoBackupFiles(files);
+            setShowAutoBackupList(true);
+          } catch (e: any) {
+            Alert.alert("读取失败", e.message || "无法读取自动备份列表");
+          }
+        }}>
+          <Text style={[styles.actionText, { color: colors.text }]}>🕘 从自动备份恢复</Text>
+        </TouchableOpacity>
         <TouchableOpacity style={[styles.actionRow, { borderBottomColor: colors.border }]} onPress={() => {
           Alert.alert("导入备份", "导入会覆盖当前所有数据（聊天记录、记忆、设置），确定继续？", [
             { text: "取消", style: "cancel" },
@@ -1599,15 +1630,7 @@ ${text}
               try {
                 const result = await importBackup();
                 if (result.success) {
-                  // 重新加载聊天记录到 Zustand store
-                  await useChatStore.getState().reloadMessages();
-                  // 重新加载设置
-                  await useSettingsStore.getState().loadApiKey();
-                  // 重新加载提示词/阈值覆盖（备份会覆盖 config_overrides，内存缓存必须跟着刷新）
-                  await loadConfigOverrides();
-                  setThresholds(getThresholds());
-                  setModelRouting(getModelRouting());
-                  setSystemPromptState(getSystemPrompt());
+                  await reloadAfterRestore();
                   Alert.alert("导入成功", result.message);
                 } else {
                   Alert.alert("导入失败", result.message);
@@ -1659,6 +1682,58 @@ ${text}
       </CollapsibleSection>
 
       <Text style={[styles.hint, { color: colors.textMuted }]}>支持所有 OpenAI 兼容 API：OpenAI / DeepSeek / Moonshot / 本地模型等</Text>
+
+      {/* 自动备份恢复列表 */}
+      <Modal visible={showAutoBackupList} transparent animationType="fade">
+        <View style={styles.overlay}>
+          <View style={styles.modal}>
+            <Text style={styles.modalTitle}>从自动备份恢复</Text>
+            <Text style={styles.modalHint}>选择一份备份恢复，会覆盖当前全部数据。恢复后 App 会自动刷新。</Text>
+            <ScrollView style={{ maxHeight: 320 }}>
+              {autoBackupFiles.map((f) => (
+                <TouchableOpacity
+                  key={f.name}
+                  style={[styles.row, { borderBottomColor: colors.border }]}
+                  disabled={restoringBackup !== null}
+                  onPress={async () => {
+                    Alert.alert("恢复备份", `确定用 ${new Date(f.time).toLocaleString()} 的备份覆盖当前数据？`, [
+                      { text: "取消", style: "cancel" },
+                      { text: "恢复", style: "destructive", onPress: async () => {
+                        setRestoringBackup(f.name);
+                        try {
+                          const result = await restoreFromUri(f.uri);
+                          if (result.success) {
+                            await reloadAfterRestore();
+                            setShowAutoBackupList(false);
+                            Alert.alert("恢复成功", result.message);
+                          } else {
+                            Alert.alert("恢复失败", result.message);
+                          }
+                        } catch (e: any) {
+                          Alert.alert("恢复失败", e.message || "无法恢复");
+                        } finally {
+                          setRestoringBackup(null);
+                        }
+                      }},
+                    ]);
+                  }}
+                >
+                  <View style={styles.rowLeft}>
+                    <Text style={[styles.label, { color: colors.text }]}>
+                      {restoringBackup === f.name ? "恢复中…" : new Date(f.time).toLocaleString()}
+                    </Text>
+                    <Text style={[styles.rowDesc, { color: colors.textMuted }]}>{f.name}</Text>
+                  </View>
+                  <Text style={[styles.value, { color: colors.accent }]}>恢复</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowAutoBackupList(false)}><Text style={styles.cancelText}>关闭</Text></TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* API Key 弹窗 */}
       <Modal visible={showKeyModal} transparent animationType="fade">

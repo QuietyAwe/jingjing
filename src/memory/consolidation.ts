@@ -503,8 +503,8 @@ export async function runConsolidation(
     advanceCursor(recentMessages, windowStart);
     useMetaStore.getState().reset();
     clearFailure();
-    // 记忆刚变化，是最值得备份的时刻（内部限流一天一次）
-    autoBackup().catch((err) => console.error("[consolidation] 自动备份异常:", err));
+    // 记忆刚变化，每个巩固节点都留一份（force 跳过一天一次的兜底限流）
+    autoBackup(true).catch((err) => console.error("[consolidation] 自动备份异常:", err));
 
     logDebug(
       "巩固完成",

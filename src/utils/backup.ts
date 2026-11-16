@@ -105,12 +105,12 @@ function backupSummary(backup: BackupData): string {
   ].join(", ");
 }
 
-/** 自动备份：写入应用沙盒 backups/，保留最近 3 份，失败静默 */
-export async function autoBackup(): Promise<void> {
+/** 自动备份：写入应用沙盒 backups/，全部保留，失败静默。force=true 跳过限流（巩固节点用） */
+export async function autoBackup(force = false): Promise<void> {
   try {
-    // 一天最多一次：启动和巩固后都会检查，避免反复写盘
+    // 启动走一天一次兜底；巩固是记忆变化节点，force 跳过限流，每个节点都留一份
     const last = getMeta("last_auto_backup_at");
-    if (last && Date.now() - new Date(last).getTime() < 24 * 60 * 60 * 1000) return;
+    if (!force && last && Date.now() - new Date(last).getTime() < 24 * 60 * 60 * 1000) return;
     const data = await buildBackupData();
     const dir = `${FileSystem.documentDirectory}backups/`;
     const info = await FileSystem.getInfoAsync(dir);
@@ -118,36 +118,62 @@ export async function autoBackup(): Promise<void> {
 
     const name = `auto_${data.timestamp.replace(/[:.]/g, "-")}.json`;
     await FileSystem.writeAsStringAsync(`${dir}${name}`, JSON.stringify(data));
-
-    // 按文件名（时间戳）排序，只留最近 3 份
-    const files = await FileSystem.readDirectoryAsync(dir);
-    const old = files.filter((f) => f.startsWith("auto_")).sort().slice(0, -3);
-    for (const f of old) await FileSystem.deleteAsync(`${dir}${f}`, { idempotent: true });
     setMeta("last_auto_backup_at", data.timestamp);
   } catch (e) {
     console.error("自动备份失败:", e);
   }
 }
 
-/** 导入备份数据 */
+/**
+ * 列出沙盒 backups/ 里的自动备份，按时间倒序。
+ * 系统文件选择器访问不到 App 私有目录，恢复必须走 App 内这个列表。
+ */
+export async function listAutoBackups(): Promise<{ name: string; uri: string; time: string }[]> {
+  const dir = `${FileSystem.documentDirectory}backups/`;
+  const info = await FileSystem.getInfoAsync(dir);
+  if (!info.exists) return [];
+  const names = await FileSystem.readDirectoryAsync(dir);
+  return names
+    .filter((f) => f.startsWith("auto_") && f.endsWith(".json"))
+    .map((name) => {
+      // auto_2026-11-16T10-30-00-000Z.json → 还原成 ISO 供展示
+      const stamp = name.slice(5, -5); // 2026-11-16T10-30-00-000Z
+      const time = stamp.replace(/T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z/, "T$1:$2:$3.$4Z");
+      return { name, uri: `${dir}${name}`, time };
+    })
+    // 文件名字典序即时间序，直接用 name 倒排 newest first
+    .sort((a, b) => b.name.localeCompare(a.name));
+}
+
+/**
+ * 导入备份：选择文件 → 交给 restoreFromUri。
+ * 校验与恢复逻辑只此一份，手动导入和自动备份恢复共用，避免两处逻辑漂移。
+ */
 export async function importBackup(): Promise<{ success: boolean; message: string }> {
   try {
-    // 1. 选择文件
+    // 选择文件
     const result = await DocumentPicker.getDocumentAsync({
       type: "application/json",
       copyToCacheDirectory: true,
     });
-
     if (result.canceled || !result.assets?.[0]) {
       return { success: false, message: "已取消" };
     }
+    return await restoreFromUri(result.assets[0].uri);
+  } catch (e) {
+    console.error("导入失败:", e);
+    return { success: false, message: "导入失败：" + (e instanceof Error ? e.message : String(e)) };
+  }
+}
 
-    // 2. 读取文件
-    const fileUri = result.assets[0].uri;
+/** 从指定 uri 读取并恢复备份（手动导入与自动备份恢复共用的核心逻辑） */
+export async function restoreFromUri(fileUri: string): Promise<{ success: boolean; message: string }> {
+  try {
+    // 读取文件
     const json = await FileSystem.readAsStringAsync(fileUri);
     const backup: BackupData = JSON.parse(json);
 
-    // 3. 验证版本：结构不一致的备份导进来会让「当前处境」整块失效
+    // 验证版本：结构不一致的备份导进来会让「当前处境」整块失效
     if (backup.version !== BACKUP_VERSION || !backup.asyncStorage || !backup.sqlite) {
       return {
         success: false,
@@ -155,13 +181,13 @@ export async function importBackup(): Promise<{ success: boolean; message: strin
       };
     }
 
-    // 4. 恢复 AsyncStorage（先清空旧数据再写入，避免残留）
+    // 恢复 AsyncStorage（先清空旧数据再写入，避免残留）
     const existingKeys = await AsyncStorage.getAllKeys();
     if (existingKeys.length > 0) await AsyncStorage.multiRemove(existingKeys);
     const pairs = Object.entries(backup.asyncStorage);
     await AsyncStorage.multiSet(pairs);
 
-    // 5. 恢复 SQLite
+    // 恢复 SQLite
     const db = getDB();
     db.execSync("DELETE FROM memory_fragments");
     db.execSync("DELETE FROM memory_events");
