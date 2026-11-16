@@ -12,6 +12,9 @@ import { getMeta, setMeta } from "@/db/queries";
 /** 备份结构版本：只认这一个版本，其它版本直接拒绝导入 */
 const BACKUP_VERSION = 2;
 
+/** 自动备份占用上限：超过后从时间线中间开始删，保留首尾 */
+const AUTO_BACKUP_MAX_BYTES = 100 * 1024 * 1024; // 100MB
+
 interface BackupData {
   version: number;
   timestamp: string;
@@ -119,8 +122,43 @@ export async function autoBackup(force = false): Promise<void> {
     const name = `auto_${data.timestamp.replace(/[:.]/g, "-")}.json`;
     await FileSystem.writeAsStringAsync(`${dir}${name}`, JSON.stringify(data));
     setMeta("last_auto_backup_at", data.timestamp);
+
+    // 总量超限：从中间往两头删，保住最旧和最新两份
+    await trimAutoBackups(dir);
   } catch (e) {
     console.error("自动备份失败:", e);
+  }
+}
+
+/**
+ * 备份总量超过 100MB 时腾空间。
+ * 按时间正序排列（最旧→最新），删除优先挑离中点最近的，保住两端；
+ * 这样最旧那份（完整历史起点）和最新那份（最近状态）都留着，只牺牲中间冗余的。
+ */
+async function trimAutoBackups(dir: string): Promise<void> {
+  const names = (await FileSystem.readDirectoryAsync(dir))
+    .filter((f) => f.startsWith("auto_") && f.endsWith(".json"))
+    .sort(); // 文件名字典序即时间序
+
+  const fileInfos = await Promise.all(
+    names.map(async (name) => {
+      const info = await FileSystem.getInfoAsync(`${dir}${name}`);
+      return { name, size: info.exists ? ((info as any).size ?? 0) as number : 0 };
+    })
+  );
+  let total = fileInfos.reduce((sum, f) => sum + f.size, 0);
+  if (total <= AUTO_BACKUP_MAX_BYTES) return;
+
+  // 离中点越近越先删；两端（index 0 和末尾）最后才动
+  const mid = (fileInfos.length - 1) / 2;
+  const order = fileInfos
+    .map((f, i) => ({ ...f, dist: Math.abs(i - mid) }))
+    .sort((a, b) => a.dist - b.dist);
+
+  for (const f of order) {
+    if (total <= AUTO_BACKUP_MAX_BYTES) break;
+    await FileSystem.deleteAsync(`${dir}${f.name}`, { idempotent: true });
+    total -= f.size;
   }
 }
 

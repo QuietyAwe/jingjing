@@ -1602,7 +1602,7 @@ ${text}
         </TouchableOpacity>
         <View style={{ paddingHorizontal: 16, paddingBottom: 12 }}>
           <Text style={[styles.rowDesc, { color: colors.textMuted }]}>
-            自动备份：每次记忆更新都会保存一份，全部保留（仅存应用内，卸载会一并删除）。可在下方「从自动备份恢复」里查看和还原。
+            自动备份：每次记忆更新都会保存一份，上限 100MB，超出后从中间清理（保留最新和最旧）。仅存应用内，卸载会一并删除。可在下方「从自动备份恢复」里查看和还原。
             {getMeta("last_auto_backup_at")
               ? ` 最近：${new Date(getMeta("last_auto_backup_at")!).toLocaleString()}`
               : " 尚未生成"}
