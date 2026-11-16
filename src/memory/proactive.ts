@@ -27,7 +27,8 @@ const META_KEY = "last_proactive_at";
  */
 function buildOpeningInstruction(hoursAway: number): string {
   const nickname = getUserInfo()?.basic_identity?.nickname || "用户";
-  return `${nickname}已经${hoursAway}小时没找你了，关心一下${nickname}吧。只说一句，贴合此刻的情境，别复述场景、别解释你为什么开口、别连着发问。`;
+  const away = hoursAway >= 48 ? `${Math.round(hoursAway / 24)}天` : `${hoursAway}小时`;
+  return `${nickname}已经${away}没找你了，关心一下${nickname}吧。只说一句，贴合此刻的情境，别复述场景、别解释你为什么开口、别连着发问。`;
 }
 
 /**
