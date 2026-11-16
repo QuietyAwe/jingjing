@@ -35,6 +35,7 @@ import { estimateTokens } from "@/prompt/assembler";
 import { getThresholds } from "@/prompt/config";
 import { logDebug, formatUsage, useChatStore } from "@/store/chatStore";
 import { useMetaStore } from "@/store/metaStore";
+import { autoBackup } from "@/utils/backup";
 import type { UserInfo } from "@/types/schema";
 import dayjs from "dayjs";
 import { Alert } from "react-native";
@@ -502,6 +503,8 @@ export async function runConsolidation(
     advanceCursor(recentMessages, windowStart);
     useMetaStore.getState().reset();
     clearFailure();
+    // 记忆刚变化，是最值得备份的时刻（内部限流一天一次）
+    autoBackup().catch((err) => console.error("[consolidation] 自动备份异常:", err));
 
     logDebug(
       "巩固完成",

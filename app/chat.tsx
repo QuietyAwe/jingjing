@@ -31,8 +31,9 @@ import { buildChatContext } from "@/memory/chatHandler";
 import { streamChat } from "@/llm/foreground";
 import { hasApiKey } from "@/llm/client";
 import { shouldConsolidate, runConsolidation } from "@/memory/consolidation";
-import { checkAndGenerateSchedule, getCurrentScene, formatSceneNote } from "@/memory/scheduler";
-import { shouldOpenProactively, markProactiveDone } from "@/memory/proactive";
+import { checkAndGenerateSchedule } from "@/memory/scheduler";
+import { appendStateNote } from "@/memory/stateNote";
+import { markMainSeen } from "@/memory/unread";
 import { ensureDailyLife } from "@/memory/dailyLife";
 import { checkAndGenerateFriends } from "@/friends/roster";
 import {
@@ -45,7 +46,6 @@ import {
   insertEpisode,
   updateGameResultNote,
   deleteGameSession,
-  getUserInfo,
 } from "@/db/queries";
 import { startGame, handlePlayerInput, MAX_QUESTIONS } from "@/game/twentyQuestions";
 import {
@@ -339,8 +339,6 @@ export default function ChatScreen() {
   const [animatingMsgId, setAnimatingMsgId] = useState<string | null>(null);
   // 编辑/删除操作时不自动滚底
   const skipScrollRef = useRef(false);
-  // 主动开场每次进页面只判定一次，避免消息增长时重复触发
-  const proactiveRef = useRef(false);
   // 用户是否贴在底部：只有贴底时才自动滚动，避免上翻历史时被强行拽回底部
   const atBottomRef = useRef(true);
   // 手势态（拖拽中 / 用户甩动的惯性中）：只有手势期间的 onScroll 才更新 atBottomRef。
@@ -590,6 +588,8 @@ export default function ChatScreen() {
   useFocusEffect(
     useCallback(() => {
       positionedRef.current = false;
+      // 进了聊天页就视为已读（首页红点随之消失）
+      markMainSeen();
     }, [])
   );
 
@@ -614,16 +614,6 @@ export default function ChatScreen() {
       console.error("[chat] 今日实况生成异常:", err);
     });
   }, [isReady]);
-
-  // AI 主动开场：只在进入聊天页时判定一次（不做后台常驻），一天最多一次
-  useEffect(() => {
-    if (!isReady || !hasApiKey() || isLoading) return;
-    if (proactiveRef.current) return;
-    if (gameSession && gameSession.status === "playing") return;
-    if (!shouldOpenProactively(useChatStore.getState().messages)) return;
-    proactiveRef.current = true;
-    openProactively().catch((err) => console.error("[chat] 主动开场异常:", err));
-  }, [isReady, isLoading, allMessages.length, gameSession]);
 
   // 恢复未结束的对局（含快艇、数字炸弹、真心话状态）
   useEffect(() => {
@@ -1969,84 +1959,6 @@ export default function ChatScreen() {
     deleteMessage(actionTarget.id);
     setActionTarget(null);
     setTimeout(() => doLLMCall(), REGEN_ANIM_MS);
-  };
-
-  /** 用户开口时补一条情境旁白：状态变了才追加，游戏回合与冷启动不写 */
-  const appendStateNote = () => {
-    if (!getUserInfo()) return;
-    const scene = getCurrentScene();
-    if (!scene) return;
-    // 上一格的旁白如果还在当前上下文里，就不再重复写一遍
-    const history = getHistory();
-    const content = `[旁白] ${formatSceneNote(scene, undefined, (text) =>
-      history.some((m) => m.is_state_note && m.content.includes(text))
-    )}`;
-    const { messages, addMessage } = useChatStore.getState();
-    const last = [...messages].reverse().find((m) => m.is_state_note);
-    if (last?.content === content) return;
-    addMessage({
-      id: genMsgId(),
-      role: "user",
-      content,
-      timestamp: dayjs().toISOString(),
-      is_state_note: true,
-    });
-  };
-
-  /** 主动开场：先补情境旁白，再让 AI 说一句。失败静默，不弹错误气泡 */
-  const openProactively = async () => {
-    markProactiveDone();
-    setLoading(true);
-    setStreamingText("");
-    setStreamingThinking("");
-    try {
-      // 旁白先落库：既给开场提供当下情境，也让历史以 user 开头
-      // （getHistory 会裁掉开头的 assistant 消息，AI 若是最先开口会被裁没）
-      appendStateNote();
-      const context = await buildChatContext("", getHistory());
-      // 追加在末尾（与事件提醒同样的写法），不动前面的前缀
-      context.messages.push({
-        role: "system" as const,
-        content:
-          "没有人开口。你主动说一句话——一句就够：贴合此刻的情境和你们的关系，不要提问轰炸、不要复述场景、不要解释自己为什么开口。",
-      });
-
-      let fullResponse = "";
-      let fullThinking = "";
-      await streamChat(context.messages, {
-        onDelta: (delta) => {
-          fullResponse += delta;
-          appendStreamingText(delta);
-        },
-        onThinking: (thinking) => {
-          fullThinking += thinking;
-          appendStreamingThinking(thinking);
-        },
-        onDone: (text, thinking) => {
-          if (text) fullResponse = text;
-          if (thinking) fullThinking = thinking;
-          setStreamingText("");
-          setStreamingThinking("");
-          addMessage({
-            id: genMsgId(),
-            role: "assistant",
-            content: fullResponse,
-            timestamp: dayjs().toISOString(),
-            thinking: fullThinking || undefined,
-          });
-          setLoading(false);
-        },
-        onError: () => {
-          setStreamingText("");
-          setStreamingThinking("");
-          setLoading(false);
-        },
-      });
-    } catch {
-      setStreamingText("");
-      setStreamingThinking("");
-      setLoading(false);
-    }
   };
 
   const handleSend = async (text: string) => {

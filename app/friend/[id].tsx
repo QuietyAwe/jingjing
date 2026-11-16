@@ -29,6 +29,7 @@ import { buildFriendChatMessages, recordFriendChatTrace } from "@/friends/chat";
 import { streamChat } from "@/llm/foreground";
 import { hasApiKey } from "@/llm/client";
 import { genMsgId } from "@/utils/id";
+import { markFriendSeen } from "@/memory/unread";
 import type { ChatMessage, FriendPersona } from "@/types/schema";
 
 export default function FriendChatScreen() {
@@ -75,6 +76,11 @@ export default function FriendChatScreen() {
     () => rawMessages.filter((m) => m.friend_id === friendId),
     [rawMessages, friendId]
   );
+
+  // 进页面、以及页面内收到新消息，都视为已读
+  useEffect(() => {
+    if (Number.isFinite(friendId)) markFriendSeen(friendId);
+  }, [friendId, messages.length]);
 
   const scrollToEnd = useCallback(() => {
     requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true }));

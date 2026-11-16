@@ -1584,6 +1584,14 @@ ${text}
         }}>
           <Text style={[styles.actionText, { color: colors.text }]}>📦 导出备份</Text>
         </TouchableOpacity>
+        <View style={{ paddingHorizontal: 16, paddingBottom: 12 }}>
+          <Text style={[styles.rowDesc, { color: colors.textMuted }]}>
+            自动备份：每天一次，保留最近 3 份（仅存应用内，卸载会一并删除）。
+            {getMeta("last_auto_backup_at")
+              ? ` 最近：${new Date(getMeta("last_auto_backup_at")!).toLocaleString()}`
+              : " 尚未生成"}
+          </Text>
+        </View>
         <TouchableOpacity style={[styles.actionRow, { borderBottomColor: colors.border }]} onPress={() => {
           Alert.alert("导入备份", "导入会覆盖当前所有数据（聊天记录、记忆、设置），确定继续？", [
             { text: "取消", style: "cancel" },

@@ -7,6 +7,7 @@ import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import * as DocumentPicker from "expo-document-picker";
 import { getDB } from "@/db/connection";
+import { getMeta, setMeta } from "@/db/queries";
 
 /** 备份结构版本：只认这一个版本，其它版本直接拒绝导入 */
 const BACKUP_VERSION = 2;
@@ -33,55 +34,46 @@ interface BackupData {
   };
 }
 
+/** 组装全量备份数据（手动导出与自动备份共用） */
+async function buildBackupData(): Promise<BackupData> {
+  // 1. 读取 AsyncStorage（聊天记录、设置、提示词等全部 key）
+  const keys = await AsyncStorage.getAllKeys();
+  const pairs = await AsyncStorage.multiGet(keys);
+  const asyncStorage: Record<string, string> = {};
+  for (const [key, value] of pairs) {
+    if (value !== null) asyncStorage[key] = value;
+  }
+
+  // 2. 读取 SQLite
+  const db = getDB();
+  return {
+    version: BACKUP_VERSION,
+    timestamp: new Date().toISOString(),
+    asyncStorage,
+    sqlite: {
+      memory_events: db.getAllSync("SELECT * FROM memory_events"),
+      memory_fragments: db.getAllSync("SELECT * FROM memory_fragments"),
+      user_info: db.getAllSync("SELECT * FROM user_info"),
+      system_metadata: db.getAllSync("SELECT * FROM system_metadata"),
+      behavior_schedule: db.getAllSync("SELECT * FROM behavior_schedule"),
+      game_sessions: db.getAllSync("SELECT * FROM game_sessions"),
+      moments: db.getAllSync("SELECT * FROM moments"),
+      moment_comments: db.getAllSync("SELECT * FROM moment_comments"),
+      post_plan: db.getAllSync("SELECT * FROM post_plan"),
+      friend_personas: db.getAllSync("SELECT * FROM friend_personas"),
+      daily_log: db.getAllSync("SELECT * FROM daily_log"),
+      memory_event_aliases: db.getAllSync("SELECT * FROM memory_event_aliases"),
+      retrieval_logs: db.getAllSync("SELECT * FROM retrieval_logs"),
+    },
+  };
+}
+
 /** 导出所有数据 */
 export async function exportBackup(): Promise<{ success: boolean; message: string }> {
   try {
-    // 1. 读取 AsyncStorage（聊天记录、设置、提示词等全部 key）
-    const keys = await AsyncStorage.getAllKeys();
-    const pairs = await AsyncStorage.multiGet(keys);
-    const asyncStorage: Record<string, string> = {};
-    for (const [key, value] of pairs) {
-      if (value !== null) asyncStorage[key] = value;
-    }
+    const backup = await buildBackupData();
 
-    // 2. 读取 SQLite
-    const db = getDB();
-    const memory_events = db.getAllSync("SELECT * FROM memory_events");
-    const memory_fragments = db.getAllSync("SELECT * FROM memory_fragments");
-    const user_info = db.getAllSync("SELECT * FROM user_info");
-    const system_metadata = db.getAllSync("SELECT * FROM system_metadata");
-    const behavior_schedule = db.getAllSync("SELECT * FROM behavior_schedule");
-    const game_sessions = db.getAllSync("SELECT * FROM game_sessions");
-    const moments = db.getAllSync("SELECT * FROM moments");
-    const moment_comments = db.getAllSync("SELECT * FROM moment_comments");
-    const post_plan = db.getAllSync("SELECT * FROM post_plan");
-    const friend_personas = db.getAllSync("SELECT * FROM friend_personas");
-    const daily_log = db.getAllSync("SELECT * FROM daily_log");
-    const memory_event_aliases = db.getAllSync("SELECT * FROM memory_event_aliases");
-    const retrieval_logs = db.getAllSync("SELECT * FROM retrieval_logs");
-
-    const backup: BackupData = {
-      version: BACKUP_VERSION,
-      timestamp: new Date().toISOString(),
-      asyncStorage,
-      sqlite: {
-        memory_events,
-        memory_fragments,
-        user_info,
-        system_metadata,
-        behavior_schedule,
-        game_sessions,
-        moments,
-        moment_comments,
-        post_plan,
-        friend_personas,
-        daily_log,
-        memory_event_aliases,
-        retrieval_logs,
-      },
-    };
-
-    // 3. 写入临时文件
+    // 写入临时文件
     const json = JSON.stringify(backup, null, 2);
     const filename = `jingjing_backup_${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.json`;
     const fileUri = FileSystem.documentDirectory + filename;
@@ -93,20 +85,47 @@ export async function exportBackup(): Promise<{ success: boolean; message: strin
       dialogTitle: "导出备份数据",
     });
 
-    // 返回摘要
-    const chatMsgCount = asyncStorage.chat_messages
-      ? JSON.parse(asyncStorage.chat_messages).state?.messages?.length ?? 0
-      : 0;
-    const summary = [
-      `聊天记录: ${chatMsgCount} 条`,
-      `记忆事件: ${memory_events.length} 个`,
-      `记忆片段: ${memory_fragments.length} 条`,
-      `设置项: ${Object.keys(asyncStorage).length} 个 key`,
-    ].join(", ");
-    return { success: true, message: summary };
+    return { success: true, message: backupSummary(backup) };
   } catch (e) {
     console.error("导出失败:", e);
     return { success: false, message: "导出失败：" + (e instanceof Error ? e.message : String(e)) };
+  }
+}
+
+function backupSummary(backup: BackupData): string {
+  const asyncStorage = backup.asyncStorage;
+  const chatMsgCount = asyncStorage.chat_messages
+    ? JSON.parse(asyncStorage.chat_messages).state?.messages?.length ?? 0
+    : 0;
+  return [
+    `聊天记录: ${chatMsgCount} 条`,
+    `记忆事件: ${backup.sqlite.memory_events.length} 个`,
+    `记忆片段: ${backup.sqlite.memory_fragments.length} 条`,
+    `设置项: ${Object.keys(asyncStorage).length} 个 key`,
+  ].join(", ");
+}
+
+/** 自动备份：写入应用沙盒 backups/，保留最近 3 份，失败静默 */
+export async function autoBackup(): Promise<void> {
+  try {
+    // 一天最多一次：启动和巩固后都会检查，避免反复写盘
+    const last = getMeta("last_auto_backup_at");
+    if (last && Date.now() - new Date(last).getTime() < 24 * 60 * 60 * 1000) return;
+    const data = await buildBackupData();
+    const dir = `${FileSystem.documentDirectory}backups/`;
+    const info = await FileSystem.getInfoAsync(dir);
+    if (!info.exists) await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+
+    const name = `auto_${data.timestamp.replace(/[:.]/g, "-")}.json`;
+    await FileSystem.writeAsStringAsync(`${dir}${name}`, JSON.stringify(data));
+
+    // 按文件名（时间戳）排序，只留最近 3 份
+    const files = await FileSystem.readDirectoryAsync(dir);
+    const old = files.filter((f) => f.startsWith("auto_")).sort().slice(0, -3);
+    for (const f of old) await FileSystem.deleteAsync(`${dir}${f}`, { idempotent: true });
+    setMeta("last_auto_backup_at", data.timestamp);
+  } catch (e) {
+    console.error("自动备份失败:", e);
   }
 }
 

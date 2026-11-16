@@ -9,6 +9,10 @@ import { useSettingsStore } from "@/store/settingsStore";
 import { useTheme } from "@/theme/useTheme";
 import { getDebutedFriends, hasFriendAppeared } from "@/db/queries";
 import { friendAvatarText } from "@/friends/persona";
+import { isUnread, getMainSeenAt, getFriendSeenAt, hasUnreadMoments } from "@/memory/unread";
+import { runProactiveOpening } from "@/memory/proactive";
+import { hasApiKey } from "@/llm/client";
+import { useUnreadStore } from "@/store/unreadStore";
 
 /** 按时段打招呼（只给时段感，不报精确时间） */
 function greeting(hour: number): string {
@@ -56,6 +60,12 @@ export default function ConversationListScreen() {
   useFocusEffect(
     useCallback(() => {
       setFocusTick((v) => v + 1);
+      // 动态角标：回到首页时按最新动态/评论时间重算一次
+      useUnreadStore.getState().setMomentsUnread(hasUnreadMoments());
+      // AI 主动开场：在首页判定（此时用户还没进聊天页，消息会显示成未读）
+      if (hasApiKey()) {
+        runProactiveOpening().catch((err) => console.error("[home] 主动开场异常:", err));
+      }
     }, [])
   );
 
@@ -63,6 +73,12 @@ export default function ConversationListScreen() {
   // 主会话只看主聊天：好友私聊各有自己的线程
   const mainMessages = messages.filter((m) => !m.friend_id);
   const lastMessage = mainMessages.length > 0 ? mainMessages[mainMessages.length - 1] : null;
+  // 未读只看真实消息：旁白注记与 system 展示消息不算
+  const lastReal = [...mainMessages]
+    .reverse()
+    .find((m) => !m.is_state_note && m.role !== "system");
+  const mainUnread =
+    lastReal?.role === "assistant" && isUnread(lastReal.timestamp, getMainSeenAt());
 
   // 好友入口：先在朋友圈见过这个人（ta 发过动态/评论），或已经私聊过，才进会话列表——
   // 光到登场时间就凭空多出一个陌生联系人太出戏
@@ -72,8 +88,10 @@ export default function ConversationListScreen() {
   const friendRows = getDebutedFriends()
     .filter((f) => chattedFriendIds.has(f.id) || hasFriendAppeared(f.id))
     .map((f) => {
-      const thread = messages.filter((m) => m.friend_id === f.id);
-      return { friend: f, last: thread.length > 0 ? thread[thread.length - 1] : null };
+      const thread = messages.filter((m) => m.friend_id === f.id && m.role !== "system");
+      const last = thread.length > 0 ? thread[thread.length - 1] : null;
+      const unread = last?.role === "assistant" && isUnread(last.timestamp, getFriendSeenAt(f.id));
+      return { friend: f, last, unread };
     })
     .sort((a, b) => {
       const ta = a.last ? dayjs(a.last.timestamp).valueOf() : 0;
@@ -123,6 +141,9 @@ export default function ConversationListScreen() {
               >
                 {aiLabel}
               </Text>
+              {mainUnread ? (
+                <View style={[styles.unreadDot, { backgroundColor: colors.accent }]} />
+              ) : null}
               {lastMessage ? (
                 <Text style={[styles.chatTime, { color: colors.textMuted }]}>
                   {formatTime(lastMessage.timestamp)}
@@ -144,7 +165,7 @@ export default function ConversationListScreen() {
         {friendRows.length > 0 ? (
           <>
             <Text style={[styles.sectionLabel, { color: colors.textMuted }]}>朋友</Text>
-            {friendRows.map(({ friend, last }) => (
+            {friendRows.map(({ friend, last, unread }) => (
               <Pressable
                 key={friend.id}
                 onPress={() => router.push(`/friend/${friend.id}`)}
@@ -167,6 +188,9 @@ export default function ConversationListScreen() {
                     <Text style={[styles.chatName, { color: colors.text }]} numberOfLines={1}>
                       {friend.name}
                     </Text>
+                    {unread ? (
+                      <View style={[styles.unreadDot, { backgroundColor: colors.accent }]} />
+                    ) : null}
                     {last ? (
                       <Text style={[styles.chatTime, { color: colors.textMuted }]}>
                         {formatTime(last.timestamp)}
@@ -264,6 +288,12 @@ const styles = StyleSheet.create({
   chatTime: {
     fontSize: 12,
     marginLeft: 8,
+  },
+  unreadDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginLeft: 6,
   },
   chatPreview: {
     marginTop: 4,

@@ -1,9 +1,11 @@
 import { Tabs } from "expo-router";
 import { Text } from "react-native";
 import { useTheme } from "@/theme/useTheme";
+import { useUnreadStore } from "@/store/unreadStore";
 
 export default function TabLayout() {
   const colors = useTheme();
+  const momentsUnread = useUnreadStore((s) => s.momentsUnread);
 
   return (
     <Tabs
@@ -32,6 +34,8 @@ export default function TabLayout() {
         options={{
           title: "动态",
           headerShown: false,
+          tabBarBadge: momentsUnread ? "新" : undefined,
+          tabBarBadgeStyle: { backgroundColor: colors.accent, fontSize: 10 },
           tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 17 }}>🌤</Text>,
         }}
       />

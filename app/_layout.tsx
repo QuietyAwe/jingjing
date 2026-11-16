@@ -11,6 +11,7 @@ import { hasApiKey } from "@/llm/client";
 import { shouldConsolidate, runConsolidation } from "@/memory/consolidation";
 import { useThemeStore, getThemeColors } from "@/theme/useTheme";
 import { useMomentsEngine } from "@/moments/engine";
+import { autoBackup } from "@/utils/backup";
 
 // App 启动时初始化数据库表结构
 initSchema();
@@ -33,6 +34,9 @@ async function bootstrap() {
     .getState()
     .loadApiKey()
     .catch((err) => console.error("[app] 配置加载异常:", err));
+
+  // 自动备份（内部限流一天一次，失败静默）
+  autoBackup().catch((err) => console.error("[app] 自动备份异常:", err));
 
   // 启动判定与「回到前台」完全一致：条件全交给 shouldConsolidate
   // （最少 10 轮 + 未巩固 ≥ token 预算或空闲 ≥ 阈值），不另写一套

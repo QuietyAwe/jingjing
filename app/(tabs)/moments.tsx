@@ -15,6 +15,8 @@ import { useTheme } from "@/theme/useTheme";
 import { getMoments, getCommentsByMomentIds, getAllFriends, setFriendActive } from "@/db/queries";
 import { notifyMomentUpdates } from "@/moments/bus";
 import { markMomentsSeen } from "@/moments/seen";
+import { markMomentsSeenAt } from "@/memory/unread";
+import { useUnreadStore } from "@/store/unreadStore";
 import {
   postUserMoment,
   addComment,
@@ -52,6 +54,9 @@ export default function MomentsScreen() {
     setItems(moments);
     // 记下「用户刚看到这些帖子」：灵光一闪对这些帖子提高触发概率
     markMomentsSeen(moments.map((m) => m.id));
+    // 已读到此刻：Tab 角标清掉
+    markMomentsSeenAt();
+    useUnreadStore.getState().setMomentsUnread(false);
     const map = getCommentsByMomentIds(moments.map((m) => m.id));
     const nextComments: Record<number, MomentComment[]> = {};
     const nextTyping: Record<number, boolean> = {};
