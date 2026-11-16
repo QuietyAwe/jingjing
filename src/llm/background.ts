@@ -20,6 +20,11 @@ import type { ScheduleItem } from "@/db/queries";
 import { stripIdentityKeywords, normalizeMemoryText, restoreIdentityNames } from "@/memory/identity";
 import { applyIdentityPlaceholders } from "@/prompt/assembler";
 
+/** 格式化完整请求用于日志（不截断），与前台聊天提示词日志口径一致 */
+function formatMessagesForLog(msgs: { role: string; content: string }[]): string {
+  return msgs.map((m, i) => `[${i}] ${m.role.toUpperCase()}\n${m.content}`).join("\n\n");
+}
+
 /**
  * 把要塞进提示词的文本先过一遍身份占位符：
  * 用户自定义的人设、模型写的好友小传都带 [user]/[ai]，不换就会原样漏给模型
@@ -220,17 +225,10 @@ export async function extractConsolidation(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  // 固定段与动态块全文保留（排查「模型为什么这么归并/摘要」全靠它们），
-  // 历史只给条数与首行：整段发出来会刷屏
-  const systemPart = requestMessages[0]?.content ?? "";
-  const dynamicPart = requestMessages[requestMessages.length - 1]?.content ?? "";
-  const historyPart = requestMessages
-    .slice(1, -1)
-    .map((m, i) => `[${i}] ${m.role}: ${m.content.slice(0, 40)}...`)
-    .join("\n");
+  // 与前台聊天一致：完整打印真实请求，不截断（排查提取/归并/摘要全靠它）
   logDebug(
     "巩固请求",
-    `模型: ${config.model}\n温度: ${config.temperature}\n快照: ${snapshot.length} 条 / 候选事件: ${candidates.length} 个 / 旧摘要: ${sessionDigest ? `${sessionDigest.length} 字` : "无"}\n\n=== system（${systemPart.length} 字）===\n${systemPart}\n\n=== 动态块（${dynamicPart.length} 字）===\n${dynamicPart}\n\n=== 历史 ${requestMessages.length - 2} 条 ===\n${historyPart}`
+    `模型: ${config.model}\n温度: ${config.temperature}\n快照: ${snapshot.length} 条 / 候选事件: ${candidates.length} 个 / 旧摘要: ${sessionDigest ? `${sessionDigest.length} 字` : "无"}\n\n=== 完整请求 ===\n${formatMessagesForLog(requestMessages)}`
   );
 
   try {
