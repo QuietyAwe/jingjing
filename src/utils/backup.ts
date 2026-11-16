@@ -224,14 +224,10 @@ export async function restoreFromUri(fileUri: string): Promise<{ success: boolea
       };
     }
 
-    // 恢复 AsyncStorage（先清空旧数据再写入，避免残留）
-    const existingKeys = await AsyncStorage.getAllKeys();
-    if (existingKeys.length > 0) await AsyncStorage.multiRemove(existingKeys);
-    const pairs = Object.entries(backup.asyncStorage);
-    await AsyncStorage.multiSet(pairs);
-
-    // 恢复 SQLite
+    // SQLite 所有表在一个事务里恢复：任一步失败整库回滚，不留「删了一半」的残缺状态。
+    // AsyncStorage 无法纳入 SQLite 事务，挪到事务成功之后再写（见函数末尾）。
     const db = getDB();
+    db.withTransactionSync(() => {
     db.execSync("DELETE FROM memory_fragments");
     db.execSync("DELETE FROM memory_events");
     db.execSync("DELETE FROM game_sessions");
@@ -374,6 +370,13 @@ export async function restoreFromUri(fileUri: string): Promise<{ success: boolea
         row.status ?? "pending", row.created_at, row.author ?? "ai", row.friend_id ?? null
       );
     }
+    }); // SQLite 事务闭合：以上全部成功才 COMMIT，中途抛错由 withTransactionSync 自动 ROLLBACK
+
+    // SQLite 已提交，再恢复 AsyncStorage（聊天记录、设置等）。
+    // 它不归 SQLite 事务管；万一这里失败，SQLite 至少是完整的新数据，不会两边都残缺。
+    const existingKeys = await AsyncStorage.getAllKeys();
+    if (existingKeys.length > 0) await AsyncStorage.multiRemove(existingKeys);
+    await AsyncStorage.multiSet(Object.entries(backup.asyncStorage));
 
     return { success: true, message: `备份恢复成功（${backup.timestamp}）` };
   } catch (e) {
