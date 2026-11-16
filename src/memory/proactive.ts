@@ -7,7 +7,7 @@
 
 import dayjs from "dayjs";
 import type { Dayjs } from "dayjs";
-import { getMeta, setMeta } from "@/db/queries";
+import { getMeta, setMeta, getUserInfo } from "@/db/queries";
 import type { ChatMessage } from "@/types/schema";
 import { buildChatContext } from "@/memory/chatHandler";
 import { appendStateNote } from "@/memory/stateNote";
@@ -19,9 +19,16 @@ import { genMsgId } from "@/utils/id";
 const GAP_HOURS = 3;
 const META_KEY = "last_proactive_at";
 
-/** 追加在消息末尾（与事件提醒同一写法），不改动前面的缓存前缀 */
-const OPENING_INSTRUCTION =
-  "没有人开口。你主动说一句话——一句就够：贴合此刻的情境和你们的关系，不要提问轰炸、不要复述场景、不要解释自己为什么开口。";
+/**
+ * 生成主动开场的临时指令，追加在消息末尾（与事件提醒同一写法），不改动前面的缓存前缀。
+ *
+ * 这条 system 消息是 buildChatContext 之后追加的，不经过 replacePlaceholders，
+ * 所以昵称在这里直接填好；[user] 占位符只在经过拼装层的提示词里才会被替换。
+ */
+function buildOpeningInstruction(hoursAway: number): string {
+  const nickname = getUserInfo()?.basic_identity?.nickname || "用户";
+  return `${nickname}已经${hoursAway}小时没找你了，关心一下${nickname}吧。只说一句，贴合此刻的情境，别复述场景、别解释你为什么开口、别连着发问。`;
+}
 
 /**
  * 是否该主动开场。
@@ -67,6 +74,15 @@ export async function runProactiveOpening(): Promise<void> {
   if (store.isLoading) return;
   if (!shouldOpenProactively(store.messages)) return;
 
+  // 离开时长按最后一条真实消息算（shouldOpen 已确认它是 AI 说的、间隔 ≥3h）
+  const real = store.messages.filter(
+    (m) => !m.friend_id && !m.is_state_note && m.role !== "system"
+  );
+  const last = real[real.length - 1];
+  const hoursAway = last
+    ? Math.max(1, Math.round(dayjs().diff(dayjs(last.timestamp), "hour", true)))
+    : 0;
+
   opening = true;
   markProactiveDone();
   store.setLoading(true);
@@ -77,7 +93,10 @@ export async function runProactiveOpening(): Promise<void> {
     // （getHistory 会裁掉开头的 assistant 消息，AI 若是最先开口会被裁没）
     appendStateNote();
     const context = await buildChatContext("", useChatStore.getState().getHistory());
-    context.messages.push({ role: "system" as const, content: OPENING_INSTRUCTION });
+    context.messages.push({
+      role: "system" as const,
+      content: buildOpeningInstruction(hoursAway),
+    });
 
     let text = "";
     let thinking = "";
