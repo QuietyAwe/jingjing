@@ -14,6 +14,8 @@ const BACKUP_VERSION = 2;
 
 /** 自动备份占用上限：超过后从时间线中间开始删，保留首尾 */
 const AUTO_BACKUP_MAX_BYTES = 100 * 1024 * 1024; // 100MB
+/** 自动备份最少保留份数：即使超上限也不删到低于这个数 */
+const MIN_AUTO_BACKUPS = 3;
 
 interface BackupData {
   version: number;
@@ -155,10 +157,13 @@ async function trimAutoBackups(dir: string): Promise<void> {
     .map((f, i) => ({ ...f, dist: Math.abs(i - mid) }))
     .sort((a, b) => a.dist - b.dist);
 
+  let remaining = fileInfos.length;
   for (const f of order) {
-    if (total <= AUTO_BACKUP_MAX_BYTES) break;
+    // 降到上限以下，或只剩最少保留份数，就停手
+    if (total <= AUTO_BACKUP_MAX_BYTES || remaining <= MIN_AUTO_BACKUPS) break;
     await FileSystem.deleteAsync(`${dir}${f.name}`, { idempotent: true });
     total -= f.size;
+    remaining--;
   }
 }
 
