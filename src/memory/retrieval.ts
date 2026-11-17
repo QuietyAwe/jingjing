@@ -630,7 +630,13 @@ export async function retrieve(userInput: string): Promise<RetrievalResult> {
     // 命中即擦亮：自然退出冷池几天，避免连抽同一条
     updateWeight(picked.event.id, 100);
     // 注入一句话印象；事件标题不显示，AI 得靠这句接得上话
-    epiphany = { ...picked.event, gist: picked.fragment.gist || picked.event.event_text };
+    // gist 取自本次选中的片段，时间戳也必须跟片段走——事件是合并的，
+    // 事件 timestamp 停在几天前首次创建时，用它渲染会把今天的动态标成「3天前」
+    epiphany = {
+      ...picked.event,
+      timestamp: picked.fragment.timestamp,
+      gist: picked.fragment.gist || picked.event.event_text,
+    };
     epiphanyNote = `${picked.event.event_text.slice(0, 30)}（近期动态 x${picked.boost}, P=${pRecent.toFixed(2)}）`;
   } else if (keywords.length > 0 && Math.random() < epiphany_trigger_probability) {
     // 冷记忆通道：动态通道没掷中，或根本没有近期动态
@@ -646,9 +652,13 @@ export async function retrieve(userInput: string): Promise<RetrievalResult> {
       const pool = scored.length > 0 ? scored.slice(0, 3).map((x) => x.e) : cold;
       const picked = pool[Math.floor(Math.random() * pool.length)];
       updateWeight(picked.id, 100);
-      const gist =
-        getFragmentsByEventId(picked.id).slice(-1)[0]?.gist || picked.event_text;
-      epiphany = { ...picked, gist };
+      const frag = getFragmentsByEventId(picked.id).slice(-1)[0];
+      // 同上：gist 与时间戳都取同一条片段，别用事件的旧时间
+      epiphany = {
+        ...picked,
+        timestamp: frag?.timestamp ?? picked.timestamp,
+        gist: frag?.gist || picked.event_text,
+      };
       epiphanyNote = `${picked.event_text.slice(0, 30)}（冷记忆）`;
     }
   }
