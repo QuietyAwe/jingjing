@@ -9,8 +9,8 @@ import { BLOCKED_NAMES, memoryText } from "../cases/memories.mjs";
 export const TOP_N = 3;
 /** 片段参与打分的字段 */
 export const ALL_FIELDS = ["gist", "summary", "kw"];
-/** 当前实现的片段打分字段：一句话印象 + 写入时抽的标签（与 retrieval.ts 一致） */
-export const SCORED_FIELDS = ["gist", "kw"];
+/** 当前实现的片段打分字段：只认写入时抽的标签（与 retrieval.ts 一致，gist 虚词 bigram 会误召回） */
+export const SCORED_FIELDS = ["kw"];
 
 /** 与产品一致的按标点拆段 */
 const CLAUSE_SPLIT = /[，。！？；、,.!?;\n\r…]+/;

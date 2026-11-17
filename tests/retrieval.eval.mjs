@@ -55,7 +55,7 @@ const V = [
   // 上一版：全字段打分，标题命中就短路，长句要求 ≥2 个关键词 + 相对截断
   { label: "上一版 全字段 / 长≥2 / 截断", retriever: createRetriever(real, POOL, { fields: ALL_FIELDS, minFn: (kw) => (kw.length <= 2 ? kw.length : 2), ratio: 0.5, staged: true }) },
   // 当前实现：拆段 + IDF 加权 + 50% 截断，同分按最近被想起
-  { label: "当前实现 拆段+IDF+截断 / 印象+标签", retriever: createRetriever(real, POOL, { fields: SCORED_FIELDS, idf: true, relCut: 0.5, clauses: true }) },
+  { label: "当前实现 拆段+IDF+截断 / 仅标签", retriever: createRetriever(real, POOL, { fields: SCORED_FIELDS, idf: true, relCut: 0.5, clauses: true }) },
   // 参照：更早的实现（全字段、命中即算、标题命中就短路）
   { label: "更早 命中即算（全字段 / 两段式）", retriever: createRetriever(real, POOL, { fields: ALL_FIELDS, minFn: () => 1, staged: true }) },
   // 参照：只放宽门槛、不动字段，用来说明「字段」才是关键
@@ -204,7 +204,7 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
 
 1. 从「不敢接」到「该接的接住」：逐例全对 ${before.perfect}/${before.total} → ${after.perfect}/${after.total}，Recall ${pct(before.recall)} → ${pct(after.recall)}；代价是精确率 ${pct(before.precision)} → ${pct(after.precision)}——多认回来的典型是「加班」顺带想起面馆（那件事本来就是加班后去吃面），算误伤，不算硬错。
 
-2. 关键不在门槛，在「拿什么去比对」：只把门槛放宽到「长句命中 1 个词」（全字段、仍两段式）停在 ${results[3].perfect}/${results[3].total}、副作用 ${results[3].sideEffects} 例；把比对文本换成「一句话印象 + 写入时抽的标签」才到 ${after.perfect}/${after.total}、副作用 ${after.sideEffects} 例。summary 是完整叙述，「有点 / 觉得 / 一个人」这类虚词一撞就中。
+2. 关键不在门槛，在「拿什么去比对」：只把门槛放宽到「长句命中 1 个词」（全字段、仍两段式）停在 ${results[3].perfect}/${results[3].total}、副作用 ${results[3].sideEffects} 例；把比对文本收窄到「写入时抽的标签」才到 ${after.perfect}/${after.total}、副作用 ${after.sideEffects} 例。一句话印象（gist）是完整句子，「了没 / 的地 / 有点」这类虚词 bigram 一撞就误召回，summary 同理，所以都不参与比对。
 
 3. 两条召回通道必须合并：上一版「标题命中就停」，于是「最近压力大，团子还生病了，都没好好吃饭」只想得起团子；合并后加班、团子、发烧三件都能想起来。分组变化——变差：${worseText}；变好：${betterText}。
 

@@ -77,8 +77,7 @@ function idfWeights(
        LEFT JOIN memory_event_aliases a ON a.event_id = e.id
        LEFT JOIN memory_fragments f ON f."index" = e.id
        WHERE e.event_status != 'upcoming' ${excludeDefault}
-         AND (e.event_text LIKE ? OR a.alias LIKE ? OR f.gist LIKE ? OR f.keywords LIKE ?)`,
-      `%${k}%`,
+         AND (e.event_text LIKE ? OR a.alias LIKE ? OR f.keywords LIKE ?)`,
       `%${k}%`,
       `%${k}%`,
       `%${k}%`
@@ -149,7 +148,6 @@ function describeHits(
         const where: string[] = [];
         if (e.event_text.includes(k)) where.push("标题");
         if ((aliases.get(e.id) ?? "").includes(k)) where.push("别名");
-        if (frags.some((f) => f.gist.includes(k))) where.push("印象");
         if (frags.some((f) => f.keywords.includes(k))) where.push("标签");
         if (where.length > 0) hits.push(`「${k}」→${where.join("/")}`);
       }
@@ -212,7 +210,7 @@ function localRetrieve(userInput: string, allowedIds: Set<number>): LocalResult 
 
   // 两条召回通道：事件标题/别名、片段内容。任意一条对上都算「想起来」，合并排序。
   // 不能「标题没命中才看片段」：一句话提三件事时，一个弱标题命中会把另外两件吃掉。
-  // 片段只认 gist + keywords：summary 是完整叙述，拿它撞词会被虚词带偏。
+  // 片段只认 keywords：gist 是完整句子，虚词 bigram（如「了没」）会撞出误召回；summary 同理。
   function search(kw: string[]): Array<{ item: MemoryEvent; score: number }> {
     const excludeDefault = [
       defaultEventId ? `AND e.id != ${defaultEventId}` : "",
@@ -221,7 +219,9 @@ function localRetrieve(userInput: string, allowedIds: Set<number>): LocalResult 
       .filter(Boolean)
       .join(" ");
     const eventColumns = EVENT_COLUMNS.split(", ").map((c) => `e.${c}`).join(", ");
+    // 标题通道每词 2 个参数（标题 + 别名）；片段通道只认标签，每词 1 个
     const likeParams = kw.flatMap((k) => [`%${k}%`, `%${k}%`]);
+    const fragParams = kw.map((k) => `%${k}%`);
 
     const titleConditions = kw
       .map(
@@ -237,7 +237,7 @@ function localRetrieve(userInput: string, allowedIds: Set<number>): LocalResult 
       ...likeParams
     );
 
-    const fragConditions = kw.map(() => "(f.gist LIKE ? OR f.keywords LIKE ?)").join(" OR ");
+    const fragConditions = kw.map(() => "f.keywords LIKE ?").join(" OR ");
     const fragRows = db.getAllSync<MemoryEvent>(
       `SELECT DISTINCT ${eventColumns} FROM memory_events e
        INNER JOIN memory_fragments f ON e.id = f."index"
@@ -246,7 +246,7 @@ function localRetrieve(userInput: string, allowedIds: Set<number>): LocalResult 
          AND (${fragConditions})
        ORDER BY e.last_accessed DESC
        LIMIT 10`,
-      ...likeParams
+      ...fragParams
     );
 
     const byId = new Map<number, MemoryEvent>();
@@ -260,7 +260,7 @@ function localRetrieve(userInput: string, allowedIds: Set<number>): LocalResult 
       candidates,
       (e) =>
         `${e.event_text} ${aliasText.get(e.id) ?? ""} ${(frags.get(e.id) ?? [])
-          .map((f) => `${f.gist} ${f.keywords}`)
+          .map((f) => f.keywords)
           .join(" ")}`,
       kw,
       idfWeights(db, kw, defaultEventId)
