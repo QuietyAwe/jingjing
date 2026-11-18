@@ -30,6 +30,7 @@ import { buildFriendChatMessages, recordFriendChatTrace } from "@/friends/chat";
 import { streamChat } from "@/llm/foreground";
 import { hasApiKey } from "@/llm/client";
 import { genMsgId } from "@/utils/id";
+import { useAndroidKeyboardHeight } from "@/utils/keyboard";
 import { markFriendSeen } from "@/memory/unread";
 import type { ChatMessage, FriendPersona } from "@/types/schema";
 
@@ -38,6 +39,7 @@ export default function FriendChatScreen() {
   const router = useRouter();
   const colors = useTheme();
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useAndroidKeyboardHeight();
 
   const friendId = Number(id);
   const [friend, setFriend] = useState<FriendPersona | null>(null);
@@ -171,7 +173,7 @@ export default function FriendChatScreen() {
 
   return (
     <KeyboardAvoidingView
-      style={[styles.container, { backgroundColor: colors.bg }]}
+      style={[styles.container, { backgroundColor: colors.bg, paddingBottom: keyboardHeight }]}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
       {/* 顶栏：返回 + 头像 + 名字/一句关系 */}
@@ -229,7 +231,7 @@ export default function FriendChatScreen() {
         }
       />
 
-      <View style={{ paddingBottom: insets.bottom }}>
+      <View style={{ paddingBottom: keyboardHeight > 0 ? 0 : insets.bottom }}>
         <InputBar onSend={handleSend} disabled={isLoading} hidePlus />
       </View>
     </KeyboardAvoidingView>

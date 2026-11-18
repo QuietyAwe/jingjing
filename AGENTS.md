@@ -131,7 +131,7 @@ src/
     settingsStore.ts    # API Key / 开关 / 主题色
     metaStore.ts        # 系统元数据（轮次、锁等运行时状态）
   theme/                # 浅色/深色色板（colors.ts）+ useTheme.ts
-  utils/                # text.ts（splitForChat 气泡分段）、backup.ts（备份导出/导入）、holidays.ts（周几/法定节假日调休表）、motion.ts（统一入场参数与系统“减少动态效果”）
+  utils/                # text.ts（splitForChat 气泡分段）、backup.ts（备份导出/导入）、holidays.ts（周几/法定节假日调休表）、motion.ts（统一入场参数与系统“减少动态效果”）、keyboard.ts（Android 键盘高度跟踪，收起显式归零）
   types/schema.ts       # 全局类型定义
 docs/                   # 评估脚本生成的报告
 tests/                  # 离线评估：cases/（人工标注集，改用例只改这里）、lib/harness.mjs（从源码取真实实现）

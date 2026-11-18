@@ -24,6 +24,7 @@ import ChatBubble, { StreamingBubble } from "@/components/ChatBubble";
 import { InputBar } from "@/components/InputBar";
 import { useChatStore, logDebug, formatUsage, type DebugLog } from "@/store/chatStore";
 import { genMsgId } from "@/utils/id";
+import { useAndroidKeyboardHeight } from "@/utils/keyboard";
 import { revealTotalMsForText } from "@/utils/text";
 import { useMetaStore } from "@/store/metaStore";
 import { useSettingsStore } from "@/store/settingsStore";
@@ -233,6 +234,7 @@ export default function ChatScreen() {
 
   const colors = useTheme();
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useAndroidKeyboardHeight();
   // 弹窗是独立窗口，个别机型取不到 inset：兜一个常见状态栏高度，别把按钮顶进状态栏
   const topInset = Math.max(insets.top, 24);
   const router = useRouter();
@@ -2255,10 +2257,10 @@ export default function ChatScreen() {
   }
 
   return (
-    // Android 已由系统 resize 窗口避让键盘；再叠一层 padding 会在收起后残留底部黑缝。
-    // iOS 没有 resize，仍需 KeyboardAvoidingView 手动补。
+    // Android 部分机型不会随键盘 resize，自行跟踪高度并显式归零；
+    // iOS 继续用 KeyboardAvoidingView，避免两套补偿叠加。
     <KeyboardAvoidingView
-      style={[styles.container, { backgroundColor: colors.bg }]}
+      style={[styles.container, { backgroundColor: colors.bg, paddingBottom: keyboardHeight }]}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
     >
@@ -2570,7 +2572,7 @@ export default function ChatScreen() {
       />
 
       {/* 底栏隐藏后需自行避让系统手势区 */}
-      <View style={{ paddingBottom: insets.bottom }}>
+      <View style={{ paddingBottom: keyboardHeight > 0 ? 0 : insets.bottom }}>
         {/* 数字炸弹详情面板（点标题栏蓝字展开） */}
         {gameSession?.game_type === "bomb" && bombState && !bombState.finished && showBombInfo ? (
           <BombCard
@@ -2946,7 +2948,7 @@ export default function ChatScreen() {
       {/* 编辑消息 */}
       <Modal visible={showEditModal} animationType="slide" onRequestClose={() => setShowEditModal(false)}>
         <KeyboardAvoidingView
-          style={{ flex: 1, backgroundColor: colors.bg }}
+          style={{ flex: 1, backgroundColor: colors.bg, paddingBottom: keyboardHeight }}
           behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
           <View style={[styles.editContainer, { backgroundColor: colors.sectionBg }]}>
