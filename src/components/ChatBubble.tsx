@@ -1,74 +1,139 @@
 // ============================================================
-// 聊天气泡组件 — 深色气泡(用户) / 浅灰气泡(AI)
-// 长按触发 onLongPress 回调
+// 聊天气泡：逐段显示、轻柔入场、长按操作
 // ============================================================
 
-import { View, Text, StyleSheet, Pressable } from "react-native";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Animated, Pressable, StyleSheet, Text, View } from "react-native";
 import type { ChatMessage } from "@/types/schema";
-import { useTheme, useCurrentCustomColors } from "@/theme/useTheme";
-import { useState, useMemo, useEffect } from "react";
-import { useSettingsStore } from "@/store/settingsStore";
-
+import { useCurrentCustomColors, useTheme } from "@/theme/useTheme";
+import type { ColorPalette } from "@/theme/colors";
+import { MOTION, useReducedMotion } from "@/utils/motion";
 import { splitForChat, revealStepMs } from "@/utils/text";
 
 interface Props {
   message: ChatMessage;
   onLongPress?: () => void;
-  /** 非流式模式下对该消息做逐条延迟动画 */
+  /** 新消息入场；多条回复同时沿用原有逐段延迟 */
   shouldAnimate?: boolean;
   /** 每显示一条新气泡时回调（用于自动滚底） */
   onBubbleAppear?: () => void;
 }
 
-/**
- * 已播过「逐条出现」动画的消息 id：同一条消息只播一次。
- * 列表窗口滚动、游戏卡折叠/展开都会让气泡重挂载，重播会看到
- * 「闪现全文 → 突然消失 → 再逐条出现」的跳变，所以重挂载直接显示全文。
- */
+/** 同一条消息只播一次，列表重挂载和游戏卡展开不重播。 */
 const revealedMsgIds = new Set<string>();
 
-export default function ChatBubble({ message, onLongPress, shouldAnimate, onBubbleAppear }: Props) {
+interface BubbleParagraphProps {
+  para: string;
+  index: number;
+  count: number;
+  isUser: boolean;
+  colors: ColorPalette;
+  aiTextColor: string;
+  animate: boolean;
+  reducedMotion: boolean;
+  onLongPress?: () => void;
+}
+
+function BubbleParagraph({
+  para,
+  index,
+  count,
+  isUser,
+  colors,
+  aiTextColor,
+  animate,
+  reducedMotion,
+  onLongPress,
+}: BubbleParagraphProps) {
+  const [pressed, setPressed] = useState(false);
+  const progress = useRef(new Animated.Value(animate && !reducedMotion ? 0 : 1)).current;
+
+  useEffect(() => {
+    if (!animate) return;
+    if (reducedMotion) {
+      progress.setValue(1);
+      return;
+    }
+    const animation = Animated.timing(progress, {
+      toValue: 1,
+      duration: MOTION.enterDuration,
+      easing: MOTION.easing,
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [animate, progress, reducedMotion]);
+
+  return (
+    <Animated.View
+      style={[
+        styles.row,
+        isUser ? styles.rowRight : styles.rowLeft,
+        index === 0 && styles.rowFirst,
+        index === count - 1 && styles.rowLast,
+        {
+          opacity: progress,
+          transform: [{
+            translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [MOTION.enterDistance, 0] }),
+          }],
+        },
+      ]}
+    >
+      <Pressable
+        onLongPress={onLongPress}
+        onPressIn={onLongPress ? () => setPressed(true) : undefined}
+        onPressOut={onLongPress ? () => setPressed(false) : undefined}
+        delayLongPress={400}
+        accessibilityHint={onLongPress ? "长按可编辑、复制或删除消息" : undefined}
+        style={[
+          styles.bubble,
+          isUser
+            ? { backgroundColor: colors.bubbleUser }
+            : { backgroundColor: colors.bubbleAi, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
+          index < count - 1 && (isUser
+            ? { borderBottomRightRadius: 6 }
+            : { borderBottomLeftRadius: 6 }),
+          index > 0 && (isUser
+            ? { borderTopRightRadius: 6 }
+            : { borderTopLeftRadius: 6 }),
+          pressed && styles.bubblePressed,
+        ]}
+      >
+        <Text style={[styles.text, { color: isUser ? colors.textOnAccent : aiTextColor }]}>
+          {para.trim()}
+        </Text>
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+function ConversationBubble({ message, onLongPress, shouldAnimate, onBubbleAppear }: Props) {
   const isUser = message.role === "user";
   const colors = useTheme();
   const customColors = useCurrentCustomColors();
-  const [pressed, setPressed] = useState(false);
+  const reducedMotion = useReducedMotion();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const shouldEnter = useRef(!!shouldAnimate && !revealedMsgIds.has(message.id)).current;
 
-  // 系统提示：居中小字，不参与交互
-  if (message.role === "system") {
-    return (
-      <View style={styles.systemRow}>
-        <Text style={[styles.systemText, { color: colors.textMuted }]}>{message.content}</Text>
-      </View>
-    );
-  }
-
-  // AI 消息按段落分割成多个气泡（模拟真人聊天风格）
   const paragraphs = useMemo(
     () => isUser ? [message.content] : splitForChat(message.content),
     [isUser, message.content]
   );
 
-  // 非流式模式：按字数逐条延迟显示。首帧即锁定决策——
-  // 要播就从第 1 段开始生长，绝不先渲染全文再回退（那是用户看到的「闪现」）
-  const shouldDelay =
-    !isUser && !!shouldAnimate && paragraphs.length > 1 && !revealedMsgIds.has(message.id);
+  // 首帧锁定显示方式，绝不先渲染全文再回退成逐条出现。
+  const shouldDelay = !isUser && shouldEnter && paragraphs.length > 1;
   const [visibleCount, setVisibleCount] = useState(shouldDelay ? 1 : paragraphs.length);
+
   useEffect(() => {
-    // 挂载即标记已播过：之后重挂载（窗口滚动/卡片展开）直接显示全文，不重播
     revealedMsgIds.add(message.id);
     if (!shouldDelay) {
-      // 非动画模式也要通知列表（否则 AI 发消息后不会滚到底）
       onBubbleAppear?.();
       return;
     }
     const timers: ReturnType<typeof setTimeout>[] = [];
     let acc = 0;
     for (let i = 1; i < paragraphs.length; i++) {
-      // 按字数计算延迟：每字 50ms，范围 500ms ~ 3000ms（与 revealStepMs 同口径，
-      // 自动聚焦要等这段动画播完，两处节奏不能漂移）
-      const delay = revealStepMs(paragraphs[i - 1]);
-      acc += delay;
+      acc += revealStepMs(paragraphs[i - 1]);
       timers.push(setTimeout(() => {
         setVisibleCount(i + 1);
         onBubbleAppear?.();
@@ -78,149 +143,146 @@ export default function ChatBubble({ message, onLongPress, shouldAnimate, onBubb
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [message.id]);
 
-  const bubbleContent = (
+  return (
     <>
-      {/* 思考过程（仅 AI 消息且有 thinking 内容） */}
-      {!isUser && message.thinking && (
-        <View style={[styles.thinkingRow]}>
+      {!isUser && message.thinking ? (
+        <View style={styles.thinkingRow}>
           <Pressable
             style={[styles.thinkingToggle, { backgroundColor: colors.bg, borderColor: colors.border }]}
-            onPress={() => setThinkingExpanded(!thinkingExpanded)}
+            onPress={() => setThinkingExpanded((value) => !value)}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: thinkingExpanded }}
+            hitSlop={6}
           >
             <Text style={[styles.thinkingToggleText, { color: colors.textMuted }]}>
               {thinkingExpanded ? "▾ 收起思考" : "▸ 查看思考"}
             </Text>
           </Pressable>
-          {thinkingExpanded && (
+          {thinkingExpanded ? (
             <View style={[styles.thinkingBubble, { backgroundColor: colors.bg, borderColor: colors.border }]}>
               <Text style={[styles.thinkingText, { color: colors.textMuted }]}>{message.thinking}</Text>
             </View>
-          )}
+          ) : null}
         </View>
-      )}
+      ) : null}
 
       {paragraphs.slice(0, visibleCount).map((para, index) => (
-        <Pressable
+        <BubbleParagraph
           key={index}
+          para={para}
+          index={index}
+          count={visibleCount}
+          isUser={isUser}
+          colors={colors}
+          aiTextColor={customColors.bubbleAiText || colors.text}
+          animate={shouldEnter}
+          reducedMotion={reducedMotion}
           onLongPress={onLongPress}
-          onPressIn={() => setPressed(true)}
-          onPressOut={() => setPressed(false)}
-          delayLongPress={400}
-          style={[
-            styles.row,
-            isUser ? styles.rowRight : styles.rowLeft,
-          ]}
-        >
-          <View
-            style={[
-              styles.bubble,
-              isUser
-                ? { backgroundColor: colors.bubbleUser }
-                : { backgroundColor: colors.bubbleAi, borderWidth: 1, borderColor: colors.border },
-              // 连续气泡做视觉分组：相邻两边用小圆角，看起来像一叠卡片而不是散落的块
-              index < visibleCount - 1 && (isUser
-                ? { borderBottomRightRadius: 6 }
-                : { borderBottomLeftRadius: 6 }),
-              index > 0 && (isUser
-                ? { borderTopRightRadius: 6 }
-                : { borderTopLeftRadius: 6 }),
-              pressed && { opacity: 0.7 },
-            ]}
-          >
-            <Text
-              style={[
-                styles.text,
-                isUser
-                  ? { color: colors.textOnAccent }
-                  : { color: customColors.bubbleAiText || colors.text },
-              ]}
-            >
-              {para.trim()}
-            </Text>
-          </View>
-        </Pressable>
+        />
       ))}
     </>
   );
+}
 
-  return bubbleContent;
+export default function ChatBubble(props: Props) {
+  if (props.message.role === "system") {
+    return <SystemMessage content={props.message.content} />;
+  }
+  return <ConversationBubble {...props} />;
+}
+
+function SystemMessage({ content }: { content: string }) {
+  const colors = useTheme();
+  return (
+    <View style={styles.systemRow}>
+      <Text style={[styles.systemText, { color: colors.textMuted }]}>{content}</Text>
+    </View>
+  );
 }
 
 /** 流式输出气泡（AI 正在打字） */
 export function StreamingBubble({ text }: { text: string }) {
   const colors = useTheme();
+  const customColors = useCurrentCustomColors();
   return (
     <View style={[streamStyles.row, streamStyles.rowLeft]}>
-      <View style={[streamStyles.bubble, { backgroundColor: colors.bubbleAi, borderWidth: 1, borderColor: colors.border }]}>
-        <Text style={[streamStyles.text, { color: colors.text }]}>{text}▌</Text>
+      <View style={[streamStyles.bubble, { backgroundColor: colors.bubbleAi, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border }]}>
+        <Text style={[streamStyles.text, { color: customColors.bubbleAiText || colors.text }]}>
+          {text}<Text style={{ color: colors.accent }}>▌</Text>
+        </Text>
       </View>
     </View>
   );
 }
 
 const streamStyles = StyleSheet.create({
-  row: { marginVertical: 2, paddingHorizontal: 16 },
+  row: { marginVertical: 6, paddingHorizontal: 16 },
   rowLeft: { alignItems: "flex-start" },
-  bubble: { maxWidth: "84%", paddingHorizontal: 13, paddingVertical: 8, borderRadius: 18 },
-  text: { fontSize: 15, lineHeight: 21 },
+  bubble: { maxWidth: "82%", paddingHorizontal: 14, paddingVertical: 10, borderRadius: 19 },
+  text: { fontSize: 16, lineHeight: 24 },
 });
 
 const styles = StyleSheet.create({
-  // 系统提示（游戏开始/结束等，不参与交互）
   systemRow: {
-    paddingHorizontal: 16,
-    paddingVertical: 6,
+    paddingHorizontal: 24,
+    paddingVertical: 8,
     alignItems: "center",
   },
   systemText: {
     fontSize: 12,
+    lineHeight: 18,
     textAlign: "center",
   },
   row: {
     marginVertical: 2,
     paddingHorizontal: 16,
   },
-  rowLeft: {
-    alignItems: "flex-start",
-  },
-  rowRight: {
-    alignItems: "flex-end",
-  },
+  rowFirst: { marginTop: 6 },
+  rowLast: { marginBottom: 6 },
+  rowLeft: { alignItems: "flex-start" },
+  rowRight: { alignItems: "flex-end" },
   bubble: {
-    maxWidth: "84%",
-    paddingHorizontal: 13,
-    paddingVertical: 8,
-    borderRadius: 18,
+    maxWidth: "82%",
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 19,
+  },
+  bubblePressed: {
+    opacity: 0.88,
+    transform: [{ scale: 0.99 }],
   },
   text: {
-    fontSize: 15,
-    lineHeight: 21,
+    fontSize: 16,
+    lineHeight: 24,
   },
-  // 思考过程样式
   thinkingRow: {
     paddingHorizontal: 16,
-    marginBottom: 4,
+    marginTop: 6,
+    marginBottom: 2,
   },
   thinkingToggle: {
     alignSelf: "flex-start",
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 10,
-    borderWidth: 1,
+    minHeight: 36,
+    justifyContent: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+    borderWidth: StyleSheet.hairlineWidth,
   },
   thinkingToggleText: {
     fontSize: 12,
+    lineHeight: 18,
   },
   thinkingBubble: {
-    marginTop: 4,
+    marginTop: 6,
     paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 12,
-    borderWidth: 1,
+    paddingVertical: 10,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
     maxWidth: "85%",
   },
   thinkingText: {
     fontSize: 13,
-    lineHeight: 19,
+    lineHeight: 20,
   },
 });

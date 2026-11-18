@@ -335,7 +335,7 @@ export default function ChatScreen() {
   const [editText, setEditText] = useState("");
   const [showEditModal, setShowEditModal] = useState(false);
 
-  // 逐条延迟动画：仅非流式模式下对刚收到的 AI 回复生效
+  // 新消息入场：用户消息立即播放，AI 在非流式模式下沿用逐段延迟
   const [animatingMsgId, setAnimatingMsgId] = useState<string | null>(null);
   // 编辑/删除操作时不自动滚底
   const skipScrollRef = useRef(false);
@@ -2002,6 +2002,7 @@ export default function ChatScreen() {
     };
     // 注记排在用户消息之前；游戏回合不写，避免把游戏卡片切成两块
     if (!currentGameId) appendStateNote();
+    setAnimatingMsgId(userMsg.id);
     addMessage(userMsg);
     setLoading(true);
     setStreamingText("");
@@ -2216,7 +2217,7 @@ export default function ChatScreen() {
 
         <Text style={[styles.setupLabel, { color: colors.textMuted }]}>API 地址</Text>
         <TextInput
-          style={[styles.setupInput, { borderColor: colors.border, color: colors.text }]}
+          style={[styles.setupInput, { borderColor: colors.border, color: colors.text, backgroundColor: colors.inputBg }]}
           value={urlInput}
           onChangeText={setUrlInput}
           placeholder="https://api.deepseek.com/v1"
@@ -2227,7 +2228,7 @@ export default function ChatScreen() {
 
         <Text style={[styles.setupLabel, { color: colors.textMuted }]}>API Key</Text>
         <TextInput
-          style={[styles.setupInput, { borderColor: colors.border, color: colors.text }]}
+          style={[styles.setupInput, { borderColor: colors.border, color: colors.text, backgroundColor: colors.inputBg }]}
           value={keyInput}
           onChangeText={setKeyInput}
           placeholder="sk-..."
@@ -2239,7 +2240,7 @@ export default function ChatScreen() {
 
         <Text style={[styles.setupLabel, { color: colors.textMuted }]}>你希望我怎么称呼你？</Text>
         <TextInput
-          style={[styles.setupInput, { borderColor: colors.border, color: colors.text }]}
+          style={[styles.setupInput, { borderColor: colors.border, color: colors.text, backgroundColor: colors.inputBg }]}
           value={nicknameInput}
           onChangeText={setNicknameInput}
           placeholder="留空则不指定"
@@ -2247,7 +2248,7 @@ export default function ChatScreen() {
         />
 
         <TouchableOpacity style={[styles.setupButton, { backgroundColor: colors.accent }]} onPress={handleSaveKey}>
-          <Text style={[styles.setupButtonText, { color: colors.textOnAccent }]}>确认</Text>
+          <Text style={[styles.setupButtonText, { color: colors.accentText }]}>确认</Text>
         </TouchableOpacity>
       </View>
     );
@@ -2275,8 +2276,10 @@ export default function ChatScreen() {
             onPress={() => router.back()}
             style={styles.headerAction}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityRole="button"
+            accessibilityLabel="返回会话列表"
           >
-            <Text style={[styles.headerActionText, { color: colors.textMuted }]}>‹ 返回</Text>
+            <Text style={[styles.headerActionText, { color: colors.accent }]}>‹ 返回</Text>
           </TouchableOpacity>
           <TouchableOpacity onLongPress={() => setShowDebug(true)} delayLongPress={800}>
             <Text style={[styles.headerTitle, { color: colors.text }]}>
@@ -2724,7 +2727,7 @@ export default function ChatScreen() {
                   style={[styles.tdEditBtn, { backgroundColor: colors.accent }]}
                   onPress={handleSaveTdEdit}
                 >
-                  <Text style={[styles.tdEditBtnText, { color: colors.textOnAccent }]}>保存</Text>
+                  <Text style={[styles.tdEditBtnText, { color: colors.accentText }]}>保存</Text>
                 </TouchableOpacity>
               </View>
             </ScrollView>
@@ -2931,7 +2934,7 @@ export default function ChatScreen() {
                   onConfirm?.();
                 }}
               >
-                <Text style={[styles.confirmDeleteText, { color: colors.textOnAccent }]}>{confirmState?.okText ?? "确认"}</Text>
+                <Text style={[styles.confirmDeleteText, { color: colors.dangerText }]}>{confirmState?.okText ?? "确认"}</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -2972,7 +2975,7 @@ export default function ChatScreen() {
                   style={[styles.editResendBtn, { backgroundColor: colors.accent }]}
                   onPress={() => handleEditSave(true)}
                 >
-                  <Text style={[styles.editResendBtnText, { color: colors.textOnAccent }]}>完成并发送</Text>
+                  <Text style={[styles.editResendBtnText, { color: colors.accentText }]}>完成并发送</Text>
                 </TouchableOpacity>
               )}
             </View>
@@ -3056,31 +3059,31 @@ export default function ChatScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   list: { flex: 1 },
-  listContent: { paddingTop: 16, paddingBottom: 8 },
+  listContent: { paddingTop: 10, paddingBottom: 10 },
   dateDivider: {
     alignItems: "center",
-    marginVertical: 8,
+    marginVertical: 10,
   },
   dateDividerText: {
     fontSize: 12,
     lineHeight: 17,
     paddingHorizontal: 10,
-    paddingVertical: 2,
-    borderRadius: 9,
+    paddingVertical: 4,
+    borderRadius: 10,
     overflow: "hidden",
   },
   header: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingTop: 6, paddingBottom: 6, paddingHorizontal: 18,
+    paddingTop: 6, paddingBottom: 7, paddingHorizontal: 14,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  headerLeft: { flexDirection: "row", alignItems: "center" },
-  headerTitle: { fontSize: 16, fontWeight: "600", letterSpacing: 1 },
-  headerAction: { paddingVertical: 4, paddingRight: 12 },
-  headerActionText: { fontSize: 13 },
-  gameBadge: { fontSize: 12, fontWeight: "600" },
+  headerLeft: { flexDirection: "row", alignItems: "center", flexShrink: 1, minWidth: 0 },
+  headerTitle: { fontSize: 17, lineHeight: 22, fontWeight: "600", letterSpacing: 0.2 },
+  headerAction: { minHeight: 44, justifyContent: "center", paddingRight: 12 },
+  headerActionText: { fontSize: 15 },
+  gameBadge: { fontSize: 12, lineHeight: 18, fontWeight: "600" },
   // 标题栏 HUD：轮次/比分 + ? 按钮
   hudWrap: {
     flexDirection: "row",
@@ -3088,15 +3091,15 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   hudHelpBtn: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
     borderWidth: StyleSheet.hairlineWidth,
     alignItems: "center",
     justifyContent: "center",
   },
   hudHelpText: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "600",
   },
   // 游戏进行中的系统状态条
@@ -3120,8 +3123,8 @@ const styles = StyleSheet.create({
   // 游戏对局卡片：标题 + 对话整体框在一起
   gameFrame: {
     marginHorizontal: 16,
-    marginVertical: 6,
-    borderRadius: 12,
+    marginVertical: 8,
+    borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
     overflow: "hidden",
   },
@@ -3132,38 +3135,45 @@ const styles = StyleSheet.create({
   gameCardHeader: {
     flex: 1,
     paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingVertical: 12,
   },
   gameCardDelete: {
-    paddingHorizontal: 12,
-    paddingTop: 11,
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 8,
   },
   gameCardDeleteText: {
-    fontSize: 14,
+    fontSize: 15,
   },
   gameFrameBody: {
     paddingBottom: 6,
   },
   gameFrameFooter: {
-    paddingVertical: 8,
+    minHeight: 40,
+    justifyContent: "center",
+    paddingVertical: 10,
     alignItems: "center",
     borderTopWidth: StyleSheet.hairlineWidth,
   },
   gameFrameFooterText: {
-    fontSize: 11,
+    fontSize: 12,
   },
   gameCardTitle: {
-    fontSize: 13,
+    fontSize: 14,
+    lineHeight: 20,
     fontWeight: "600",
   },
   gameCardHint: {
-    fontSize: 11,
+    fontSize: 12,
+    lineHeight: 18,
     marginTop: 4,
   },
   // 游戏候选菜单
   gameMenu: {
-    marginHorizontal: 16,
-    borderRadius: 12,
+    marginHorizontal: 12,
+    borderRadius: 20,
     overflow: "hidden",
     paddingBottom: 8,
   },
@@ -3178,12 +3188,12 @@ const styles = StyleSheet.create({
   },
   // 快艇规则帮助
   helpModal: {
-    marginHorizontal: 16,
-    borderRadius: 12,
+    marginHorizontal: 14,
+    borderRadius: 18,
     maxHeight: "80%",
   },
   helpTitle: {
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: "700",
     marginBottom: 8,
   },
@@ -3237,8 +3247,8 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   helpText: {
-    fontSize: 12,
-    lineHeight: 18,
+    fontSize: 13,
+    lineHeight: 20,
   },
   helpRow: {
     flexDirection: "row",
@@ -3278,8 +3288,8 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
   },
-  welcomeContainer: { alignItems: "center", justifyContent: "center", paddingTop: 80, paddingBottom: 40 },
-  welcomeHint: { fontSize: 15, marginTop: 12 },
+  welcomeContainer: { alignItems: "center", justifyContent: "center", paddingTop: 88, paddingBottom: 44 },
+  welcomeHint: { fontSize: 16, lineHeight: 23, marginTop: 12 },
   loadMoreBtn: { alignItems: "center", paddingVertical: 12 },
   loadMoreText: { fontSize: 12 },
   loadingBubble: {
@@ -3298,28 +3308,29 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
     marginVertical: 4,
     paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 12,
-    borderWidth: 1,
+    paddingVertical: 9,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
     borderStyle: "dashed",
     maxWidth: "85%",
   },
   thinkingLabel: {
     fontSize: 12,
+    lineHeight: 18,
     marginBottom: 4,
   },
   thinkingText: {
     fontSize: 13,
-    lineHeight: 19,
+    lineHeight: 20,
   },
   // API 设置
-  setupContainer: { flex: 1, justifyContent: "center", paddingHorizontal: 40 },
-  setupTitle: { fontSize: 24, fontWeight: "700", marginBottom: 8 },
-  setupHint: { fontSize: 14, marginBottom: 24 },
+  setupContainer: { flex: 1, justifyContent: "center", paddingHorizontal: 32 },
+  setupTitle: { fontSize: 26, lineHeight: 32, fontWeight: "700", marginBottom: 8 },
+  setupHint: { fontSize: 14, lineHeight: 20, marginBottom: 26 },
   setupLabel: { fontSize: 13, fontWeight: "600", marginBottom: 6 },
-  setupInput: { borderWidth: 1, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, marginBottom: 16 },
-  setupButton: { borderRadius: 10, paddingVertical: 12, alignItems: "center" },
-  setupButtonText: { fontSize: 15, fontWeight: "600" },
+  setupInput: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 14, paddingHorizontal: 15, paddingVertical: 12, fontSize: 16, lineHeight: 22, marginBottom: 16 },
+  setupButton: { minHeight: 48, justifyContent: "center", borderRadius: 14, paddingVertical: 12, alignItems: "center" },
+  setupButtonText: { fontSize: 16, fontWeight: "600" },
   // 调试弹窗
   debugContainer: { flex: 1 },
   debugHeader: {
@@ -3349,20 +3360,20 @@ const styles = StyleSheet.create({
   logDetailContent: { padding: 16 },
   // 操作菜单
   overlay: { flex: 1, justifyContent: "flex-end" },
-  actionSheet: { borderTopLeftRadius: 16, borderTopRightRadius: 16, paddingBottom: 34, paddingTop: 8 },
-  actionTitle: { fontSize: 13, textAlign: "center", paddingVertical: 12 },
-  actionItem: { paddingVertical: 16, paddingHorizontal: 24, borderTopWidth: StyleSheet.hairlineWidth },
+  actionSheet: { borderTopLeftRadius: 22, borderTopRightRadius: 22, paddingBottom: 34, paddingTop: 8 },
+  actionTitle: { fontSize: 13, lineHeight: 18, textAlign: "center", paddingVertical: 12 },
+  actionItem: { minHeight: 52, justifyContent: "center", paddingVertical: 14, paddingHorizontal: 24, borderTopWidth: StyleSheet.hairlineWidth },
   actionText: { fontSize: 17, textAlign: "center" },
-  actionCancel: { marginTop: 8 },
+  actionCancel: { marginTop: 10, marginHorizontal: 12, minHeight: 48, justifyContent: "center", borderRadius: 16 },
   actionCancelText: { fontSize: 17, textAlign: "center" },
   // 删除确认
-  confirmBox: { borderRadius: 14, padding: 24, marginHorizontal: 40, alignSelf: "center", marginTop: "auto", marginBottom: "auto" },
-  confirmTitle: { fontSize: 17, fontWeight: "600", textAlign: "center" },
-  confirmDesc: { fontSize: 14, textAlign: "center", marginTop: 8 },
-  confirmButtons: { flexDirection: "row", marginTop: 20, gap: 12 },
-  confirmCancel: { flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: "center" },
+  confirmBox: { borderRadius: 18, padding: 24, marginHorizontal: 32, alignSelf: "center", marginTop: "auto", marginBottom: "auto" },
+  confirmTitle: { fontSize: 17, lineHeight: 23, fontWeight: "600", textAlign: "center" },
+  confirmDesc: { fontSize: 14, lineHeight: 20, textAlign: "center", marginTop: 8 },
+  confirmButtons: { flexDirection: "row", marginTop: 22, gap: 12 },
+  confirmCancel: { flex: 1, minHeight: 44, justifyContent: "center", paddingVertical: 11, borderRadius: 14, alignItems: "center" },
   confirmCancelText: { fontSize: 15 },
-  confirmDelete: { flex: 1, paddingVertical: 12, borderRadius: 10, alignItems: "center" },
+  confirmDelete: { flex: 1, minHeight: 44, justifyContent: "center", paddingVertical: 11, borderRadius: 14, alignItems: "center" },
   confirmDeleteText: { fontSize: 15, fontWeight: "600" },
   // 编辑消息
   editContainer: { flex: 1 },
@@ -3373,13 +3384,13 @@ const styles = StyleSheet.create({
   },
   editTitle: { fontSize: 17, fontWeight: "600" },
   cancelText: { fontSize: 15 },
-  editInput: { flex: 1, marginHorizontal: 20, marginTop: 16, fontSize: 15, lineHeight: 24, textAlignVertical: "top" },
+  editInput: { flex: 1, marginHorizontal: 20, marginTop: 16, fontSize: 16, lineHeight: 26, textAlignVertical: "top" },
   editButtons: {
     flexDirection: "row", paddingHorizontal: 20, paddingVertical: 16, paddingBottom: 34,
     gap: 12, borderTopWidth: StyleSheet.hairlineWidth,
   },
-  editSaveBtn: { flex: 1, paddingVertical: 14, borderRadius: 10, alignItems: "center" },
+  editSaveBtn: { flex: 1, minHeight: 48, justifyContent: "center", paddingVertical: 13, borderRadius: 14, alignItems: "center" },
   editSaveBtnText: { fontSize: 15, fontWeight: "600" },
-  editResendBtn: { flex: 1, paddingVertical: 14, borderRadius: 10, alignItems: "center" },
+  editResendBtn: { flex: 1, minHeight: 48, justifyContent: "center", paddingVertical: 13, borderRadius: 14, alignItems: "center" },
   editResendBtnText: { fontSize: 15, fontWeight: "600" },
 });

@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import { View, Text, TouchableOpacity, StyleSheet } from "react-native";
 import { useTheme } from "@/theme/useTheme";
+import { useReducedMotion } from "@/utils/motion";
 import type { TruthDareState } from "@/game/truthDare/engine";
 import { pendingQuestion, remainingCount, isUserTurn } from "@/game/truthDare/engine";
 import { KIND_LABEL } from "@/game/truthDare/prompt";
@@ -37,21 +38,22 @@ export function TruthDareCard({
   disabled,
 }: Props) {
   const colors = useTheme();
+  const reducedMotion = useReducedMotion();
   const pending = pendingQuestion(state);
   const [animFace, setAnimFace] = useState(1);
 
   // 掷骰动画：点数 1~6 快速滚动
   useEffect(() => {
-    if (!rolling) return;
+    if (!rolling || reducedMotion) return;
     const timer = setInterval(
       () => setAnimFace(1 + Math.floor(Math.random() * 6)),
       110
     );
     return () => clearInterval(timer);
-  }, [rolling]);
+  }, [reducedMotion, rolling]);
 
   // 定格在真实点数，保证骰面与「掷出 N」一致
-  const dieFace = rolling ? animFace : realFace ?? 1;
+  const dieFace = rolling && !reducedMotion ? animFace : realFace ?? 1;
 
   const turnText = state.finished
     ? "已结束"
@@ -83,7 +85,7 @@ export function TruthDareCard({
           <Text
             style={[
               styles.dieText,
-              { color: rolling ? colors.textOnAccent : colors.text },
+              { color: rolling ? colors.accentText : colors.text },
             ]}
           >
             {["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"][dieFace - 1]}
@@ -121,7 +123,7 @@ export function TruthDareCard({
             <Text
               style={[
                 styles.bankIndex,
-                { color: q.index === state.pendingIndex ? colors.textOnAccent : colors.textMuted },
+                { color: q.index === state.pendingIndex ? colors.accentText : colors.textMuted },
               ]}
             >
               {q.index} · {q.kind === "truth" ? "❤️" : "🔥"}
@@ -129,7 +131,7 @@ export function TruthDareCard({
             <Text
               style={[
                 styles.bankText,
-                { color: q.index === state.pendingIndex ? colors.textOnAccent : colors.text },
+                { color: q.index === state.pendingIndex ? colors.accentText : colors.text },
               ]}
               numberOfLines={2}
             >
@@ -146,7 +148,7 @@ export function TruthDareCard({
           onPress={onRoll}
           disabled={rolling}
         >
-          <Text style={[styles.rollBtnText, { color: colors.textOnAccent }]}>
+          <Text style={[styles.rollBtnText, { color: colors.accentText }]}>
             {rolling ? "🎲 掷骰中..." : "🎲 掷骰子"}
           </Text>
         </TouchableOpacity>

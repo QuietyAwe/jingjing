@@ -17,6 +17,7 @@ import {
   Platform,
   Alert,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import ChatBubble, { StreamingBubble } from "@/components/ChatBubble";
@@ -41,6 +42,7 @@ export default function FriendChatScreen() {
   const friendId = Number(id);
   const [friend, setFriend] = useState<FriendPersona | null>(null);
   const [missing, setMissing] = useState(false);
+  const [animatingMsgId, setAnimatingMsgId] = useState<string | null>(null);
 
   const rawMessages = useChatStore((s) => s.messages);
   const addMessage = useChatStore((s) => s.addMessage);
@@ -110,6 +112,7 @@ export default function FriendChatScreen() {
         timestamp: new Date().toISOString(),
         friend_id: f.id,
       };
+      setAnimatingMsgId(userMsg.id);
       addMessage(userMsg);
 
       setLoading(true);
@@ -118,13 +121,15 @@ export default function FriendChatScreen() {
       streamChat(payload, {
         onDelta: (delta) => appendStreamingText(delta),
         onDone: (fullText) => {
-          addMessage({
+          const replyMsg: ChatMessage = {
             id: genMsgId(),
             role: "assistant",
             content: fullText,
             timestamp: new Date().toISOString(),
             friend_id: f.id,
-          });
+          };
+          setAnimatingMsgId(replyMsg.id);
+          addMessage(replyMsg);
           setStreamingText("");
           setLoading(false);
           scrollToEnd();
@@ -170,13 +175,16 @@ export default function FriendChatScreen() {
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
       {/* 顶栏：返回 + 头像 + 名字/一句关系 */}
-      <View style={[styles.header, { paddingTop: insets.top + 8, borderBottomColor: colors.border }]}>
+      <View style={[styles.header, { paddingTop: insets.top + 6, borderBottomColor: colors.border, backgroundColor: colors.sectionBg }]}>
         <TouchableOpacity
           onPress={() => router.back()}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           style={styles.backBtn}
+          accessibilityRole="button"
+          accessibilityLabel="返回会话列表"
         >
-          <Text style={[styles.backText, { color: colors.accent }]}>‹ 返回</Text>
+          <Ionicons name="chevron-back" size={20} color={colors.accent} />
+          <Text style={[styles.backText, { color: colors.accent }]}>返回</Text>
         </TouchableOpacity>
 
         <View style={styles.headerMain}>
@@ -203,14 +211,15 @@ export default function FriendChatScreen() {
         data={messages}
         keyExtractor={(m) => m.id}
         contentContainerStyle={[styles.listContent, { paddingBottom: 12 }]}
-        renderItem={({ item }) => <ChatBubble message={item} />}
+        renderItem={({ item }) => <ChatBubble message={item} shouldAnimate={item.id === animatingMsgId} />}
         onContentSizeChange={scrollToEnd}
         ListFooterComponent={
           isLoading && streamingText ? <StreamingBubble text={streamingText} /> : null
         }
         ListEmptyComponent={
           <View style={styles.emptyWrap}>
-            <Text style={[styles.emptyText, { color: colors.textMuted }]}>
+            <Ionicons name="chatbubble-ellipses-outline" size={32} color={colors.textMuted} />
+            <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
               {friend?.summary ? `${label} · ${friend.summary}` : `和${label}还没聊过`}
             </Text>
             <Text style={[styles.emptyHint, { color: colors.placeholder }]}>
@@ -233,62 +242,75 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 12,
-    paddingBottom: 10,
+    paddingBottom: 6,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   backBtn: {
     width: 64,
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
   },
   backText: {
     fontSize: 15,
+    marginLeft: 1,
   },
   headerMain: {
     flex: 1,
+    minWidth: 0,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
   },
   headerAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
   },
   headerAvatarText: {
-    fontSize: 16,
+    fontSize: 17,
   },
   headerTexts: {
-    marginLeft: 8,
+    flexShrink: 1,
+    marginLeft: 9,
     maxWidth: "70%",
   },
   headerName: {
-    fontSize: 16,
+    fontSize: 17,
+    lineHeight: 22,
     fontWeight: "600",
   },
   headerSub: {
-    fontSize: 11,
+    fontSize: 12,
+    lineHeight: 16,
     marginTop: 1,
   },
   listContent: {
-    paddingTop: 12,
+    paddingTop: 10,
     paddingHorizontal: 0,
   },
   emptyWrap: {
-    paddingTop: 80,
+    paddingTop: 88,
     alignItems: "center",
     paddingHorizontal: 32,
   },
   emptyText: {
-    fontSize: 14,
+    marginTop: 14,
+    fontSize: 16,
+    lineHeight: 23,
     textAlign: "center",
   },
   emptyHint: {
     marginTop: 8,
-    fontSize: 12,
+    fontSize: 13,
+    lineHeight: 19,
     textAlign: "center",
   },
   backOnly: {
+    minHeight: 44,
+    justifyContent: "center",
     paddingHorizontal: 16,
     paddingVertical: 10,
   },

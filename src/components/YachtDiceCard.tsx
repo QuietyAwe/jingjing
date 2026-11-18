@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import { View, Text, TouchableOpacity, StyleSheet } from "react-native";
 import { useTheme } from "@/theme/useTheme";
+import { useReducedMotion } from "@/utils/motion";
 
 interface Props {
   dice: number[];
@@ -38,11 +39,12 @@ export function YachtDiceCard({
   aiName = "对方",
 }: Props) {
   const colors = useTheme();
+  const reducedMotion = useReducedMotion();
   const [rollFaces, setRollFaces] = useState<number[] | null>(null);
 
   // 掷骰动画：未锁定的骰子每 110ms 换一次点数，锁定的保持不动
   useEffect(() => {
-    if (!rolling) {
+    if (!rolling || reducedMotion) {
       setRollFaces(null);
       return;
     }
@@ -50,9 +52,9 @@ export function YachtDiceCard({
     setRollFaces(rand());
     const timer = setInterval(() => setRollFaces(rand()), ROLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [rolling]);
+  }, [reducedMotion, rolling]);
 
-  const displayDice = rolling && rollFaces ? dice.map((d, i) => (kept[i] ? d : rollFaces[i])) : dice;
+  const displayDice = rolling && !reducedMotion && rollFaces ? dice.map((d, i) => (kept[i] ? d : rollFaces[i])) : dice;
 
   return (
     <View style={[styles.container, { borderColor: colors.border, backgroundColor: colors.sectionBg }]}>
@@ -74,7 +76,7 @@ export function YachtDiceCard({
             <Text
               style={[
                 styles.dieText,
-                { color: kept[i] ? colors.textOnAccent : colors.text },
+                { color: kept[i] ? colors.accentText : colors.text },
               ]}
             >
               {DIE_FACES[d - 1] ?? String(d)}
@@ -106,7 +108,7 @@ export function YachtDiceCard({
             style={[styles.btn, { backgroundColor: colors.accent }]}
             onPress={onScore}
           >
-            <Text style={[styles.btnText, { color: colors.textOnAccent }]}>✅ 填分</Text>
+            <Text style={[styles.btnText, { color: colors.accentText }]}>✅ 填分</Text>
           </TouchableOpacity>
         </View>
       )}

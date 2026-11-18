@@ -7,6 +7,7 @@ import {
   StyleSheet,
   Keyboard,
 } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "@/theme/useTheme";
 
 interface Props {
@@ -23,18 +24,17 @@ interface Props {
 export function InputBar({ onSend, disabled, onPlus, hidePlus, inputRef }: Props) {
   const [text, setText] = useState("");
   const colors = useTheme();
-
-  // 同帧双击防抖：disabled 由父级 isLoading 异步生效，发送瞬间要自己挡住一次
   const sendingRef = useRef(false);
+  const sendDisabled = !text.trim() || disabled;
 
   const handleSend = () => {
     const trimmed = text.trim();
     if (!trimmed || disabled || sendingRef.current) return;
+    // 同帧双击先由本地状态挡住，之后由父级 disabled 接管。
     sendingRef.current = true;
     onSend(trimmed);
     setText("");
     Keyboard.dismiss();
-    // 兜底释放：覆盖父级 loading 尚未置位的短窗口；之后由 disabled 接管
     setTimeout(() => {
       sendingRef.current = false;
     }, 300);
@@ -47,34 +47,41 @@ export function InputBar({ onSend, disabled, onPlus, hidePlus, inputRef }: Props
         style={[styles.input, { backgroundColor: colors.inputBg, color: colors.text }]}
         value={text}
         onChangeText={setText}
-        placeholder="说点什么..."
+        placeholder="说点什么…"
         placeholderTextColor={colors.placeholder}
+        accessibilityLabel="消息输入框"
         multiline
         maxLength={2000}
-        // AI 回复期间也允许打字（可预输入），只禁发送按钮
         editable
         onSubmitEditing={handleSend}
         returnKeyType="send"
       />
       {onPlus && !hidePlus ? (
         <TouchableOpacity
-          style={[styles.plusButton, { borderColor: colors.border }]}
+          style={[styles.plusButton, { backgroundColor: colors.inputBg, opacity: disabled ? 0.45 : 1 }]}
           onPress={onPlus}
           disabled={disabled}
+          activeOpacity={0.75}
+          accessibilityRole="button"
+          accessibilityLabel="打开游戏菜单"
+          accessibilityState={{ disabled: !!disabled }}
         >
-          <Text style={[styles.plusText, { color: colors.textMuted }]}>+</Text>
+          <Ionicons name="add" size={25} color={colors.textSecondary} />
         </TouchableOpacity>
       ) : null}
       <TouchableOpacity
         style={[
           styles.button,
-          { backgroundColor: colors.accent },
-          (!text.trim() || disabled) && { backgroundColor: colors.btnDisabled },
+          { backgroundColor: sendDisabled ? colors.btnBg : colors.accent },
         ]}
         onPress={handleSend}
-        disabled={!text.trim() || disabled}
+        disabled={sendDisabled}
+        activeOpacity={0.78}
+        accessibilityRole="button"
+        accessibilityLabel={disabled ? "等待回复，暂时不能发送" : "发送消息"}
+        accessibilityState={{ disabled: !!sendDisabled }}
       >
-        <Text style={[styles.buttonText, { color: colors.textOnAccent }]}>发送</Text>
+        <Text style={[styles.buttonText, { color: sendDisabled ? colors.textMuted : colors.accentText }]}>发送</Text>
       </TouchableOpacity>
     </View>
   );
@@ -84,23 +91,25 @@ const styles = StyleSheet.create({
   container: {
     flexDirection: "row",
     alignItems: "flex-end",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
   input: {
     flex: 1,
-    minHeight: 40,
+    minHeight: 44,
     maxHeight: 120,
-    borderRadius: 10,
-    paddingHorizontal: 14,
+    borderRadius: 18,
+    paddingHorizontal: 16,
     paddingVertical: 10,
-    fontSize: 15,
+    fontSize: 16,
     lineHeight: 22,
   },
   button: {
-    marginLeft: 10,
-    borderRadius: 10,
+    marginLeft: 8,
+    minHeight: 44,
+    justifyContent: "center",
+    borderRadius: 16,
     paddingHorizontal: 18,
     paddingVertical: 10,
   },
@@ -109,16 +118,11 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   plusButton: {
-    marginLeft: 10,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    borderWidth: StyleSheet.hairlineWidth,
+    marginLeft: 8,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: "center",
     justifyContent: "center",
-  },
-  plusText: {
-    fontSize: 22,
-    lineHeight: 24,
   },
 });
