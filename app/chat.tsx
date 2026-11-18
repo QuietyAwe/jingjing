@@ -2255,9 +2255,11 @@ export default function ChatScreen() {
   }
 
   return (
+    // Android 已由系统 resize 窗口避让键盘；再叠一层 padding 会在收起后残留底部黑缝。
+    // iOS 没有 resize，仍需 KeyboardAvoidingView 手动补。
     <KeyboardAvoidingView
       style={[styles.container, { backgroundColor: colors.bg }]}
-      behavior="padding"
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
     >
       {/* 标题栏（紧凑：按安全区适配，左上返回会话列表） */}
@@ -2945,7 +2947,7 @@ export default function ChatScreen() {
       <Modal visible={showEditModal} animationType="slide" onRequestClose={() => setShowEditModal(false)}>
         <KeyboardAvoidingView
           style={{ flex: 1, backgroundColor: colors.bg }}
-          behavior="padding"
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
           <View style={[styles.editContainer, { backgroundColor: colors.sectionBg }]}>
             <View style={[styles.editHeader, { backgroundColor: colors.sectionBg, borderBottomColor: colors.border }]}>
