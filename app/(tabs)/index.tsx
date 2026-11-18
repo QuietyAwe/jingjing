@@ -120,18 +120,20 @@ export default function ConversationListScreen() {
         {/* 会话条：AI 的名字横向一小条 */}
         <Pressable
           onPress={() => router.push("/chat")}
+          accessibilityRole="button"
+          accessibilityLabel={mainUnread ? `打开和${aiLabel}的聊天，有新消息` : `打开和${aiLabel}的聊天`}
           style={({ pressed }) => [
             styles.chatRow,
             {
               backgroundColor: colors.sectionBg,
               borderColor: colors.border,
-              transform: [{ scale: pressed ? 0.985 : 1 }],
-              opacity: pressed ? 0.85 : 1,
+              transform: [{ scale: pressed ? 0.99 : 1 }],
+              opacity: pressed ? 0.9 : 1,
             },
           ]}
         >
           <View style={[styles.avatar, { backgroundColor: colors.accent }]}>
-            <Text style={styles.avatarText}>{aiLabel.slice(0, 1)}</Text>
+            <Text style={[styles.avatarText, { color: colors.accentText }]}>{aiLabel.slice(0, 1)}</Text>
           </View>
           <View style={styles.chatRowMain}>
             <View style={styles.chatRowTop}>
@@ -169,6 +171,8 @@ export default function ConversationListScreen() {
               <Pressable
                 key={friend.id}
                 onPress={() => router.push(`/friend/${friend.id}`)}
+                accessibilityRole="button"
+                accessibilityLabel={unread ? `打开和${friend.name}的私聊，有新消息` : `打开和${friend.name}的私聊`}
                 style={({ pressed }) => [
                   styles.chatRow,
                   styles.friendRow,
@@ -208,12 +212,7 @@ export default function ConversationListScreen() {
           </>
         ) : null}
 
-        {/* 扩展位：后续支持更多联系人 */}
-        <View style={[styles.placeholderRow, { borderColor: colors.border }]}>
-          <Text style={[styles.placeholderText, { color: colors.textMuted }]}>
-            以后可以添加更多联系人
-          </Text>
-        </View>
+
       </ScrollView>
     </View>
   );
@@ -222,39 +221,40 @@ export default function ConversationListScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   scrollContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 32,
+    paddingHorizontal: 18,
+    paddingBottom: 40,
   },
   headerBlock: {
-    marginBottom: 20,
-    paddingHorizontal: 4,
+    marginBottom: 24,
+    paddingHorizontal: 2,
   },
   title: {
-    fontSize: 22,
-    fontWeight: "600",
-    letterSpacing: 1,
+    fontSize: 28,
+    lineHeight: 34,
+    fontWeight: "700",
+    letterSpacing: 0.2,
   },
   greeting: {
     marginTop: 6,
-    fontSize: 13,
+    fontSize: 14,
+    lineHeight: 20,
   },
   chatRow: {
     flexDirection: "row",
     alignItems: "center",
-    borderRadius: 16,
+    borderRadius: 18,
     borderWidth: StyleSheet.hairlineWidth,
-    paddingVertical: 14,
-    paddingHorizontal: 14,
+    paddingVertical: 15,
+    paddingHorizontal: 15,
   },
   avatar: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
     alignItems: "center",
     justifyContent: "center",
   },
   avatarText: {
-    color: "#FFFFFF",
     fontSize: 20,
     fontWeight: "600",
   },
@@ -262,18 +262,19 @@ const styles = StyleSheet.create({
     fontSize: 22,
   },
   sectionLabel: {
-    marginTop: 20,
-    marginBottom: 8,
-    marginLeft: 4,
-    fontSize: 12,
-    letterSpacing: 1,
+    marginTop: 22,
+    marginBottom: 9,
+    marginLeft: 3,
+    fontSize: 13,
+    fontWeight: "600",
   },
   friendRow: {
     marginTop: 10,
   },
   chatRowMain: {
     flex: 1,
-    marginLeft: 12,
+    minWidth: 0,
+    marginLeft: 13,
   },
   chatRowTop: {
     flexDirection: "row",
@@ -282,11 +283,15 @@ const styles = StyleSheet.create({
   },
   chatName: {
     flex: 1,
+    minWidth: 0,
     fontSize: 17,
-    fontWeight: "500",
+    lineHeight: 22,
+    fontWeight: "600",
   },
   chatTime: {
+    flexShrink: 0,
     fontSize: 12,
+    lineHeight: 17,
     marginLeft: 8,
   },
   unreadDot: {
@@ -296,21 +301,8 @@ const styles = StyleSheet.create({
     marginLeft: 6,
   },
   chatPreview: {
-    marginTop: 4,
+    marginTop: 5,
     fontSize: 14,
     lineHeight: 20,
-  },
-  placeholderRow: {
-    marginTop: 14,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderStyle: "dashed",
-    paddingVertical: 18,
-    paddingHorizontal: 14,
-    alignItems: "center",
-    opacity: 0.55,
-  },
-  placeholderText: {
-    fontSize: 13,
   },
 });

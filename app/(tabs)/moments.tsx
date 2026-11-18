@@ -9,6 +9,7 @@ import {
   Alert,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { useSettingsStore } from "@/store/settingsStore";
 import { useTheme } from "@/theme/useTheme";
@@ -139,10 +140,12 @@ export default function MomentsScreen() {
         <Text style={[styles.title, { color: colors.text }]}>动态</Text>
         <TouchableOpacity
           onPress={() => setComposerVisible(true)}
-          style={[styles.composeBtn, { backgroundColor: colors.accentMuted, borderColor: colors.accent }]}
+          style={[styles.composeBtn, { backgroundColor: colors.accentMuted }]}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          accessibilityRole="button"
+          accessibilityLabel="发布新动态"
         >
-          <Text style={[styles.composeBtnText, { color: colors.accent }]}>＋</Text>
+          <Ionicons name="add" size={25} color={colors.accent} />
         </TouchableOpacity>
       </View>
 
@@ -172,9 +175,18 @@ export default function MomentsScreen() {
         onEndReachedThreshold={0.4}
         ListEmptyComponent={
           <View style={styles.empty}>
-            <Text style={[styles.emptyText, { color: colors.textMuted }]}>
-              还没有动态，发第一条吧
+            <Ionicons name="partly-sunny-outline" size={36} color={colors.textMuted} />
+            <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
+              这里还很安静，记录此刻的心情吧
             </Text>
+            <TouchableOpacity
+              style={[styles.emptyAction, { backgroundColor: colors.accent }]}
+              onPress={() => setComposerVisible(true)}
+              accessibilityRole="button"
+              accessibilityLabel="发布第一条动态"
+            >
+              <Text style={[styles.emptyActionText, { color: colors.accentText }]}>记录此刻</Text>
+            </TouchableOpacity>
           </View>
         }
       />
@@ -195,33 +207,46 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: 18,
-    paddingBottom: 12,
+    paddingBottom: 14,
   },
   title: {
-    fontSize: 22,
-    fontWeight: "600",
-    letterSpacing: 1,
+    fontSize: 28,
+    lineHeight: 34,
+    fontWeight: "700",
+    letterSpacing: 0.2,
   },
   composeBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    borderWidth: 1,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: "center",
     justifyContent: "center",
   },
-  composeBtnText: {
-    fontSize: 20,
-    lineHeight: 22,
-  },
   listContent: {
     paddingHorizontal: 16,
+    paddingTop: 2,
   },
   empty: {
-    paddingTop: 120,
+    paddingTop: 128,
     alignItems: "center",
+    paddingHorizontal: 32,
   },
   emptyText: {
-    fontSize: 14,
+    marginTop: 14,
+    fontSize: 16,
+    lineHeight: 23,
+    textAlign: "center",
+  },
+  emptyAction: {
+    minHeight: 44,
+    justifyContent: "center",
+    marginTop: 22,
+    borderRadius: 16,
+    paddingHorizontal: 22,
+    paddingVertical: 11,
+  },
+  emptyActionText: {
+    fontSize: 15,
+    fontWeight: "600",
   },
 });

@@ -10,6 +10,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useTheme } from "@/theme/useTheme";
 import { MOOD_TAGS, MOOD_COLORS, type MoodTag } from "@/types/schema";
 
@@ -24,6 +25,7 @@ interface Props {
  */
 export function MomentComposer({ visible, onClose, onSubmit }: Props) {
   const colors = useTheme();
+  const insets = useSafeAreaInsets();
   const [content, setContent] = useState("");
   const [mood, setMood] = useState<MoodTag>("平静");
 
@@ -51,7 +53,7 @@ export function MomentComposer({ visible, onClose, onSubmit }: Props) {
         style={styles.sheetWrap}
         pointerEvents="box-none"
       >
-        <View style={[styles.sheet, { backgroundColor: colors.sectionBg }]}>
+        <View style={[styles.sheet, { backgroundColor: colors.sectionBg, paddingBottom: insets.bottom + 20 }]}>
           <Text style={[styles.title, { color: colors.text }]}>发条动态</Text>
 
           {/* 心情标签胶囊 */}
@@ -62,6 +64,9 @@ export function MomentComposer({ visible, onClose, onSubmit }: Props) {
                 <TouchableOpacity
                   key={tag}
                   onPress={() => setMood(tag)}
+                  accessibilityRole="radio"
+                  accessibilityLabel={`心情：${tag}`}
+                  accessibilityState={{ selected }}
                   style={[
                     styles.moodPill,
                     {
@@ -74,7 +79,7 @@ export function MomentComposer({ visible, onClose, onSubmit }: Props) {
                   <Text
                     style={[
                       styles.moodPillText,
-                      { color: selected ? MOOD_COLORS[tag] : colors.textMuted },
+                      { color: selected ? colors.text : colors.textSecondary },
                     ]}
                   >
                     {tag}
@@ -93,10 +98,16 @@ export function MomentComposer({ visible, onClose, onSubmit }: Props) {
             multiline
             maxLength={300}
             autoFocus
+            accessibilityLabel="动态内容"
           />
 
           <View style={styles.actions}>
-            <TouchableOpacity onPress={close} style={styles.cancelBtn}>
+            <TouchableOpacity
+              onPress={close}
+              style={styles.cancelBtn}
+              accessibilityRole="button"
+              accessibilityLabel="取消发布"
+            >
               <Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -104,10 +115,13 @@ export function MomentComposer({ visible, onClose, onSubmit }: Props) {
               disabled={!canPublish}
               style={[
                 styles.publishBtn,
-                { backgroundColor: canPublish ? colors.accent : colors.btnDisabled },
+                { backgroundColor: canPublish ? colors.accent : colors.btnBg },
               ]}
+              accessibilityRole="button"
+              accessibilityLabel="发布动态"
+              accessibilityState={{ disabled: !canPublish }}
             >
-              <Text style={styles.publishText}>发布</Text>
+              <Text style={[styles.publishText, { color: canPublish ? colors.accentText : colors.textMuted }]}>发布</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -127,15 +141,16 @@ const styles = StyleSheet.create({
     bottom: 0,
   },
   sheet: {
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 18,
-    paddingBottom: 32,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 20,
+    paddingTop: 20,
   },
   title: {
-    fontSize: 17,
+    fontSize: 18,
+    lineHeight: 24,
     fontWeight: "600",
-    marginBottom: 14,
+    marginBottom: 16,
   },
   moodRow: {
     flexDirection: "row",
@@ -143,12 +158,13 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   moodPill: {
+    minHeight: 36,
     flexDirection: "row",
     alignItems: "center",
-    borderRadius: 16,
+    borderRadius: 18,
     borderWidth: 1,
-    paddingVertical: 6,
-    paddingHorizontal: 12,
+    paddingVertical: 7,
+    paddingHorizontal: 13,
     marginRight: 8,
     marginBottom: 8,
   },
@@ -160,38 +176,42 @@ const styles = StyleSheet.create({
   },
   moodPillText: {
     fontSize: 13,
+    lineHeight: 18,
     fontWeight: "500",
   },
   input: {
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 15,
-    lineHeight: 22,
-    minHeight: 96,
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+    lineHeight: 24,
+    minHeight: 112,
     textAlignVertical: "top",
   },
   actions: {
     flexDirection: "row",
     justifyContent: "flex-end",
     alignItems: "center",
-    marginTop: 14,
+    marginTop: 16,
   },
   cancelBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 14,
+    minHeight: 44,
+    justifyContent: "center",
+    paddingVertical: 10,
+    paddingHorizontal: 16,
   },
   cancelText: {
     fontSize: 15,
   },
   publishBtn: {
-    borderRadius: 18,
-    paddingVertical: 9,
-    paddingHorizontal: 22,
+    minHeight: 44,
+    justifyContent: "center",
+    borderRadius: 16,
+    paddingVertical: 10,
+    paddingHorizontal: 24,
     marginLeft: 10,
   },
   publishText: {
-    color: "#FFFFFF",
     fontSize: 15,
     fontWeight: "600",
   },

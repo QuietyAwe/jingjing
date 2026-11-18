@@ -8,7 +8,9 @@ import {
   Animated,
 } from "react-native";
 import dayjs from "dayjs";
+import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "@/theme/useTheme";
+import { MOTION, useReducedMotion } from "@/utils/motion";
 import { MOOD_COLORS, type Moment, type MomentComment, type MoodTag, type FriendPersona } from "@/types/schema";
 
 interface Props {
@@ -42,11 +44,13 @@ function formatRelative(iso: string): string {
 /** AI 评论生成中的三点微动效 */
 function TypingDots() {
   const colors = useTheme();
+  const reducedMotion = useReducedMotion();
   const a1 = useRef(new Animated.Value(0.25)).current;
   const a2 = useRef(new Animated.Value(0.25)).current;
   const a3 = useRef(new Animated.Value(0.25)).current;
 
   useEffect(() => {
+    if (reducedMotion) return;
     const makeLoop = (v: Animated.Value, delay: number) =>
       Animated.loop(
         Animated.sequence([
@@ -59,19 +63,22 @@ function TypingDots() {
     const loops = [makeLoop(a1, 0), makeLoop(a2, 160), makeLoop(a3, 320)];
     loops.forEach((l) => l.start());
     return () => loops.forEach((l) => l.stop());
-  }, [a1, a2, a3]);
+  }, [a1, a2, a3, reducedMotion]);
 
   return (
     <View style={styles.typingRow}>
       {[a1, a2, a3].map((v, i) => (
         <Animated.View
           key={i}
-          style={[styles.typingDot, { backgroundColor: colors.textMuted, opacity: v }]}
+          style={[styles.typingDot, { backgroundColor: colors.textMuted, opacity: reducedMotion ? 0.6 : v }]}
         />
       ))}
     </View>
   );
 }
+
+/** 同一条动态只播一次入场，滚动回收后不再闪入。 */
+const revealedMomentIds = new Set<number>();
 
 /**
  * 单条心情动态卡片：头像、心情标签、正文、相对时间、评论线程与评论输入
@@ -87,14 +94,28 @@ export function MomentCard({
   onBlockFriend,
 }: Props) {
   const colors = useTheme();
+  const reducedMotion = useReducedMotion();
   const [inputVisible, setInputVisible] = useState(false);
   const [draft, setDraft] = useState("");
+  const shouldEnter = useRef(!revealedMomentIds.has(moment.id)).current;
+  const fade = useRef(new Animated.Value(shouldEnter && !reducedMotion ? 0 : 1)).current;
 
-  // 新卡片淡入
-  const fade = useRef(new Animated.Value(0)).current;
   useEffect(() => {
-    Animated.timing(fade, { toValue: 1, duration: 260, useNativeDriver: true }).start();
-  }, [fade]);
+    revealedMomentIds.add(moment.id);
+    if (!shouldEnter) return;
+    if (reducedMotion) {
+      fade.setValue(1);
+      return;
+    }
+    const animation = Animated.timing(fade, {
+      toValue: 1,
+      duration: MOTION.enterDuration,
+      easing: MOTION.easing,
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [fade, moment.id, reducedMotion, shouldEnter]);
 
   const isMe = moment.author === "user";
   const isAi = moment.author === "ai";
@@ -109,7 +130,7 @@ export function MomentCard({
       ? aiLabel.slice(0, 1)
       : authorFriend?.avatar_emoji || authorFriend?.name?.slice(0, 1) || "友";
   const avatarBg = isMe ? colors.bubbleUser : isAi ? colors.accent : colors.accentMuted;
-  const avatarFg = isMe ? colors.textOnAccent : isAi ? "#FFFFFF" : colors.accent;
+  const avatarFg = isMe ? colors.textOnAccent : isAi ? colors.accentText : colors.accent;
 
   /** 评论署名：好友用真名，否则评论区全是「我」和 AI，看不出谁在说话 */
   const commentLabel = (author: MomentComment["author"], friendId?: number | null) => {
@@ -143,7 +164,7 @@ export function MomentCard({
           backgroundColor: colors.sectionBg,
           borderColor: colors.border,
           opacity: fade,
-          transform: [{ translateY: fade.interpolate({ inputRange: [0, 1], outputRange: [8, 0] }) }],
+          transform: [{ translateY: fade.interpolate({ inputRange: [0, 1], outputRange: [MOTION.enterDistance, 0] }) }],
         },
       ]}
     >
@@ -237,9 +258,14 @@ export function MomentCard({
         <TouchableOpacity
           onPress={() => setInputVisible((v) => !v)}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={styles.footerButton}
+          accessibilityRole="button"
+          accessibilityLabel={inputVisible ? "收起评论输入框" : "写评论"}
+          accessibilityState={{ expanded: inputVisible }}
         >
+          <Ionicons name="chatbubble-outline" size={15} color={colors.textMuted} />
           <Text style={[styles.footerAction, { color: colors.textMuted }]}>
-            💬 评论{comments.length > 0 ? ` (${comments.length})` : ""}
+            评论{comments.length > 0 ? ` ${comments.length}` : ""}
           </Text>
         </TouchableOpacity>
       </View>
@@ -255,13 +281,17 @@ export function MomentCard({
             placeholderTextColor={colors.placeholder}
             multiline
             maxLength={200}
+            accessibilityLabel="评论内容"
           />
           <TouchableOpacity
             onPress={send}
-            style={[styles.sendBtn, { backgroundColor: draft.trim() ? colors.accent : colors.btnDisabled }]}
+            style={[styles.sendBtn, { backgroundColor: draft.trim() ? colors.accent : colors.btnBg }]}
             disabled={!draft.trim()}
+            accessibilityRole="button"
+            accessibilityLabel="发送评论"
+            accessibilityState={{ disabled: !draft.trim() }}
           >
-            <Text style={[styles.sendText, { color: "#FFFFFF" }]}>发送</Text>
+            <Text style={[styles.sendText, { color: draft.trim() ? colors.accentText : colors.textMuted }]}>发送</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -271,29 +301,30 @@ export function MomentCard({
 
 const styles = StyleSheet.create({
   card: {
-    borderRadius: 16,
+    borderRadius: 18,
     borderWidth: StyleSheet.hairlineWidth,
-    padding: 14,
-    marginBottom: 14,
+    padding: 16,
+    marginBottom: 12,
   },
   header: {
     flexDirection: "row",
     alignItems: "center",
   },
   avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 42,
+    height: 42,
+    borderRadius: 21,
     alignItems: "center",
     justifyContent: "center",
   },
   avatarText: {
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: "600",
   },
   headerMain: {
     flex: 1,
-    marginLeft: 10,
+    minWidth: 0,
+    marginLeft: 11,
   },
   headerTop: {
     flexDirection: "row",
@@ -304,7 +335,8 @@ const styles = StyleSheet.create({
     maxWidth: "55%",
   },
   name: {
-    fontSize: 15,
+    fontSize: 16,
+    lineHeight: 21,
     fontWeight: "600",
   },
   moodWrap: {
@@ -320,45 +352,48 @@ const styles = StyleSheet.create({
   },
   moodText: {
     fontSize: 12,
+    lineHeight: 17,
     fontWeight: "500",
   },
   time: {
-    fontSize: 11,
+    fontSize: 12,
+    lineHeight: 17,
     marginTop: 2,
   },
   content: {
-    fontSize: 15,
-    lineHeight: 22,
-    marginTop: 10,
+    fontSize: 16,
+    lineHeight: 25,
+    marginTop: 12,
   },
   thread: {
-    borderRadius: 12,
-    padding: 10,
-    marginTop: 10,
+    borderRadius: 14,
+    padding: 12,
+    marginTop: 12,
   },
   commentRow: {
     flexDirection: "row",
     flexWrap: "wrap",
     alignItems: "flex-start",
-    marginBottom: 4,
+    marginBottom: 6,
   },
   commentAvatar: {
     fontSize: 12,
     marginRight: 4,
   },
   commentName: {
-    fontSize: 13,
+    fontSize: 14,
+    lineHeight: 21,
     fontWeight: "600",
   },
   commentText: {
     flex: 1,
-    fontSize: 13,
-    lineHeight: 19,
+    fontSize: 14,
+    lineHeight: 21,
   },
   typingRow: {
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 2,
+    paddingVertical: 3,
     paddingHorizontal: 2,
   },
   typingDot: {
@@ -372,8 +407,16 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
     marginTop: 10,
   },
+  footerButton: {
+    minHeight: 36,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 4,
+  },
   footerAction: {
     fontSize: 13,
+    lineHeight: 18,
   },
   inputRow: {
     flexDirection: "row",
@@ -382,20 +425,24 @@ const styles = StyleSheet.create({
   },
   input: {
     flex: 1,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 14,
-    maxHeight: 90,
+    minHeight: 44,
+    borderRadius: 14,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+    fontSize: 15,
+    lineHeight: 22,
+    maxHeight: 96,
   },
   sendBtn: {
     marginLeft: 8,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
+    minHeight: 44,
+    justifyContent: "center",
+    borderRadius: 14,
+    paddingHorizontal: 15,
+    paddingVertical: 10,
   },
   sendText: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "600",
   },
 });
