@@ -70,7 +70,7 @@ export const lightColors: ColorPalette = {
   inputBg: "#F3F1ED",
   btnBg: "#ECE9E4",
   btnDisabled: "#C9C5BF",
-  placeholder: "#7B7670",
+  placeholder: "#6F6A64",
 
   bubbleUser: "#F7E2DE",
   bubbleAi: "#F6F1EA",

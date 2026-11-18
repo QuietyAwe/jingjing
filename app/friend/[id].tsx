@@ -17,7 +17,7 @@ import {
   Platform,
   Alert,
 } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import ChatBubble, { StreamingBubble } from "@/components/ChatBubble";

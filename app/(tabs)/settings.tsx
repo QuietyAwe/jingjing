@@ -1000,7 +1000,7 @@ ${text}
   };
 
   const renderUserInfo = () => {
-    if (!userInfo) return <Text style={styles.emptyText}>暂无用户数据</Text>;
+    if (!userInfo) return <Text style={[styles.emptyText, { color: colors.textMuted }]}>暂无用户数据</Text>;
 
     const { basic_identity, social_graph, traits } = userInfo;
     const appointments = getUpcomingEvents();
@@ -1120,7 +1120,7 @@ ${text}
   const judgeRouting = modelRouting.retrieval_judge_config;
 
   return (
-    <ScrollView style={[styles.container, { backgroundColor: colors.bg }]}>
+    <ScrollView style={[styles.container, { backgroundColor: colors.bg }]} contentContainerStyle={styles.scrollContent}>
       {/* 外观 */}
       <CollapsibleSection title="外观" icon="🎨" defaultExpanded={false}>
         <TouchableOpacity style={[styles.row, { borderBottomColor: colors.border }]} onPress={toggleTheme}>
@@ -1146,6 +1146,9 @@ ${text}
                   currentCustomColors.bubbleUserBg === c && styles.colorChipActive,
                 ]}
                 onPress={() => saveCustomColors({ bubbleUserBg: c }, themeMode)}
+                accessibilityRole="radio"
+                accessibilityLabel={`用户消息背景 ${c}`}
+                accessibilityState={{ selected: currentCustomColors.bubbleUserBg === c }}
               />
             ))}
           </View>
@@ -1167,6 +1170,9 @@ ${text}
                   currentCustomColors.bubbleUserText === c && styles.colorChipActive,
                 ]}
                 onPress={() => saveCustomColors({ bubbleUserText: c }, themeMode)}
+                accessibilityRole="radio"
+                accessibilityLabel={`用户消息文字颜色 ${c}`}
+                accessibilityState={{ selected: currentCustomColors.bubbleUserText === c }}
               />
             ))}
           </View>
@@ -1188,6 +1194,9 @@ ${text}
                   currentCustomColors.bubbleAiBg === c && styles.colorChipActive,
                 ]}
                 onPress={() => saveCustomColors({ bubbleAiBg: c }, themeMode)}
+                accessibilityRole="radio"
+                accessibilityLabel={`AI 消息背景 ${c}`}
+                accessibilityState={{ selected: currentCustomColors.bubbleAiBg === c }}
               />
             ))}
           </View>
@@ -1209,6 +1218,9 @@ ${text}
                   currentCustomColors.bubbleAiText === c && styles.colorChipActive,
                 ]}
                 onPress={() => saveCustomColors({ bubbleAiText: c }, themeMode)}
+                accessibilityRole="radio"
+                accessibilityLabel={`AI 消息文字颜色 ${c}`}
+                accessibilityState={{ selected: currentCustomColors.bubbleAiText === c }}
               />
             ))}
           </View>
@@ -1239,10 +1251,13 @@ ${text}
             <Text style={[styles.rowDesc, { color: colors.textMuted }]}>逐字显示，首字更快（网络不稳定时可关闭）</Text>
           </View>
           <TouchableOpacity
-            style={[styles.toggle, stream_output ? styles.toggleOn : styles.toggleOff]}
+            style={[styles.toggle, { backgroundColor: stream_output ? colors.accent : colors.btnBg }]}
             onPress={() => saveStreamOutput(!stream_output)}
+            accessibilityRole="switch"
+            accessibilityLabel="流式输出"
+            accessibilityState={{ checked: stream_output }}
           >
-            <Text style={[styles.toggleText, stream_output ? styles.toggleTextOn : styles.toggleTextOff]}>
+            <Text style={[styles.toggleText, { color: stream_output ? colors.accentText : colors.textMuted }]}>
               {stream_output ? "开" : "关"}
             </Text>
           </TouchableOpacity>
@@ -1253,10 +1268,13 @@ ${text}
             <Text style={[styles.rowDesc, { color: colors.textMuted }]}>AI 输出带思考过程（仅 DeepSeek 等支持模型）</Text>
           </View>
           <TouchableOpacity
-            style={[styles.toggle, thinking_mode ? styles.toggleOn : styles.toggleOff]}
+            style={[styles.toggle, { backgroundColor: thinking_mode ? colors.accent : colors.btnBg }]}
             onPress={() => saveThinkingMode(!thinking_mode)}
+            accessibilityRole="switch"
+            accessibilityLabel="思考模式"
+            accessibilityState={{ checked: thinking_mode }}
           >
-            <Text style={[styles.toggleText, thinking_mode ? styles.toggleTextOn : styles.toggleTextOff]}>
+            <Text style={[styles.toggleText, { color: thinking_mode ? colors.accentText : colors.textMuted }]}>
               {thinking_mode ? "开" : "关"}
             </Text>
           </TouchableOpacity>
@@ -1267,10 +1285,13 @@ ${text}
             <Text style={[styles.rowDesc, { color: colors.textMuted }]}>回复完成后自动聚焦输入框，方便继续输入</Text>
           </View>
           <TouchableOpacity
-            style={[styles.toggle, auto_focus_input ? styles.toggleOn : styles.toggleOff]}
+            style={[styles.toggle, { backgroundColor: auto_focus_input ? colors.accent : colors.btnBg }]}
             onPress={() => saveAutoFocusInput(!auto_focus_input)}
+            accessibilityRole="switch"
+            accessibilityLabel="自动弹起输入框"
+            accessibilityState={{ checked: auto_focus_input }}
           >
-            <Text style={[styles.toggleText, auto_focus_input ? styles.toggleTextOn : styles.toggleTextOff]}>
+            <Text style={[styles.toggleText, { color: auto_focus_input ? colors.accentText : colors.textMuted }]}>
               {auto_focus_input ? "开" : "关"}
             </Text>
           </TouchableOpacity>
@@ -1345,10 +1366,13 @@ ${text}
             <Text style={[styles.rowDesc, { color: colors.textMuted }]}>让 AI 判断这句话想起了哪些往事，比关键词更准；关闭即回到纯本地检索</Text>
           </View>
           <TouchableOpacity
-            style={[styles.toggle, ai_retrieval_enabled ? styles.toggleOn : styles.toggleOff]}
+            style={[styles.toggle, { backgroundColor: ai_retrieval_enabled ? colors.accent : colors.btnBg }]}
             onPress={() => saveAiRetrievalEnabled(!ai_retrieval_enabled)}
+            accessibilityRole="switch"
+            accessibilityLabel="AI 检索判定"
+            accessibilityState={{ checked: ai_retrieval_enabled }}
           >
-            <Text style={[styles.toggleText, ai_retrieval_enabled ? styles.toggleTextOn : styles.toggleTextOff]}>
+            <Text style={[styles.toggleText, { color: ai_retrieval_enabled ? colors.accentText : colors.textMuted }]}>
               {ai_retrieval_enabled ? "开" : "关"}
             </Text>
           </TouchableOpacity>
@@ -1357,7 +1381,7 @@ ${text}
           开启后每轮会把全部记忆的标题与一句印象发给模型接口（判定质量优先），记忆本身仍只存在本机
         </Text>
         {retrievalFailStreak >= 3 ? (
-          <Text style={styles.sectionWarn}>
+          <Text style={[styles.sectionWarn, { color: colors.danger }]}>
             已连续 {retrievalFailStreak} 次判定失败，当前在用本地检索，请检查 API Key 与网络
             {retrievalFailReason ? `（${retrievalFailReason}）` : ""}
           </Text>
@@ -1488,7 +1512,7 @@ ${text}
                       <Text
                         style={[
                           styles.confirmText,
-                          { color: friendBusy ? colors.btnDisabled : colors.accent },
+                          { color: friendBusy ? colors.textMuted : colors.accent },
                         ]}
                       >
                         换一个
@@ -1509,7 +1533,7 @@ ${text}
           disabled={friendBusy}
           onPress={handleRebuildFriends}
         >
-          <Text style={[styles.actionText, { color: friendBusy ? colors.btnDisabled : colors.accent }]}>
+          <Text style={[styles.actionText, { color: friendBusy ? colors.textMuted : colors.accent }]}>
             {friendBusy ? "正在重新生成…" : "🔄 重建花名册（全部换新）"}
           </Text>
         </TouchableOpacity>
@@ -1685,10 +1709,10 @@ ${text}
 
       {/* 自动备份恢复列表 */}
       <Modal visible={showAutoBackupList} transparent animationType="fade">
-        <View style={styles.overlay}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>从自动备份恢复</Text>
-            <Text style={styles.modalHint}>选择一份备份恢复，会覆盖当前全部数据。恢复后 App 会自动刷新。</Text>
+        <View style={[styles.overlay, { backgroundColor: colors.overlayBg }]}>
+          <View style={[styles.modal, { backgroundColor: colors.sectionBg }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>从自动备份恢复</Text>
+            <Text style={[styles.modalHint, { color: colors.textMuted }]}>选择一份备份恢复，会覆盖当前全部数据。恢复后 App 会自动刷新。</Text>
             <ScrollView style={{ maxHeight: 320 }}>
               {autoBackupFiles.map((f) => (
                 <TouchableOpacity
@@ -1729,7 +1753,7 @@ ${text}
               ))}
             </ScrollView>
             <View style={styles.modalButtons}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowAutoBackupList(false)}><Text style={styles.cancelText}>关闭</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowAutoBackupList(false)}><Text style={[styles.cancelText, { color: colors.textMuted }]}>关闭</Text></TouchableOpacity>
             </View>
           </View>
         </View>
@@ -1737,11 +1761,11 @@ ${text}
 
       {/* API Key 弹窗 */}
       <Modal visible={showKeyModal} transparent animationType="fade">
-        <View style={styles.overlay}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>设置 API Key</Text>
+        <View style={[styles.overlay, { backgroundColor: colors.overlayBg }]}>
+          <View style={[styles.modal, { backgroundColor: colors.sectionBg }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>设置 API Key</Text>
             <TextInput
-              style={[styles.input, { borderColor: colors.border, color: colors.text }]}
+              style={[styles.input, { backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
               value={inputKey}
               onChangeText={setInputKey}
               placeholder="sk-..."
@@ -1758,8 +1782,8 @@ ${text}
               </Text>
             </TouchableOpacity>
             <View style={styles.modalButtons}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowKeyModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
-              <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveKey}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowKeyModal(false)}><Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: colors.accent }]} onPress={handleSaveKey}><Text style={[styles.confirmText, { color: colors.accentText }]}>保存</Text></TouchableOpacity>
             </View>
           </View>
         </View>
@@ -1767,14 +1791,14 @@ ${text}
 
       {/* API URL 弹窗 */}
       <Modal visible={showUrlModal} transparent animationType="fade">
-        <View style={styles.overlay}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>API 地址</Text>
-            <TextInput style={styles.input} value={inputUrl} onChangeText={setInputUrl} placeholder="https://api.openai.com/v1" placeholderTextColor="#9B9A97" autoCapitalize="none" autoCorrect={false} autoFocus />
-            <Text style={styles.modalHint}>DeepSeek: https://api.deepseek.com/v1{"\n"}Moonshot: https://api.moonshot.cn/v1</Text>
+        <View style={[styles.overlay, { backgroundColor: colors.overlayBg }]}>
+          <View style={[styles.modal, { backgroundColor: colors.sectionBg }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>API 地址</Text>
+            <TextInput style={[styles.input, { backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]} value={inputUrl} onChangeText={setInputUrl} placeholder="https://api.openai.com/v1" placeholderTextColor={colors.placeholder} autoCapitalize="none" autoCorrect={false} autoFocus />
+            <Text style={[styles.modalHint, { color: colors.textMuted }]}>DeepSeek: https://api.deepseek.com/v1{"\n"}Moonshot: https://api.moonshot.cn/v1</Text>
             <View style={styles.modalButtons}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowUrlModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
-              <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveUrl}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowUrlModal(false)}><Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: colors.accent }]} onPress={handleSaveUrl}><Text style={[styles.confirmText, { color: colors.accentText }]}>保存</Text></TouchableOpacity>
             </View>
           </View>
         </View>
@@ -1782,14 +1806,14 @@ ${text}
 
       {/* 称呼弹窗 */}
       <Modal visible={showNicknameModal} transparent animationType="fade">
-        <View style={styles.overlay}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>AI 怎么称呼你</Text>
-            <TextInput style={styles.input} value={inputNickname} onChangeText={setInputNickname} placeholder="留空则不指定" placeholderTextColor="#9B9A97" autoFocus />
-            <Text style={styles.modalHint}>系统提示词中的 [user] 会被替换为此称呼（不区分大小写）</Text>
+        <View style={[styles.overlay, { backgroundColor: colors.overlayBg }]}>
+          <View style={[styles.modal, { backgroundColor: colors.sectionBg }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>AI 怎么称呼你</Text>
+            <TextInput style={[styles.input, { backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]} value={inputNickname} onChangeText={setInputNickname} placeholder="留空则不指定" placeholderTextColor={colors.placeholder} autoFocus />
+            <Text style={[styles.modalHint, { color: colors.textMuted }]}>系统提示词中的 [user] 会被替换为此称呼（不区分大小写）</Text>
             <View style={styles.modalButtons}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowNicknameModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
-              <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveNickname}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowNicknameModal(false)}><Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: colors.accent }]} onPress={handleSaveNickname}><Text style={[styles.confirmText, { color: colors.accentText }]}>保存</Text></TouchableOpacity>
             </View>
           </View>
         </View>
@@ -1797,14 +1821,14 @@ ${text}
 
       {/* AI名字弹窗 */}
       <Modal visible={showAiNameModal} transparent animationType="fade">
-        <View style={styles.overlay}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>怎么称呼 TA</Text>
-            <TextInput style={styles.input} value={inputAiName} onChangeText={setInputAiName} placeholder="留空则显示默认标题" placeholderTextColor="#9B9A97" autoFocus />
-            <Text style={styles.modalHint}>标题栏会显示 TA 的名字</Text>
+        <View style={[styles.overlay, { backgroundColor: colors.overlayBg }]}>
+          <View style={[styles.modal, { backgroundColor: colors.sectionBg }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>怎么称呼 TA</Text>
+            <TextInput style={[styles.input, { backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]} value={inputAiName} onChangeText={setInputAiName} placeholder="留空则显示默认标题" placeholderTextColor={colors.placeholder} autoFocus />
+            <Text style={[styles.modalHint, { color: colors.textMuted }]}>标题栏会显示 TA 的名字</Text>
             <View style={styles.modalButtons}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowAiNameModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
-              <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveAiName}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowAiNameModal(false)}><Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: colors.accent }]} onPress={handleSaveAiName}><Text style={[styles.confirmText, { color: colors.accentText }]}>保存</Text></TouchableOpacity>
             </View>
           </View>
         </View>
@@ -1812,17 +1836,17 @@ ${text}
 
       {/* 检索屏蔽词弹窗 */}
       <Modal visible={showBlockedModal} transparent animationType="fade">
-        <View style={styles.overlay}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>检索屏蔽词</Text>
-            <TextInput style={styles.input} value={inputBlocked} onChangeText={setInputBlocked} placeholder="用逗号分隔，如：小明、私藏" placeholderTextColor="#9B9A97" autoFocus />
-            <Text style={styles.modalHint}>
+        <View style={[styles.overlay, { backgroundColor: colors.overlayBg }]}>
+          <View style={[styles.modal, { backgroundColor: colors.sectionBg }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>检索屏蔽词</Text>
+            <TextInput style={[styles.input, { backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]} value={inputBlocked} onChangeText={setInputBlocked} placeholder="用逗号分隔，如：小明、私藏" placeholderTextColor={colors.placeholder} autoFocus />
+            <Text style={[styles.modalHint, { color: colors.textMuted }]}>
               这些词按停用词处理：整句只有它们时直接跳过 AI 判定，兜底检索也不会拿它们当关键词{"\n"}
               默认是你们俩的称呼，留空恢复默认；不会改动记忆内容
             </Text>
             <View style={styles.modalButtons}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowBlockedModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
-              <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveBlocked}><Text style={styles.confirmText}>保存</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowBlockedModal(false)}><Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: colors.accent }]} onPress={handleSaveBlocked}><Text style={[styles.confirmText, { color: colors.accentText }]}>保存</Text></TouchableOpacity>
             </View>
           </View>
         </View>
@@ -1830,30 +1854,30 @@ ${text}
 
       {/* 好友偏好弹窗 */}
       <Modal visible={showFriendPrefsModal} transparent animationType="fade">
-        <View style={styles.overlay}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>好友偏好</Text>
+        <View style={[styles.overlay, { backgroundColor: colors.overlayBg }]}>
+          <View style={[styles.modal, { backgroundColor: colors.sectionBg }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>好友偏好</Text>
             <TextInput
-              style={[styles.input, { minHeight: 96 }]}
+              style={[styles.input, { minHeight: 96, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
               value={inputFriendPrefs}
               onChangeText={setInputFriendPrefs}
               placeholder="如：不要前任相关的朋友；只要同事/同学；别总开我们玩笑"
-              placeholderTextColor="#9B9A97"
+              placeholderTextColor={colors.placeholder}
               multiline
               textAlignVertical="top"
               autoFocus
             />
-            <Text style={styles.modalHint}>
+            <Text style={[styles.modalHint, { color: colors.textMuted }]}>
               一条偏好同时管「交什么样的朋友」和「朋友怎么说话」{"\n"}
               好友还没露面时修改会静默换掉不合规的人；已经出现过就只影响以后{"\n"}
               留空 = 不限制
             </Text>
             <View style={styles.modalButtons}>
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowFriendPrefsModal(false)}>
-                <Text style={styles.cancelText}>取消</Text>
+                <Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.confirmBtn} onPress={handleSaveFriendPrefs}>
-                <Text style={styles.confirmText}>保存</Text>
+              <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: colors.accent }]} onPress={handleSaveFriendPrefs}>
+                <Text style={[styles.confirmText, { color: colors.accentText }]}>保存</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1862,25 +1886,25 @@ ${text}
 
       {/* 好友改名弹窗（只改称呼，不改人格） */}
       <Modal visible={renamingFriend !== null} transparent animationType="fade">
-        <View style={styles.overlay}>
-          <View style={styles.modal}>
-            <Text style={styles.modalTitle}>改名</Text>
+        <View style={[styles.overlay, { backgroundColor: colors.overlayBg }]}>
+          <View style={[styles.modal, { backgroundColor: colors.sectionBg }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>改名</Text>
             <TextInput
-              style={styles.input}
+              style={[styles.input, { backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
               value={inputFriendName}
               onChangeText={setInputFriendName}
               placeholder="新的称呼"
-              placeholderTextColor="#9B9A97"
+              placeholderTextColor={colors.placeholder}
               autoFocus
               maxLength={12}
             />
-            <Text style={styles.modalHint}>只改你怎么称呼 ta，性格、口吻与关系都不变</Text>
+            <Text style={[styles.modalHint, { color: colors.textMuted }]}>只改你怎么称呼 ta，性格、口吻与关系都不变</Text>
             <View style={styles.modalButtons}>
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setRenamingFriend(null)}>
-                <Text style={styles.cancelText}>取消</Text>
+                <Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.confirmBtn} onPress={handleRenameFriend}>
-                <Text style={styles.confirmText}>保存</Text>
+              <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: colors.accent }]} onPress={handleRenameFriend}>
+                <Text style={[styles.confirmText, { color: colors.accentText }]}>保存</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -2010,7 +2034,7 @@ ${text}
 
             {!previewMode && (
               <TouchableOpacity style={[styles.editorSaveBtn, { backgroundColor: colors.accent }]} onPress={handleSaveConfig}>
-                <Text style={[styles.editorSaveBtnText, { color: colors.textOnAccent }]}>确认保存</Text>
+                <Text style={[styles.editorSaveBtnText, { color: colors.accentText }]}>确认保存</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -2019,44 +2043,44 @@ ${text}
 
       {/* 新建事件弹窗 */}
       <Modal visible={showNewEventModal} transparent animationType="fade">
-        <View style={styles.overlay}>
-          <View style={[styles.modal, { maxHeight: "80%" }]}>
-            <Text style={styles.modalTitle}>新建记忆事件</Text>
+        <View style={[styles.overlay, { backgroundColor: colors.overlayBg }]}>
+          <View style={[styles.modal, { maxHeight: "80%", backgroundColor: colors.sectionBg }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>新建记忆事件</Text>
             <TextInput
-              style={[styles.input, { minHeight: 100, textAlignVertical: "top" }]}
+              style={[styles.input, { minHeight: 100, textAlignVertical: "top", backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
               value={newEventText}
               onChangeText={setNewEventText}
               placeholder="输入事件内容..."
-              placeholderTextColor="#9B9A97"
+              placeholderTextColor={colors.placeholder}
               multiline
               autoFocus
             />
             <View style={{ flexDirection: "row", alignItems: "center", marginTop: 12, gap: 8 }}>
               <Text style={[styles.modalHint, { marginTop: 0 }]}>权重 (1-100，会随时间衰减):</Text>
               <TextInput
-                style={[styles.input, { flex: 1, marginTop: 0 }]}
+                style={[styles.input, { flex: 1, marginTop: 0, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                 value={newEventWeight}
                 onChangeText={setNewEventWeight}
                 placeholder="50"
-                placeholderTextColor="#9B9A97"
+                placeholderTextColor={colors.placeholder}
                 keyboardType="number-pad"
               />
             </View>
             <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8, gap: 8 }}>
               <Text style={[styles.modalHint, { marginTop: 0 }]}>优先级 (1-9):</Text>
               <TextInput
-                style={[styles.input, { flex: 1, marginTop: 0 }]}
+                style={[styles.input, { flex: 1, marginTop: 0, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                 value={newEventPriority}
                 onChangeText={setNewEventPriority}
                 placeholder="5"
-                placeholderTextColor="#9B9A97"
+                placeholderTextColor={colors.placeholder}
                 keyboardType="number-pad"
               />
             </View>
-            <Text style={styles.modalHint}>权重：检索命中概率。优先级：1-3琐事，4-6中等，7-9重大（影响衰减速度）</Text>
+            <Text style={[styles.modalHint, { color: colors.textMuted }]}>权重：检索命中概率。优先级：1-3琐事，4-6中等，7-9重大（影响衰减速度）</Text>
             <View style={styles.modalButtons}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowNewEventModal(false)}><Text style={styles.cancelText}>取消</Text></TouchableOpacity>
-              <TouchableOpacity style={styles.confirmBtn} onPress={handleCreateEvent}><Text style={styles.confirmText}>创建</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowNewEventModal(false)}><Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: colors.accent }]} onPress={handleCreateEvent}><Text style={[styles.confirmText, { color: colors.accentText }]}>创建</Text></TouchableOpacity>
             </View>
           </View>
         </View>
@@ -2090,33 +2114,33 @@ ${text}
                   <View style={{ flex: 1 }}>
                     <Text style={[styles.rowDesc, { color: colors.textMuted }]}>优先级 (1-9)</Text>
                     <TextInput
-                      style={[styles.input, { marginTop: 4 }]}
+                      style={[styles.input, { marginTop: 4, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                       value={editEventPriority}
                       onChangeText={setEditEventPriority}
                       keyboardType="number-pad"
                       placeholder="5"
-                      placeholderTextColor="#9B9A97"
+                      placeholderTextColor={colors.placeholder}
                     />
                   </View>
                   <View style={{ flex: 1 }}>
                     <Text style={[styles.rowDesc, { color: colors.textMuted }]}>权重 (1-100，想起时回到这个值，之后随时间衰减)</Text>
                     <TextInput
-                      style={[styles.input, { marginTop: 4 }]}
+                      style={[styles.input, { marginTop: 4, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                       value={editEventWeight}
                       onChangeText={setEditEventWeight}
                       keyboardType="number-pad"
                       placeholder="100"
-                      placeholderTextColor="#9B9A97"
+                      placeholderTextColor={colors.placeholder}
                     />
                   </View>
                 </View>
                 <Text style={[styles.rowDesc, { color: colors.textMuted, marginTop: 10 }]}>别名（逗号或空格分隔，换种说法也能想起这件事）</Text>
                 <TextInput
-                  style={[styles.input, { marginTop: 4 }]}
+                  style={[styles.input, { marginTop: 4, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                   value={editEventAliases}
                   onChangeText={setEditEventAliases}
                   placeholder="例如：朋友圈、动态、帖子"
-                  placeholderTextColor="#9B9A97"
+                  placeholderTextColor={colors.placeholder}
                 />
                 <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: 12 }}>
                   <Text style={[styles.rowDesc, { color: colors.textMuted, flex: 1, marginRight: 8 }]}>
@@ -2155,18 +2179,18 @@ ${text}
                       </Text>
                       <Text style={[styles.rowDesc, { color: colors.textMuted, marginTop: 8 }]}>检索词／唤醒词（逗号分隔）</Text>
                       <TextInput
-                        style={[styles.input, { marginTop: 4 }]}
+                        style={[styles.input, { marginTop: 4, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                         value={fragmentEdits[frag.id]?.keywords ?? frag.keywords}
                         onChangeText={(text) => setFragmentEdits((prev) => ({
                           ...prev,
                           [frag.id]: { keywords: text, priority: prev[frag.id]?.priority ?? String(frag.priority) },
                         }))}
                         placeholder="用户以后可能怎么提起这件事"
-                        placeholderTextColor="#9B9A97"
+                        placeholderTextColor={colors.placeholder}
                       />
                       <Text style={[styles.rowDesc, { color: colors.textMuted, marginTop: 8 }]}>优先级 (1-9)</Text>
                       <TextInput
-                        style={[styles.input, { marginTop: 4 }]}
+                        style={[styles.input, { marginTop: 4, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                         value={fragmentEdits[frag.id]?.priority ?? String(frag.priority)}
                         onChangeText={(text) => setFragmentEdits((prev) => ({
                           ...prev,
@@ -2183,45 +2207,45 @@ ${text}
                   <Text style={[styles.editorLabel, { color: colors.text, marginHorizontal: 0, marginTop: 16 }]}>添加片段</Text>
                 </View>
                 <TextInput
-                  style={[styles.input, { marginTop: 8 }]}
+                  style={[styles.input, { marginTop: 8, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                   value={newFragmentSummary}
                   onChangeText={setNewFragmentSummary}
                   placeholder="片段摘要（必填，建议包含 [user] [time]，写清发生了什么 + 细节 + 情绪）"
-                  placeholderTextColor="#9B9A97"
+                  placeholderTextColor={colors.placeholder}
                   multiline
                 />
                 <TextInput
-                  style={[styles.input, { marginTop: 8 }]}
+                  style={[styles.input, { marginTop: 8, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                   value={newFragmentGist}
                   onChangeText={setNewFragmentGist}
                   placeholder="一句话概要（选填，20 字内，留空自动截取）"
-                  placeholderTextColor="#9B9A97"
+                  placeholderTextColor={colors.placeholder}
                 />
                 <TextInput
-                  style={[styles.input, { marginTop: 8 }]}
+                  style={[styles.input, { marginTop: 8, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                   value={newFragmentKeywords}
                   onChangeText={setNewFragmentKeywords}
                   placeholder="检索词／唤醒词（逗号分隔，留空则这条片段不会被想起）"
-                  placeholderTextColor="#9B9A97"
+                  placeholderTextColor={colors.placeholder}
                 />
                 <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8, gap: 8 }}>
                   <Text style={[styles.modalHint, { marginTop: 0 }]}>优先级 (1-9):</Text>
                   <TextInput
-                    style={[styles.input, { flex: 1, marginTop: 0 }]}
+                    style={[styles.input, { flex: 1, marginTop: 0, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                     value={newFragmentPriority}
                     onChangeText={setNewFragmentPriority}
                     placeholder="5"
-                    placeholderTextColor="#9B9A97"
+                    placeholderTextColor={colors.placeholder}
                     keyboardType="number-pad"
                   />
                 </View>
                 <Text style={[styles.modalHint, { marginTop: 4 }]}>1-3琐事，4-6中等，7-9重大</Text>
                 <TouchableOpacity
-                  style={[styles.setupButton, { backgroundColor: newFragmentSummary.trim() ? colors.accent : colors.btnDisabled, marginTop: 12, marginBottom: 20 }]}
+                  style={[styles.setupButton, { backgroundColor: newFragmentSummary.trim() ? colors.accent : colors.btnBg, marginTop: 12, marginBottom: 20 }]}
                   onPress={handleCreateFragment}
                   disabled={!newFragmentSummary.trim()}
                 >
-                  <Text style={[styles.setupButtonText, { color: colors.textOnAccent }]}>添加片段</Text>
+                  <Text style={[styles.setupButtonText, { color: newFragmentSummary.trim() ? colors.accentText : colors.textMuted }]}>添加片段</Text>
                 </TouchableOpacity>
               </ScrollView>
             )}
@@ -2391,7 +2415,7 @@ ${text}
                   setDeletingEvent(null);
                 }
               }}>
-                <Text style={[styles.confirmText, { color: colors.textOnAccent }]}>删除</Text>
+                <Text style={[styles.confirmText, { color: colors.dangerText }]}>删除</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -2437,11 +2461,11 @@ ${text}
                     <Text style={[styles.modelErrorText, { color: colors.danger, marginTop: 8 }]}>{personaError}</Text>
                   ) : null}
                   <TouchableOpacity
-                    style={[styles.setupButton, { backgroundColor: personaInput.trim() ? colors.accent : colors.btnDisabled, marginTop: 16 }]}
+                    style={[styles.setupButton, { backgroundColor: personaInput.trim() ? colors.accent : colors.btnBg, marginTop: 16 }]}
                     onPress={handleExtractPersona}
                     disabled={!personaInput.trim() || personaExtracting}
                   >
-                    <Text style={[styles.setupButtonText, { color: colors.textOnAccent }]}>
+                    <Text style={[styles.setupButtonText, { color: personaInput.trim() ? colors.accentText : colors.textMuted }]}>
                       {personaExtracting ? "提取中..." : "✨ 开始提取"}
                     </Text>
                   </TouchableOpacity>
@@ -2487,10 +2511,10 @@ ${text}
                     style={[styles.setupButton, { backgroundColor: colors.accent, marginTop: 20 }]}
                     onPress={handleMergePersona}
                   >
-                    <Text style={[styles.setupButtonText, { color: colors.textOnAccent }]}>合并到现有画像</Text>
+                    <Text style={[styles.setupButtonText, { color: colors.accentText }]}>合并到现有画像</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={[styles.resetBtn, { marginTop: 12, alignSelf: "center" }]}
+                    style={[styles.resetBtn, { marginTop: 12, alignSelf: "center", backgroundColor: colors.bg }]}
                     onPress={() => { setPersonaResult(null); setPersonaError(""); }}
                   >
                     <Text style={[styles.resetText, { color: colors.textMuted }]}>重新输入</Text>
@@ -2508,7 +2532,7 @@ ${text}
           <View style={[styles.modal, { backgroundColor: colors.sectionBg }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>编辑{editFieldLabel}</Text>
             <TextInput
-              style={[styles.input, styles.editFieldInput, { color: colors.text, borderColor: colors.border }]}
+              style={[styles.input, styles.editFieldInput, { color: colors.text, borderColor: colors.border, backgroundColor: colors.inputBg }]}
               value={editFieldValue}
               onChangeText={setEditFieldValue}
               placeholder={`输入${editFieldLabel}，多项用逗号或换行分隔`}
@@ -2521,7 +2545,7 @@ ${text}
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setEditFieldModalVisible(false)}>
                 <Text style={[styles.cancelText, { color: colors.textMuted }]}>取消</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.confirmBtn} onPress={saveEditField}>
+              <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: colors.accent }]} onPress={saveEditField}>
                 <Text style={[styles.confirmText, { color: colors.accent }]}>保存</Text>
               </TouchableOpacity>
             </View>
@@ -2533,18 +2557,18 @@ ${text}
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#F7F7F5", paddingTop: 8 },
-  section: { backgroundColor: "#FFFFFF", marginBottom: 16, paddingHorizontal: 20, paddingVertical: 4 },
-  sectionTitle: { fontSize: 12, fontWeight: "600", color: "#9B9A97", textTransform: "uppercase", letterSpacing: 1, paddingVertical: 12 },
-  row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E8E7E4" },
+  container: { flex: 1, paddingTop: 8 },
+  scrollContent: { paddingBottom: 28 },
+  sectionTitle: { fontSize: 13, fontWeight: "600", color: "#9B9A97", letterSpacing: 0.2, paddingVertical: 12 },
+  row: { minHeight: 48, flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 13, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E8E7E4" },
   rowLeft: { flex: 1, marginRight: 12 },
   rowRight: { flexShrink: 0 },
-  rowDesc: { fontSize: 12, color: "#9B9A97", marginTop: 2 },
-  sectionNote: { fontSize: 12, color: "#9B9A97", lineHeight: 18, paddingVertical: 10 },
-  sectionWarn: { fontSize: 12, color: "#E03E3E", lineHeight: 18, paddingBottom: 12 },
-  label: { fontSize: 15, color: "#37352F" },
+  rowDesc: { fontSize: 12, lineHeight: 18, color: "#9B9A97", marginTop: 2 },
+  sectionNote: { fontSize: 12, lineHeight: 18, color: "#9B9A97", paddingVertical: 10 },
+  sectionWarn: { fontSize: 12, lineHeight: 18, color: "#E03E3E", paddingBottom: 12 },
+  label: { fontSize: 15, lineHeight: 21, color: "#37352F" },
   friendActions: { flexDirection: "row", flexWrap: "wrap", gap: 16, marginTop: 8 },
-  value: { fontSize: 14, color: "#9B9A97", maxWidth: 160, textAlign: "right" },
+  value: { fontSize: 14, lineHeight: 20, color: "#9B9A97", maxWidth: 160, textAlign: "right" },
   valueChanged: { color: "#2F81F7" },
   // 模型行
   modelRow: { paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E8E7E4" },
@@ -2560,8 +2584,8 @@ const styles = StyleSheet.create({
   modelLoadingBox: { flex: 1, justifyContent: "center", alignItems: "center" },
   modelLoadingText: { fontSize: 15, color: "#9B9A97" },
   modelErrorText: { fontSize: 14, color: "#E03E3E", marginBottom: 16 },
-  actionRow: { paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E8E7E4" },
-  actionText: { fontSize: 15, color: "#2F81F7" },
+  actionRow: { minHeight: 48, justifyContent: "center", paddingVertical: 13, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E8E7E4" },
+  actionText: { fontSize: 15, lineHeight: 21, color: "#52778A" },
   promptRow: { paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E8E7E4" },
   promptPreview: { fontSize: 14, color: "#37352F", lineHeight: 20 },
   editHint: { fontSize: 12, color: "#2F81F7", marginTop: 8 },
@@ -2573,24 +2597,24 @@ const styles = StyleSheet.create({
   editableValue: { fontSize: 14, flex: 1, textAlign: "right" },
   emptyText: { fontSize: 14, color: "#9B9A97", fontStyle: "italic" },
   hint: { textAlign: "center", fontSize: 12, color: "#9B9A97", marginTop: 12, marginBottom: 40 },
-  overlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "center", alignItems: "center" },
-  modal: { width: "85%", backgroundColor: "#fff", borderRadius: 12, padding: 24 },
-  modalTitle: { fontSize: 17, fontWeight: "600", color: "#37352F", marginBottom: 16 },
-  input: { borderWidth: 1, borderColor: "#E8E7E4", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: "#37352F" },
+  overlay: { flex: 1, justifyContent: "center", alignItems: "center" },
+  modal: { width: "86%", borderRadius: 18, padding: 22 },
+  modalTitle: { fontSize: 17, lineHeight: 23, fontWeight: "600", marginBottom: 16 },
+  input: { minHeight: 44, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 11, fontSize: 16, lineHeight: 22 },
   // 用户属性编辑框：多行可换行，长内容不再挤成一条细长条
   editFieldInput: { minHeight: 120, maxHeight: 260, textAlignVertical: "top", lineHeight: 22 },
-  modalHint: { fontSize: 12, color: "#9B9A97", marginTop: 8, lineHeight: 18 },
+  modalHint: { fontSize: 12, marginTop: 8, lineHeight: 18 },
   // 「显示明文 / 隐藏」：贴在 API Key 输入框下方右对齐
   keyToggleText: { fontSize: 13, marginTop: 8, textAlign: "right" },
-  modalButtons: { flexDirection: "row", justifyContent: "flex-end", marginTop: 20, gap: 12 },
-  cancelBtn: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 6 },
-  cancelText: { fontSize: 15, color: "#9B9A97" },
-  confirmBtn: { paddingHorizontal: 20, paddingVertical: 10, backgroundColor: "#2F81F7", borderRadius: 6 },
-  confirmText: { fontSize: 15, color: "#fff", fontWeight: "600" },
+  modalButtons: { flexDirection: "row", justifyContent: "flex-end", marginTop: 20, gap: 10 },
+  cancelBtn: { minHeight: 44, justifyContent: "center", paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12 },
+  cancelText: { fontSize: 15 },
+  confirmBtn: { minHeight: 44, justifyContent: "center", paddingHorizontal: 18, paddingVertical: 10, borderRadius: 12 },
+  confirmText: { fontSize: 15, fontWeight: "600" },
   // 编辑器
-  editorContainer: { flex: 1, backgroundColor: "#FFFFFF" },
-  editorHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingTop: 56, paddingBottom: 16, paddingHorizontal: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E8E7E4" },
-  editorTitle: { fontSize: 17, fontWeight: "600", color: "#37352F" },
+  editorContainer: { flex: 1 },
+  editorHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingTop: 56, paddingBottom: 14, paddingHorizontal: 20, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E8E7E4" },
+  editorTitle: { fontSize: 17, lineHeight: 23, fontWeight: "600" },
   editorLabel: { fontSize: 15, fontWeight: "600", color: "#37352F", marginTop: 20, marginHorizontal: 20 },
   editorDesc: { fontSize: 13, color: "#9B9A97", marginTop: 4, marginHorizontal: 20 },
   editorInputSingle: { marginHorizontal: 20, marginTop: 12, borderWidth: 1, borderColor: "#E8E7E4", borderRadius: 8, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: "#37352F" },
@@ -2598,8 +2622,8 @@ const styles = StyleSheet.create({
   editorFooter: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingHorizontal: 20, paddingVertical: 16, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#E8E7E4" },
   resetBtn: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, backgroundColor: "#F7F7F5" },
   resetText: { fontSize: 13, color: "#9B9A97" },
-  editorSaveBtn: { marginHorizontal: 20, marginBottom: 34, marginTop: 8, backgroundColor: "#2F81F7", borderRadius: 10, paddingVertical: 14, alignItems: "center" },
-  editorSaveBtnText: { color: "#FFFFFF", fontSize: 16, fontWeight: "600" },
+  editorSaveBtn: { minHeight: 50, justifyContent: "center", marginHorizontal: 20, marginBottom: 34, marginTop: 8, borderRadius: 14, paddingVertical: 13, alignItems: "center" },
+  editorSaveBtnText: { fontSize: 16, fontWeight: "600" },
   // 变量选择器
   varPickerContainer: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 4, borderTopWidth: StyleSheet.hairlineWidth },
   varPickerTitle: { fontSize: 11, marginBottom: 6 },
@@ -2640,7 +2664,7 @@ const styles = StyleSheet.create({
   // 颜色选择器
   colorRow: { paddingVertical: 14, borderBottomWidth: StyleSheet.hairlineWidth },
   colorChips: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 10 },
-  colorChip: { width: 32, height: 32, borderRadius: 16, borderWidth: 2 },
+  colorChip: { width: 44, height: 44, borderRadius: 22, borderWidth: 2 },
   colorChipActive: { borderWidth: 3 },
   // 预览
   editorHeaderRight: { flexDirection: "row", alignItems: "center", gap: 16 },
@@ -2650,12 +2674,8 @@ const styles = StyleSheet.create({
   previewText: { fontSize: 13, color: "#37352F", lineHeight: 20, fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace" },
   // 开关
   // flexShrink: 0：左侧说明文字再长也不能把开关挤扁、挤出屏幕
-  toggle: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, minWidth: 50, alignItems: "center", flexShrink: 0 },
-  toggleOn: { backgroundColor: "#2F81F7" },
-  toggleOff: { backgroundColor: "#F0F0EE" },
+  toggle: { minHeight: 38, minWidth: 54, justifyContent: "center", paddingHorizontal: 15, paddingVertical: 8, borderRadius: 19, alignItems: "center", flexShrink: 0 },
   toggleText: { fontSize: 14, fontWeight: "600" },
-  toggleTextOn: { color: "#FFFFFF" },
-  toggleTextOff: { color: "#37352F" },
-  setupButton: { paddingVertical: 14, borderRadius: 10, alignItems: "center" },
+  setupButton: { minHeight: 48, justifyContent: "center", paddingVertical: 12, borderRadius: 14, alignItems: "center" },
   setupButtonText: { fontSize: 16, fontWeight: "600" },
 });

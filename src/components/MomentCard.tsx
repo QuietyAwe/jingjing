@@ -8,7 +8,7 @@ import {
   Animated,
 } from "react-native";
 import dayjs from "dayjs";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { useTheme } from "@/theme/useTheme";
 import { MOTION, useReducedMotion } from "@/utils/motion";
 import { MOOD_COLORS, type Moment, type MomentComment, type MoodTag, type FriendPersona } from "@/types/schema";
