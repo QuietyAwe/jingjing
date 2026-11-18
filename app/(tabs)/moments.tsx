@@ -164,6 +164,7 @@ export default function MomentsScreen() {
             friendMap={friendMap}
             aiTyping={typingMap[item.id]}
             onSendComment={addComment}
+            onOpenAi={() => router.push("/chat")}
             onOpenFriend={(friendId) => router.push(`/friend/${friendId}`)}
             onBlockFriend={handleBlockFriend}
           />

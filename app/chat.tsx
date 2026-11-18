@@ -135,7 +135,9 @@ import { useRouter } from "expo-router";
 import { useFocusEffect } from "@react-navigation/native";
 import type { ChatMessage } from "@/types/schema";
 
-/** 首屏渲染的消息条数（更早的消息滑到顶部时再加载） */
+/** 首次进入只渲染最近这些消息，其余滑到顶部再加载 */
+const INITIAL_RENDER_COUNT = 20;
+/** 每次向上补加载的消息条数 */
 const PAGE_SIZE = 30;
 
 // Android 旧架构上 LayoutAnimation 需显式开启；新架构（Fabric）上此调用无副作用
@@ -364,7 +366,7 @@ export default function ChatScreen() {
    * FlatList 懒渲染时未渲染项的高度是估算值，contentSize 不准会导致定位偏移，
    * 因此限定一个较小的窗口，让首屏高度是真实值
    */
-  const [renderCount, setRenderCount] = useState(PAGE_SIZE);
+  const [renderCount, setRenderCount] = useState(INITIAL_RENDER_COUNT);
   const visibleMessages = useMemo(
     () => (messages.length > renderCount ? messages.slice(-renderCount) : messages),
     [messages, renderCount]

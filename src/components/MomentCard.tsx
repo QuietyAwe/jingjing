@@ -23,6 +23,8 @@ interface Props {
   /** AI 正在写评论（显示三点动效） */
   aiTyping?: boolean;
   onSendComment: (momentId: number, content: string) => void;
+  /** 点主 AI 头像/署名：回到主聊天 */
+  onOpenAi?: () => void;
   /** 点好友头像/署名：进私聊（在动态里看到 ta 就想聊，不该先去会话列表翻） */
   onOpenFriend?: (friendId: number) => void;
   /** 长按好友头像：不让他再出现（快捷入口，不用翻设置） */
@@ -90,6 +92,7 @@ export function MomentCard({
   friendMap,
   aiTyping,
   onSendComment,
+  onOpenAi,
   onOpenFriend,
   onBlockFriend,
 }: Props) {
@@ -131,6 +134,16 @@ export function MomentCard({
       : authorFriend?.avatar_emoji || authorFriend?.name?.slice(0, 1) || "友";
   const avatarBg = isMe ? colors.bubbleUser : isAi ? colors.accent : colors.accentMuted;
   const avatarFg = isMe ? colors.textOnAccent : isAi ? colors.accentText : colors.accent;
+  const canOpenAuthor = isAi ? !!onOpenAi : !!authorFriend && !!onOpenFriend;
+  const canInteractAuthor = canOpenAuthor || (!!authorFriend && !!onBlockFriend);
+
+  const openAuthor = () => {
+    if (isAi) {
+      onOpenAi?.();
+      return;
+    }
+    if (authorFriend && onOpenFriend) onOpenFriend(authorFriend.id);
+  };
 
   /** 评论署名：好友用真名，否则评论区全是「我」和 AI，看不出谁在说话 */
   const commentLabel = (author: MomentComment["author"], friendId?: number | null) => {
@@ -172,14 +185,14 @@ export function MomentCard({
       <View style={styles.header}>
         <TouchableOpacity
           activeOpacity={0.8}
-          disabled={!authorFriend || (!onOpenFriend && !onBlockFriend)}
-          onPress={() => {
-            if (authorFriend && onOpenFriend) onOpenFriend(authorFriend.id);
-          }}
+          disabled={!canInteractAuthor}
+          onPress={openAuthor}
           onLongPress={() => {
             if (authorFriend && onBlockFriend) onBlockFriend(authorFriend.id);
           }}
           style={[styles.avatar, { backgroundColor: avatarBg }]}
+          accessibilityRole={canOpenAuthor ? "button" : undefined}
+          accessibilityLabel={canOpenAuthor ? (isAi ? `打开和${aiLabel}的聊天` : `打开和${authorName}的私聊`) : undefined}
         >
           <Text style={[styles.avatarText, { color: avatarFg }]}>{avatarText}</Text>
         </TouchableOpacity>
@@ -187,11 +200,11 @@ export function MomentCard({
           <View style={styles.headerTop}>
             <TouchableOpacity
               activeOpacity={0.7}
-              disabled={!authorFriend || !onOpenFriend}
-              onPress={() => {
-                if (authorFriend && onOpenFriend) onOpenFriend(authorFriend.id);
-              }}
+              disabled={!canOpenAuthor}
+              onPress={openAuthor}
               style={styles.nameWrap}
+              accessibilityRole={canOpenAuthor ? "button" : undefined}
+              accessibilityLabel={canOpenAuthor ? (isAi ? `打开和${aiLabel}的聊天` : `打开和${authorName}的私聊`) : undefined}
             >
               <Text style={[styles.name, { color: colors.text }]} numberOfLines={1}>
                 {authorName}
@@ -216,18 +229,24 @@ export function MomentCard({
         <View style={[styles.thread, { backgroundColor: colors.inputBg }]}>
           {comments.map((c) => {
             const cf = c.friend_id != null ? friendMap?.[c.friend_id] : undefined;
+            const commentIsAi = c.author === "ai";
+            const canOpenComment = commentIsAi ? !!onOpenAi : !!cf && !!onOpenFriend;
+            const canInteractComment = canOpenComment || (!!cf && !!onBlockFriend);
             return (
               <TouchableOpacity
                 key={c.id}
                 activeOpacity={0.8}
-                disabled={!cf || (!onOpenFriend && !onBlockFriend)}
+                disabled={!canInteractComment}
                 onPress={() => {
-                  if (cf && onOpenFriend) onOpenFriend(cf.id);
+                  if (commentIsAi) onOpenAi?.();
+                  else if (cf && onOpenFriend) onOpenFriend(cf.id);
                 }}
                 onLongPress={() => {
                   if (cf && onBlockFriend) onBlockFriend(cf.id);
                 }}
                 style={styles.commentRow}
+                accessibilityRole={canOpenComment ? "button" : undefined}
+                accessibilityLabel={commentIsAi && canOpenComment ? `打开和${aiLabel}的聊天` : undefined}
               >
                 <Text style={[styles.commentAvatar, { color: colors.textMuted }]}>
                   {commentAvatar(c.author, c.friend_id)}
