@@ -28,7 +28,7 @@ const EXTRACT_SYSTEM = `你要把一局「20问」游戏写成一条记忆。
 要求：
 1. gist：20 字以内的一句话概要，必须包含 [user] 和 [time]，只留最核心的印象
 2. summary：80~120 字，必须包含 [user] 和 [time] 占位符。概括这局游戏（谜底、第几次猜中或没猜中）、过程中闲聊提到的值得一提的内容，以及 [user] 当时的情绪与反应；提到自己时用 [ai] 指代
-3. keywords: 2~6 个检索用关键词，覆盖关键实体（他人姓名、地名、事物、概念），同时写出同义说法；不要写用户或你自己的名字/称呼（每条记忆都有，检索无区分度）
+3. keywords: 6~9 个检索词，只写用户以后提起这局时会出现的字面词：谜底、猜过的东西、闲聊里提到的实体（他人姓名、地名、事物），不同说法各占一个。每个词都要过判据——**这个词离开这局还成立吗？成立就不是线索**（「游戏」「对战」「猜数字」「玩得开心」都不写）；不要写用户或你自己的名字/称呼
 4. priority：这是共同经历，给 7-9（玩得尽兴/猜中给 8-9，平淡给 7）
 5. new_info：仅当闲聊中明确透露了新的用户信息时才填，否则留空对象 {}
    - 不要把游戏问答本身（"是/不是"）当成用户信息
@@ -94,7 +94,7 @@ export async function extractGameMemory(
       summary: normalizeMemoryText(parsed.summary),
       keywords: stripIdentityKeywords(
         (parsed.keywords ?? []).map((k) => String(k).trim()).filter(Boolean)
-      ).slice(0, 8),
+      ).slice(0, 10),
       priority: Number.isFinite(priority) ? Math.min(9, Math.max(7, priority)) : 7,
       new_info: parsed.new_info,
     };

@@ -1106,7 +1106,7 @@ export default function ChatScreen() {
     const aiWon = state.winner === "ai";
     const summary = `[user] [time]和我玩数字炸弹，最后${aiWon ? "他踩到炸弹输了" : "我踩到炸弹输了"}（炸弹是 ${state.bomb}），${aiWon ? "他有点不服，我还挺得意" : "他得意坏了，还想再来一局"}`;
     const gist = aiWon ? "[user]玩数字炸弹踩雷了" : "[user]玩数字炸弹赢了我";
-    insertEpisode("一起玩数字炸弹", gist, summary, aiWon ? 8 : 7, "数字炸弹,猜数字,踩雷,炸弹");
+    insertEpisode("一起玩数字炸弹", gist, summary, aiWon ? 8 : 7, "数字炸弹,炸弹,玩炸弹");
     if (gid) {
       updateGameResultNote(gid, summary);
       // 标记已结束：getHistory 才会把这局合并成一条「游戏回顾」摘要
@@ -1143,7 +1143,7 @@ export default function ChatScreen() {
           "[user]玩数字炸弹中途退出了",
           `[user] [time]和我玩数字炸弹，中途退出了（炸弹是 ${bombState.bomb}），他不太想玩了，下次可以再来`,
           7,
-          "数字炸弹,猜数字,炸弹"
+          "数字炸弹,炸弹,玩炸弹"
         );
         if (gid) {
           finishGameSession(gid, "abandoned", "玩家退出对局");
@@ -1372,7 +1372,7 @@ export default function ChatScreen() {
         if (useChatStore.getState().isLoading || truthDareRolling) return;
         const gid = gameSession?.id;
         const summary = `[user] [time]和我玩真心话大冒险，轮流掷骰抽题，聊了真心话也做了小冒险，都很坦诚，觉得彼此更亲近了`;
-        insertEpisode("一起玩真心话大冒险", "[user]玩真心话大冒险，很坦诚", summary, 8, "真心话大冒险,真心话,大冒险,掷骰子");
+        insertEpisode("一起玩真心话大冒险", "[user]玩真心话大冒险，很坦诚", summary, 8, "真心话大冒险,真心话,大冒险");
         if (gid) updateGameResultNote(gid, summary);
         addMessage({
           id: genMsgId(),
@@ -1597,7 +1597,7 @@ export default function ChatScreen() {
         ? "[user]和我玩快艇骰子打平"
         : "[user]玩快艇骰子输给我了";
     const priority = status === "quit" ? 7 : state.winner === "user" ? 8 : 7;
-    insertEpisode("一起玩快艇骰子", gist, summary, priority, "快艇骰子,骰子,快艇,对战");
+    insertEpisode("一起玩快艇骰子", gist, summary, priority, "快艇骰子,快艇,骰子");
     if (gameId) updateGameResultNote(gameId, summary);
   };
 

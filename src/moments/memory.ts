@@ -49,7 +49,7 @@ const EXTRACT_SYSTEM = `你要把一次「心情动态」（类似朋友圈）�
 要求：
 1. gist：20 字以内的一句话概要，必须包含 [time]，并视来源带上 [user]（用户发的/互动的）、[ai]（你自己发的）或好友的名字（朋友发的），只留最核心的印象
 2. summary：80~120 字，必须包含 [time] 占位符，并视内容带上 [user]/[ai]/好友名字。写清三件事：① 谁发了什么/说了什么 ② 关键细节（原话关键词、提到的人事物）③ 当时的情绪与态度。像人真正会记住的那样写，别写成干巴巴的标题
-3. keywords: 2~6 个检索用关键词，覆盖关键实体与情绪词，**同时写出同义说法**（如 ["难过","低落","心情不好"]）；不要写用户或你自己的名字/称呼（每条记忆都有，检索无区分度）
+3. keywords: 6~9 个检索词，只写用户以后提起这条动态时会出现的字面词：好友的名字、提到的物件与地点、原话里的关键词，不同说法各占一个（如 ["叶棠","转专业","极地纪录片"]）。每个词都要过判据——**这个词离开这条动态还成立吗？成立就不是线索**：情绪套话（难过、低落、心情不好、烦躁、想念）、时间词、以及用户或你自己的名字/称呼一律不写
 4. priority: 1-9（日常流水 3-5，情绪明显波动或重要心事 6-8）
 
 严格输出 JSON：
@@ -123,7 +123,7 @@ async function extractMomentMemory(
       summary: normalizeMemoryText(parsed.summary),
       keywords: stripIdentityKeywords(
         (parsed.keywords ?? []).map((k) => String(k).trim()).filter(Boolean)
-      ).slice(0, 8),
+      ).slice(0, 10),
       priority: Number.isFinite(priority) ? Math.min(9, Math.max(1, priority)) : 5,
     };
   } catch (err) {

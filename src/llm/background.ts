@@ -57,7 +57,7 @@ function normalizeFragment(raw: NewFragment): NewFragment {
     // 身份词（用户昵称 / AI 名称）不入库当关键词：每条记忆都有名字，命中没有区分度
     keywords: stripIdentityKeywords(
       (raw.keywords ?? []).map((k) => String(k).trim()).filter(Boolean)
-    ).slice(0, 8),
+    ).slice(0, 10),
     priority: Number.isFinite(priority) && priority >= 1 && priority <= 9 ? priority : 5,
     target_event_index: Number(raw.target_event_index) || -1,
     new_event_text: restoreIdentityNames((raw.new_event_text ?? "").trim()),

@@ -130,7 +130,8 @@ export function recordFriendChatTrace(friend: FriendPersona): void {
     `[time]和${friend.name}私下聊了会儿`,
     `[time][user]和${friend.name}私下聊了挺久，聊得挺投入。[ai]当时不在场，只后来知道有这么回事。`,
     4,
-    `${friend.name},私聊,聊天`
+    // 「私聊」「聊天」这类词离开这条记忆照样成立，只留好友名字做线索
+    friend.name
   );
   logDebug("好友私聊", `已写入弱痕迹：和${friend.name}聊天`);
 }
