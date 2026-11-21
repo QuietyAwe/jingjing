@@ -369,7 +369,8 @@ const RECALL_PROBABILITY_CAP = 0.9;
 /**
  * 动态新近度 → 灵光一闪的事件权重倍数
  *
- * 刚发/刚被用户评论的帖子 4× > 用户刚发的、用户刚浏览过的 2.5× > 其他好友刚发的 1.5×。
+ * 刚发/刚被用户评论的帖子 4× > 用户刚发的、用户刚浏览过的 2.5×。
+ * 好友自己发帖不计倍数：好友几乎天天发，算进来就变成每轮都「想起」朋友圈。
  * 事件按帖子作者归属（见 moments/events.ts），同一事件取最高倍数。
  */
 function recentMomentBoost(now: dayjs.Dayjs = dayjs()): Map<string, number> {
@@ -380,7 +381,8 @@ function recentMomentBoost(now: dayjs.Dayjs = dayjs()): Map<string, number> {
   const sinceIso = now.subtract(MOMENT_RECENCY_HOURS, "hour").toISOString();
 
   for (const author of getRecentMomentAuthors(sinceIso)) {
-    bump(momentEventOf(author), author === "ai" ? 4 : author === "user" ? 2.5 : 1.5);
+    if (author === "friend") continue;
+    bump(momentEventOf(author), author === "ai" ? 4 : 2.5);
   }
   // 用户刚在帖子下评论：那个帖子（按作者归事件）大幅提高
   for (const author of getRecentUserCommentedMomentAuthors(sinceIso)) {
@@ -606,7 +608,7 @@ export async function retrieve(userInput: string): Promise<RetrievalResult> {
   }
 
   // 灵光一闪：两条通道，只注入一条
-  // ① 近期动态：概率由新近度权重累加得出（用户刚评论/自己刚发帖 ≈ 0.85）
+  // ① 近期动态：概率由新近度权重累加得出（用户刚评论/自己刚发帖 ≈ 0.82）
   // ② 冷记忆：没有新鲜事时的偶然想起，概率 epiphany_trigger_probability
   const { epiphany_trigger_probability } = getWeightDecay();
   const { recent_moment_recall_weight } = getThresholds();

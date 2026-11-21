@@ -127,7 +127,7 @@ const THRESHOLD_FIELDS: ConfigField[] = [
   { key: "friend_roster_size", label: "好友人数", type: "number", description: "AI 熟人圈的固定人数（默认 5，重建花名册时生效）" },
   { key: "friend_moment_probability", label: "好友每日发帖概率", type: "number", description: "每位好友每天发一条动态的概率（0~1，默认 0.35），太高会抢主角戏份" },
   { key: "friend_comment_probability", label: "好友评论概率", type: "number", description: "每位好友「刷到这条动态」的概率（0~1，默认 0.5）。刷到的人设一起进提示词，由 AI 自己判断谁真的会留言——可以一个都不留，人数不设上限" },
-  { key: "recent_moment_recall_weight", label: "近期动态回想权重", type: "number", description: "每 1× 动态新近度折算的灵光一闪概率（默认 0.2）：用户刚评论/自己刚发帖 = 4× → 约 85%" },
+  { key: "recent_moment_recall_weight", label: "近期动态回想权重", type: "number", description: "每 1× 动态新近度折算的灵光一闪概率（默认 0.2）：用户刚评论/自己刚发帖 = 4× → 约 82%。好友自己发帖不计入" },
 ];
 
 // 提示词分组配置

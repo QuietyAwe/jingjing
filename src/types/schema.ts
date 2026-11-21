@@ -261,7 +261,7 @@ export interface ThresholdsConfig {
   friend_moment_probability: number;
   /** 每条动态被好友评论的概率（0~1） */
   friend_comment_probability: number;
-  /** 每 1× 动态新近度折算的灵光一闪概率（4× → 约 85%） */
+  /** 每 1× 动态新近度折算的灵光一闪概率（4× → 约 82%） */
   recent_moment_recall_weight: number;
 }
 

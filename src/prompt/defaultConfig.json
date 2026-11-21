@@ -40,7 +40,7 @@
   },
   "weight_decay": {
     "ebbinghaus_decay_rate": 0.02,
-    "epiphany_trigger_probability": 0.05
+    "epiphany_trigger_probability": 0.02
   },
   "model_routing": {
     "background_extraction_config": {
