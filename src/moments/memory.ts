@@ -158,14 +158,19 @@ async function writeMomentMemory(momentId: number, kind: MomentMemoryKind): Prom
     return;
   }
 
+  // 检索只认检索词，而动态的事件标题是「我的心情动态」这种书面说法：
+  // 口语说法必须自己占检索词的位置，否则用户说「朋友圈」永远想不起来
+  const keywords = [...MOMENT_EVENT_ALIASES, ...(extraction.keywords ?? [])]
+    .filter((k, i, arr) => arr.indexOf(k) === i)
+    .slice(0, 10);
   const eventId = insertEpisode(
     eventTextFor(moment),
     extraction.gist,
     extraction.summary,
     extraction.priority,
-    (extraction.keywords ?? []).join(",")
+    keywords.join(",")
   );
-  // 事件标题是「我的心情动态」这种书面说法，用户嘴上说的是「朋友圈/动态」
+  // 别名只留给「新事件挂靠旧事件」用（合并判定），不再参与检索
   addEventAliases(eventId, MOMENT_EVENT_ALIASES);
   logDebug("动态记忆", `已写入记忆: #${momentId}（${kind}）→ ${extraction.gist}`);
 }

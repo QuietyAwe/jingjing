@@ -530,28 +530,6 @@ export function replaceEventAliases(eventId: number, raw: string): void {
   addEventAliases(eventId, raw.split(/[,，、\s]+/));
 }
 
-/**
- * 批量取事件的别名文本（合并过的旧标题），供检索打分用
- *
- * 只命中别名的事件如果仍用 event_text 打分，会被「重合度 > 0」过滤掉，
- * 所以检索侧必须把别名拼进打分文本。
- */
-export function getEventAliasText(eventIds: number[]): Map<number, string> {
-  const map = new Map<number, string>();
-  if (eventIds.length === 0) return map;
-  const db = getDB();
-  const placeholders = eventIds.map(() => "?").join(",");
-  const rows = db.getAllSync<{ event_id: number; aliases: string }>(
-    `SELECT event_id, GROUP_CONCAT(alias, ' ') AS aliases
-     FROM memory_event_aliases
-     WHERE event_id IN (${placeholders})
-     GROUP BY event_id`,
-    ...eventIds
-  );
-  for (const row of rows) map.set(row.event_id, row.aliases ?? "");
-  return map;
-}
-
 /** 按别名查事件：合并过的标题再次出现时直接挂靠，不再重复判断 */
 export function getEventByAlias(alias: string): MemoryEvent | null {
   const norm = normalizeAlias(alias);

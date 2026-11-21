@@ -21,7 +21,7 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
 #findings{white-space:pre-wrap}
 </style></head><body><div class="wrap">
 <h1>记忆检索召回评估</h1>
-<div class="meta">jingjing · 78 条真实陪伴场景用例 · 35 条模拟往事 · 分词与打分函数取自真实源码 · 生成于 2026/11/17 17:07:06</div>
+<div class="meta">jingjing · 78 条真实陪伴场景用例 · 35 条模拟往事 · 分词与打分函数取自真实源码 · 生成于 2026/11/21 11:43:09</div>
 
 <h2>总体指标（上一版 / 当前实现）</h2>
 <div class="cards">
@@ -35,20 +35,20 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
   </div>
   <div class="card">
     <div class="lab">当前实现 拆段+IDF+截断 / 仅标签</div>
-    <div class="big">65.4%</div><div class="sub">逐例完全正确 51/78</div>
-    <div class="kv"><span>Precision</span><b>67.9%</b></div>
-    <div class="kv"><span>Recall</span><b>82.6%</b></div>
-    <div class="kv"><span>副作用误触发</span><b class="bad">7 例</b></div>
-    <div class="kv"><span>TP / FP / FN</span><b>57 / 27 / 12</b></div>
+    <div class="big">67.9%</div><div class="sub">逐例完全正确 53/78</div>
+    <div class="kv"><span>Precision</span><b>72.7%</b></div>
+    <div class="kv"><span>Recall</span><b>81.2%</b></div>
+    <div class="kv"><span>副作用误触发</span><b class="bad">5 例</b></div>
+    <div class="kv"><span>TP / FP / FN</span><b>56 / 21 / 13</b></div>
   </div></div>
 <div class="box"><b>指标口径</b>：逐例「完全正确」= 命中集合与理想集合完全一致；Precision = 正确命中 / 全部命中；Recall = 正确命中 / 全部应命中；「副作用误触发」= 本不该命中却命中（会写库刷权重、擦亮片段）。理想集合按「人听到这句话会想起什么」人工标注，见 <code>tests/cases/retrieval.cases.mjs</code>。</div>
 
 <h2>实现对照</h2>
-<table><thead><tr><th>实现</th><th>逐例完全正确</th><th>Precision</th><th>Recall</th><th>副作用误触发</th><th>TP / FP / FN</th></tr></thead><tbody><tr><td>上一版 全字段 / 长≥2 / 截断</td><td><b>48/78</b> (61.5%)</td><td>90.2%</td><td>53.6%</td><td class="bad">1 例</td><td>37 / 4 / 32</td></tr><tr><td>当前实现 拆段+IDF+截断 / 仅标签</td><td><b>51/78</b> (65.4%)</td><td>67.9%</td><td>82.6%</td><td class="bad">7 例</td><td>57 / 27 / 12</td></tr><tr><td>更早 命中即算（全字段 / 两段式）</td><td><b>45/78</b> (57.7%)</td><td>63.4%</td><td>75.4%</td><td class="bad">9 例</td><td>52 / 30 / 17</td></tr><tr><td>只放宽门槛 全字段 / 长≥1 / 两段式</td><td><b>44/78</b> (56.4%)</td><td>63.0%</td><td>73.9%</td><td class="bad">9 例</td><td>51 / 30 / 18</td></tr><tr><td>实验 编辑距离兜底（未转正）</td><td><b>51/78</b> (65.4%)</td><td>67.9%</td><td>82.6%</td><td class="bad">7 例</td><td>57 / 27 / 12</td></tr></tbody></table>
+<table><thead><tr><th>实现</th><th>逐例完全正确</th><th>Precision</th><th>Recall</th><th>副作用误触发</th><th>TP / FP / FN</th></tr></thead><tbody><tr><td>上一版 全字段 / 长≥2 / 截断</td><td><b>48/78</b> (61.5%)</td><td>90.2%</td><td>53.6%</td><td class="bad">1 例</td><td>37 / 4 / 32</td></tr><tr><td>当前实现 拆段+IDF+截断 / 仅标签</td><td><b>53/78</b> (67.9%)</td><td>72.7%</td><td>81.2%</td><td class="bad">5 例</td><td>56 / 21 / 13</td></tr><tr><td>更早 命中即算（全字段 / 两段式）</td><td><b>45/78</b> (57.7%)</td><td>63.4%</td><td>75.4%</td><td class="bad">9 例</td><td>52 / 30 / 17</td></tr><tr><td>只放宽门槛 全字段 / 长≥1 / 两段式</td><td><b>44/78</b> (56.4%)</td><td>63.0%</td><td>73.9%</td><td class="bad">9 例</td><td>51 / 30 / 18</td></tr><tr><td>实验 编辑距离兜底（未转正）</td><td><b>53/78</b> (67.9%)</td><td>72.7%</td><td>81.2%</td><td class="bad">5 例</td><td>56 / 21 / 13</td></tr></tbody></table>
 <div class="box">三行是三代实现：<b>更早</b>（全字段、命中即算）→ <b>上一版</b>（全字段、长句要 ≥2 个词、相对截断、标题命中就停）→ <b>当前</b>（按标点拆段、两通道合并、IDF 加权 + 50% 截断、同分按最近被想起排，标签按写入侧新规范：情绪词进标签、时间词/泛称禁入）。第四行是参照组：只放宽门槛、不动字段，用来说明问题不在门槛。最后一行是 <b>编辑距离兜底实验</b>（未转正）：带四道闸（独立成词、同位置换一字、唯一候选、拼音差 ≤1 字）能零误报捞回「拉铁↔拿铁」，但只对「用户单独打出两字错字」这一个窄场景生效，且要引入拼音依赖——收益配不上复杂度，决定不进产品代码。</div>
 
 <h2>分组表现</h2>
-<table><thead><tr><th>场景组</th><th>上一版正确</th><th>当前实现正确</th><th>当前仍误命中</th></tr></thead><tbody><tr><td>A 寒暄</td><td>9/9</td><td>9/9</td><td>0</td></tr><tr><td>B 短实词</td><td>6/7</td><td>5/7</td><td>0</td></tr><tr><td>C 换说法</td><td>4/7</td><td>7/7</td><td>0</td></tr><tr><td>D 情绪</td><td>2/5</td><td>3/5</td><td>1</td></tr><tr><td>E 闲聊</td><td>5/5</td><td>5/5</td><td>0</td></tr><tr><td>F 身份名</td><td>1/3</td><td>2/3</td><td>0</td></tr><tr><td>G 长句</td><td>2/4</td><td>2/4</td><td>0</td></tr><tr><td>H 时间</td><td>1/3</td><td>2/3</td><td>1</td></tr><tr><td>I 边界</td><td>3/4</td><td>2/4</td><td>1</td></tr><tr><td>J 多件事</td><td>0/1</td><td>0/1</td><td>0</td></tr><tr><td>K 错别字</td><td>1/5</td><td>2/5</td><td>0</td></tr><tr><td>L 否定转折</td><td>4/4</td><td>1/4</td><td>2</td></tr><tr><td>M 问句指代</td><td>1/5</td><td>4/5</td><td>0</td></tr><tr><td>N 硬干扰</td><td>2/3</td><td>0/3</td><td>2</td></tr><tr><td>O 长尾抽样</td><td>0/3</td><td>1/3</td><td>0</td></tr><tr><td>P 中英数字</td><td>1/3</td><td>1/3</td><td>0</td></tr><tr><td>Q 近邻混淆</td><td>6/7</td><td>5/7</td><td>0</td></tr></tbody></table>
+<table><thead><tr><th>场景组</th><th>上一版正确</th><th>当前实现正确</th><th>当前仍误命中</th></tr></thead><tbody><tr><td>A 寒暄</td><td>9/9</td><td>9/9</td><td>0</td></tr><tr><td>B 短实词</td><td>6/7</td><td>5/7</td><td>0</td></tr><tr><td>C 换说法</td><td>4/7</td><td>6/7</td><td>0</td></tr><tr><td>D 情绪</td><td>2/5</td><td>4/5</td><td>0</td></tr><tr><td>E 闲聊</td><td>5/5</td><td>5/5</td><td>0</td></tr><tr><td>F 身份名</td><td>1/3</td><td>2/3</td><td>0</td></tr><tr><td>G 长句</td><td>2/4</td><td>4/4</td><td>0</td></tr><tr><td>H 时间</td><td>1/3</td><td>3/3</td><td>0</td></tr><tr><td>I 边界</td><td>3/4</td><td>2/4</td><td>1</td></tr><tr><td>J 多件事</td><td>0/1</td><td>0/1</td><td>0</td></tr><tr><td>K 错别字</td><td>1/5</td><td>2/5</td><td>0</td></tr><tr><td>L 否定转折</td><td>4/4</td><td>1/4</td><td>2</td></tr><tr><td>M 问句指代</td><td>1/5</td><td>4/5</td><td>0</td></tr><tr><td>N 硬干扰</td><td>2/3</td><td>0/3</td><td>2</td></tr><tr><td>O 长尾抽样</td><td>0/3</td><td>1/3</td><td>0</td></tr><tr><td>P 中英数字</td><td>1/3</td><td>1/3</td><td>0</td></tr><tr><td>Q 近邻混淆</td><td>6/7</td><td>4/7</td><td>0</td></tr></tbody></table>
 
 <h2>逐例明细</h2>
 <table><thead><tr><th>组</th><th>用户输入</th><th>分词结果</th><th>理想命中</th><th>上一版命中</th><th>当前命中</th><th>判定</th><th>考察点</th></tr></thead><tbody><tr>
@@ -252,11 +252,11 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
   </tr><tr>
     <td class="grp">C 换说法</td>
     <td class="q">上次汇报翻车那事</td>
-    <td class="kw">上次 / 次汇 / 汇报 / 报翻 / 翻车 / 车那 / 那事</td>
+    <td class="kw">无</td>
     <td>被领导批评</td>
     <td class="old">被领导批评</td>
-    <td class="new">被领导批评</td>
-    <td><span class="ok">✓ 正确</span></td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
     <td class="note">合并前的叫法，指的是同一件事</td>
   </tr><tr>
     <td class="grp">D 情绪</td>
@@ -297,11 +297,11 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
   </tr><tr>
     <td class="grp">D 情绪</td>
     <td class="q">心情低落</td>
-    <td class="kw">心情 / 情低 / 低落</td>
+    <td class="kw">无</td>
     <td>—</td>
     <td class="old">—</td>
-    <td class="new">[user]的心情动态</td>
-    <td><span class="err">✗ 误命中</span></td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
     <td class="note">只说了状态、没给任何线索，人会先关心当下，不急着翻旧账</td>
   </tr><tr>
     <td class="grp">E 闲聊</td>
@@ -381,7 +381,7 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
     <td class="kw">天加 / 加班 / 班到 / 到很 / 很晚 / 来路 / 路上 / 上又 / 又去 / 去巷 / 巷口 / 口面 / 面馆 / 馆吃 / 吃了 / 了碗 / 碗面 / 还想 / 想起 / 起我 / 我妈 / 妈做 / 做的 / 的番 / 番茄 / 茄炒 / 炒蛋</td>
     <td>加班到很晚、巷口面馆、妈妈做的番茄炒蛋</td>
     <td class="old">妈妈做的番茄炒蛋、巷口面馆、加班到很晚</td>
-    <td class="new">妈妈做的番茄炒蛋、加班到很晚、巷口面馆</td>
+    <td class="new">妈妈做的番茄炒蛋、巷口面馆、加班到很晚</td>
     <td><span class="ok">✓ 正确</span></td>
     <td class="note">一句话提了三件事，人都想得起来</td>
   </tr><tr>
@@ -399,8 +399,8 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
     <td class="kw">周末 / 末想 / 想去 / 去爬 / 爬山 / 顺便 / 便把 / 把大 / 大理 / 理的 / 的机 / 机票 / 票订 / 订了</td>
     <td>周末去西山、打算去大理</td>
     <td class="old">周末去西山、打算去大理</td>
-    <td class="new">打算去大理、周末去西山、元旦想去成都</td>
-    <td><span class="warn">△ 过召回</span></td>
+    <td class="new">打算去大理、周末去西山</td>
+    <td><span class="ok">✓ 正确</span></td>
     <td class="note">爬山和大理各对应一件事</td>
   </tr><tr>
     <td class="grp">G 长句</td>
@@ -408,8 +408,8 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
     <td class="kw">近天 / 天天 / 天开 / 开会 / 会到 / 到十 / 十点 / 回家 / 家倒 / 倒头 / 头就 / 就睡 / 周末 / 末也 / 也没 / 没歇 / 歇过 / 压力 / 力一 / 直下 / 下不 / 不去 / 还好 / 好昨 / 天把 / 把机 / 机票 / 票订 / 订了 / 年假 / 假去 / 去大 / 大理 / 理看 / 看洱 / 洱海</td>
     <td>打算去大理、加班到很晚</td>
     <td class="old">打算去大理</td>
-    <td class="new">打算去大理、加班到很晚、周末的火锅局</td>
-    <td><span class="warn">△ 过召回</span></td>
+    <td class="new">打算去大理、加班到很晚</td>
+    <td><span class="ok">✓ 正确</span></td>
     <td class="note">指向大理这趟旅行，「压力一直下不去」也会牵出赶稿加班那段日子</td>
   </tr><tr>
     <td class="grp">H 时间</td>
@@ -423,11 +423,11 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
   </tr><tr>
     <td class="grp">H 时间</td>
     <td class="q">下周三的面试</td>
-    <td class="kw">下周 / 周三 / 三的 / 的面 / 面试</td>
+    <td class="kw">无</td>
     <td>—</td>
     <td class="old">—</td>
-    <td class="new">周三羽毛球局</td>
-    <td><span class="err">✗ 误命中</span></td>
+    <td class="new">—</td>
+    <td><span class="ok">✓ 正确</span></td>
     <td class="note">这是还没发生的事，人会聊它本身，不是回忆往事</td>
   </tr><tr>
     <td class="grp">H 时间</td>
@@ -480,7 +480,7 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
     <td class="kw">加班 / 班到 / 到很 / 很晚 / 周末 / 末去 / 去西 / 西山 / 还感 / 感冒 / 冒发 / 发烧 / 打算 / 算去 / 去大 / 大理</td>
     <td>加班到很晚、周末去西山、感冒发烧、打算去大理</td>
     <td class="old">加班到很晚、周末去西山、打算去大理</td>
-    <td class="new">打算去大理、周末去西山、加班到很晚</td>
+    <td class="new">感冒发烧、打算去大理、周末去西山</td>
     <td><span class="warn">△ 漏召回</span></td>
     <td class="note">一口气说了四件事，人也该四件都想起</td>
   </tr><tr>
@@ -513,11 +513,11 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
   </tr><tr>
     <td class="grp">K 错别字</td>
     <td class="q">想去西珊散散心</td>
-    <td class="kw">想去 / 去西 / 西珊 / 珊散 / 散散 / 散心</td>
+    <td class="kw">无</td>
     <td>周末去西山</td>
     <td class="old">—</td>
-    <td class="new">元旦想去成都、周末去西山</td>
-    <td><span class="warn">△ 过召回</span></td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
     <td class="note">「山」打成「珊」，人照样知道是那趟西山</td>
   </tr><tr>
     <td class="grp">K 错别字</td>
@@ -552,7 +552,7 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
     <td class="kw">然天 / 天天 / 天加 / 加班 / 但这 / 次项 / 项目 / 目总 / 总算 / 算收 / 收尾 / 尾了</td>
     <td>加班到很晚</td>
     <td class="old">加班到很晚</td>
-    <td class="new">加班到很晚、项目上线通宵、巷口面馆</td>
+    <td class="new">加班到很晚、巷口面馆</td>
     <td><span class="warn">△ 过召回</span></td>
     <td class="note">说的还是加班这件事，带转折也一样</td>
   </tr><tr>
@@ -585,11 +585,11 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
   </tr><tr>
     <td class="grp">M 问句指代</td>
     <td class="q">我朋友最近都不理我</td>
-    <td class="kw">我朋 / 朋友 / 友最 / 近都 / 都不 / 不理 / 理我</td>
+    <td class="kw">无</td>
     <td>和小陈吵架</td>
     <td class="old">—</td>
-    <td class="new">[user]的心情动态</td>
-    <td><span class="warn">△ 部分</span></td>
+    <td class="new">—</td>
+    <td><span class="warn">△ 漏召回</span></td>
     <td class="note">「朋友不理我」说的就是上次跟小陈闹别扭</td>
   </tr><tr>
     <td class="grp">M 问句指代</td>
@@ -615,7 +615,7 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
     <td class="kw">我妈 / 妈公 / 公司 / 司楼 / 楼下 / 下的 / 的面 / 面馆 / 馆关 / 关门 / 门了</td>
     <td>—</td>
     <td class="old">公司楼下的兰州拉面、公司楼下的咖啡店</td>
-    <td class="new">公司楼下的咖啡店、公司楼下的兰州拉面</td>
+    <td class="new">公司楼下的兰州拉面、妈妈做的番茄炒蛋、巷口面馆</td>
     <td><span class="err">✗ 误命中</span></td>
     <td class="note">说的是别家面馆，人不会想到番茄炒蛋，更不会想到巷口那家</td>
   </tr><tr>
@@ -624,7 +624,7 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
     <td class="kw">公司 / 司食 / 食堂 / 堂的 / 的面 / 面永 / 永远 / 远比 / 比不 / 不上 / 上外 / 外面 / 面馆 / 馆子</td>
     <td>—</td>
     <td class="old">—</td>
-    <td class="new">巷口面馆、公司楼下的咖啡店、公司楼下的兰州拉面</td>
+    <td class="new">公司楼下的兰州拉面、巷口面馆</td>
     <td><span class="err">✗ 误命中</span></td>
     <td class="note">说食堂难吃，跟巷口那家没关系</td>
   </tr><tr>
@@ -642,8 +642,8 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
     <td class="kw">这一 / 一周 / 周真 / 是事 / 事事 / 事不 / 不顺 / 先是 / 是方 / 方案 / 案被 / 被否 / 否了 / 了心 / 里憋 / 憋屈 / 着赶 / 赶稿 / 稿天 / 天天 / 天熬 / 熬到 / 到后 / 后半 / 好不 / 不容 / 易熬 / 到周 / 周末 / 约了 / 了人 / 人去 / 去西 / 西山 / 山散 / 散心 / 来路 / 路上 / 上还 / 还在 / 在想 / 真该 / 该请 / 请个 / 个年 / 年假 / 假去 / 去大 / 大理 / 理把 / 把心 / 心情 / 情放 / 放个 / 个假</td>
     <td>被领导批评、加班到很晚、周末去西山、打算去大理</td>
     <td class="old">—</td>
-    <td class="new">打算去大理、周末去西山、失眠的一周</td>
-    <td><span class="warn">△ 部分</span></td>
+    <td class="new">打算去大理、周末去西山、被领导批评</td>
+    <td><span class="warn">△ 漏召回</span></td>
     <td class="note">一口气说四件事且最晚的在句尾，人也四件都想得起</td>
   </tr><tr>
     <td class="grp">O 长尾抽样</td>
@@ -696,8 +696,8 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
     <td class="kw">小陈 / 陈搬 / 搬家 / 家那 / 那天 / 天我 / 我去 / 去搭 / 搭了 / 了把 / 把手</td>
     <td>小陈搬家</td>
     <td class="old">小陈搬家</td>
-    <td class="new">小陈搬家</td>
-    <td><span class="ok">✓ 正确</span></td>
+    <td class="new">小陈搬家、忙着搬家打包、和小陈吵架</td>
+    <td><span class="warn">△ 过召回</span></td>
     <td class="note">说的是小陈的搬家，不是自己那摊打包的事</td>
   </tr><tr>
     <td class="grp">Q 近邻混淆</td>
@@ -766,15 +766,15 @@ td{padding:8px 10px;border-top:1px solid #f1eee9;vertical-align:top}tr:hover td{
 <h2>结论</h2>
 <div class="box" id="findings">以下数值取自本次运行。
 
-1. 从「不敢接」到「该接的接住」：逐例全对 48/78 → 51/78，Recall 53.6% → 82.6%；代价是精确率 90.2% → 67.9%——多认回来的典型是「加班」顺带想起面馆（那件事本来就是加班后去吃面），算误伤，不算硬错。
+1. 从「不敢接」到「该接的接住」：逐例全对 48/78 → 53/78，Recall 53.6% → 81.2%；代价是精确率 90.2% → 72.7%——多认回来的典型是「加班」顺带想起面馆（那件事本来就是加班后去吃面），算误伤，不算硬错。
 
-2. 关键不在门槛，在「拿什么去比对」：只把门槛放宽到「长句命中 1 个词」（全字段、仍两段式）停在 44/78、副作用 9 例；把比对文本收窄到「写入时抽的标签」才到 51/78、副作用 7 例。一句话印象（gist）是完整句子，「了没 / 的地 / 有点」这类虚词 bigram 一撞就误召回，summary 同理，所以都不参与比对。
+2. 关键不在门槛，在「拿什么去比对」：只把门槛放宽到「长句命中 1 个词」（全字段、仍两段式）停在 44/78、副作用 9 例；把比对文本收窄到「写入时抽的标签」才到 53/78、副作用 5 例。一句话印象（gist）是完整句子，「了没 / 的地 / 有点」这类虚词 bigram 一撞就误召回，summary 同理，所以都不参与比对。
 
-3. 两条召回通道必须合并：上一版「标题命中就停」，于是「最近压力大，团子还生病了，都没好好吃饭」只想得起团子；合并后加班、团子、发烧三件都能想起来。分组变化——变差：B 短实词 6/7 → 5/7、I 边界 3/4 → 2/4、L 否定转折 4/4 → 1/4、N 硬干扰 2/3 → 0/3、Q 近邻混淆 6/7 → 5/7；变好：C 换说法 4/7 → 7/7、D 情绪 2/5 → 3/5、F 身份名 1/3 → 2/3、H 时间 1/3 → 2/3、K 错别字 1/5 → 2/5、M 问句指代 1/5 → 4/5、O 长尾抽样 0/3 → 1/3。
+3. 两条召回通道必须合并：上一版「标题命中就停」，于是「最近压力大，团子还生病了，都没好好吃饭」只想得起团子；合并后加班、团子、发烧三件都能想起来。分组变化——变差：B 短实词 6/7 → 5/7、I 边界 3/4 → 2/4、L 否定转折 4/4 → 1/4、N 硬干扰 2/3 → 0/3、Q 近邻混淆 6/7 → 4/7；变好：C 换说法 4/7 → 6/7、D 情绪 2/5 → 4/5、F 身份名 1/3 → 2/3、G 长句 2/4 → 4/4、H 时间 1/3 → 3/3、K 错别字 1/5 → 2/5、M 问句指代 1/5 → 4/5、O 长尾抽样 0/3 → 1/3。
 
-4. 剩下 27 条是机制与人的差距清单：否定句（「不是吃面，是火锅」「不是加班，是去唱K」）挡不住；硬干扰（「我妈公司楼下的面馆」撞上拉面/咖啡店）指的是别家；近邻挑不净（「妈妈的体检」也勾出自己的体检报告，gist/标题里的「周三」「朋友圈」「想去」这类字面照样撞）；纯情绪（「今天好累」）没有任何字面线索；Top3 注入上限——一次说四件事只给三条，跨段合并后第 4 件仍进不来；单字兜底只扫前 8 个字，句尾的「猫粮」够不着；英文同义词（overtime / coffee）没有对应标签，数字不参与分词（「38.5度」）；噪音 bigram（「跳槽的念头」里的「槽的」）会抬高相对截断线，把该召回的挤下去。
+4. 剩下 25 条是机制与人的差距清单：否定句（「不是吃面，是火锅」「不是加班，是去唱K」）挡不住；硬干扰（「我妈公司楼下的面馆」撞上拉面/咖啡店）指的是别家；近邻挑不净（「妈妈的体检」也勾出自己的体检报告，gist/标题里的「周三」「朋友圈」「想去」这类字面照样撞）；纯情绪（「今天好累」）没有任何字面线索；Top3 注入上限——一次说四件事只给三条，跨段合并后第 4 件仍进不来；单字兜底只扫前 8 个字，句尾的「猫粮」够不着；英文同义词（overtime / coffee）没有对应标签，数字不参与分词（「38.5度」）；噪音 bigram（「跳槽的念头」里的「槽的」）会抬高相对截断线，把该召回的挤下去。
 
-5. 情绪倾诉组 2/5 → 3/5：纯字符串检索无法从「累」联想到「加班」，属架构层面的差距，不是调参能补的。
+5. 情绪倾诉组 2/5 → 4/5：纯字符串检索无法从「累」联想到「加班」，属架构层面的差距，不是调参能补的。
 
-6. 编辑距离兜底：评估后决定不转正。四道闸（独立成词、同位置换一字、唯一候选、拼音差 ≤1 字）确实能零误报捞回「拉铁↔拿铁」51/78，但四道闸缺一不可——去掉「独立成词」闸，时序剧情里「看到一只→到期」「越来越大了→大理」的噪音 bigram 立刻误报；去掉拼音闸，「拉铁」分不清拿铁和拉面。能安全生效的场景只剩「用户单独打出两字错字」这一种，收益配不上复杂度与拼音依赖，留档备查、等语义层（命中后模型复核）整体覆盖。</div>
+6. 编辑距离兜底：评估后决定不转正。四道闸（独立成词、同位置换一字、唯一候选、拼音差 ≤1 字）确实能零误报捞回「拉铁↔拿铁」53/78，但四道闸缺一不可——去掉「独立成词」闸，时序剧情里「看到一只→到期」「越来越大了→大理」的噪音 bigram 立刻误报；去掉拼音闸，「拉铁」分不清拿铁和拉面。能安全生效的场景只剩「用户单独打出两字错字」这一种，收益配不上复杂度与拼音依赖，留档备查、等语义层（命中后模型复核）整体覆盖。</div>
 </div></body></html>

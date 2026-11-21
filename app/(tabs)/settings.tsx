@@ -2134,7 +2134,7 @@ ${text}
                     />
                   </View>
                 </View>
-                <Text style={[styles.rowDesc, { color: colors.textMuted, marginTop: 10 }]}>别名（逗号或空格分隔，换种说法也能想起这件事）</Text>
+                <Text style={[styles.rowDesc, { color: colors.textMuted, marginTop: 10 }]}>别名（逗号或空格分隔，之后同类的新事件会挂靠到这条；想被检索想起请写在片段检索词里）</Text>
                 <TextInput
                   style={[styles.input, { marginTop: 4, backgroundColor: colors.inputBg, borderColor: colors.border, color: colors.text }]}
                   value={editEventAliases}

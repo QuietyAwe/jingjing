@@ -18,7 +18,6 @@ import {
   getFragmentsByEventId,
   getFragmentsByEventIds,
   getDefaultEventId,
-  getEventAliasText,
   getMomentsByIds,
   getRecentMomentAuthors,
   getRecentUserCommentedMomentAuthors,
@@ -61,7 +60,7 @@ export interface RetrieveOptions {
 
 /**
  * 关键词的 IDF 权重：词在库里越常见越没区分度（「加班」撞三条记忆 ≈ 无效词，
- * 「团子」独一份 ≈ 强线索）。df 按「标题/别名/印象/标签」统计，与打分文本同源；
+ * 「团子」独一份 ≈ 强线索）。df 只按片段检索词统计，与打分文本同源；
  * 本地量级直接逐词 COUNT，代价可忽略。
  */
 function idfWeights(
@@ -79,12 +78,9 @@ function idfWeights(
     const row = db.getFirstSync<{ n: number }>(
       `SELECT COUNT(DISTINCT e.id) AS n
        FROM memory_events e
-       LEFT JOIN memory_event_aliases a ON a.event_id = e.id
-       LEFT JOIN memory_fragments f ON f."index" = e.id
+       INNER JOIN memory_fragments f ON f."index" = e.id
        WHERE e.event_status != 'upcoming' ${excludeDefault}
-         AND (e.event_text LIKE ? OR a.alias LIKE ? OR f.keywords LIKE ?)`,
-      `%${k}%`,
-      `%${k}%`,
+         AND f.keywords LIKE ?`,
       `%${k}%`
     );
     const df = row?.n ?? 0;
@@ -138,11 +134,10 @@ function rankByOverlap<T extends { last_accessed: string }>(
     .map((x) => ({ item: x.item, score: x.score }));
 }
 
-/** 命中归因：哪个检索词撞上了哪条记忆的哪个字段，口径与打分文本一致 */
+/** 命中归因：哪个检索词撞上了哪条记忆的哪个片段，口径与打分文本一致 */
 function describeHits(
   events: MemoryEvent[],
   keywords: string[],
-  aliases: Map<number, string>,
   fragments: Map<number, MemoryFragment[]>
 ): string {
   return events
@@ -150,11 +145,7 @@ function describeHits(
       const frags = fragments.get(e.id) ?? [];
       const hits: string[] = [];
       for (const k of keywords) {
-        const where: string[] = [];
-        if (e.event_text.includes(k)) where.push("标题");
-        if ((aliases.get(e.id) ?? "").includes(k)) where.push("别名");
-        if (frags.some((f) => f.keywords.includes(k))) where.push("标签");
-        if (where.length > 0) hits.push(`「${k}」→${where.join("/")}`);
+        if (frags.some((f) => f.keywords.includes(k))) hits.push(`「${k}」→标签`);
       }
       return `#${e.id} ${e.event_text.slice(0, 16)}：${hits.join("、") || "无直接命中"}`;
     })
@@ -192,15 +183,13 @@ interface LocalResult {
   hitFragments: Map<number, MemoryFragment[]>;
   cuedFragmentIds: Set<number>;
   keywords: string[];
-  aliasText: Map<number, string>;
   usedWeak: boolean;
-  aliasOnlyHits: number;
 }
 
 /**
  * 完整本地检索流程
  *
- * 输入按标点拆段，每段独立走「两条召回通道合并排序」，最后按得分合并取 Top3。
+ * 输入按标点拆段，每段独立按「片段检索词」召回并排序，最后按得分合并取 Top3。
  * `allowedIds` 与主路径同口径：权重跌破遗忘线的事件连兜底也不召回。
  */
 function localRetrieve(userInput: string, allowedIds: Set<number>): LocalResult {
@@ -209,13 +198,12 @@ function localRetrieve(userInput: string, allowedIds: Set<number>): LocalResult 
   let triggerKeywords: string[] = [];
   let usedWeak = false;
   let hitEvents: MemoryEvent[] = [];
-  let aliasOnlyHits = 0;
   const db = getDB();
   const defaultEventId = getDefaultEventId();
 
-  // 两条召回通道：事件标题/别名、片段内容。任意一条对上都算「想起来」，合并排序。
-  // 不能「标题没命中才看片段」：一句话提三件事时，一个弱标题命中会把另外两件吃掉。
-  // 片段只认 keywords：gist 是完整句子，虚词 bigram（如「了没」）会撞出误召回；summary 同理。
+  // 只比对片段检索词：事件标题是给人看的书面说法，含「给我」「说话」这类虚词组，
+  // 按字面撞上就等于替用户想起了不相干的往事。想被想起的事，就得写进检索词。
+  // gist / summary 同样不参与：完整句子里的虚词 bigram（如「了没」）会撞出误召回。
   function search(kw: string[]): Array<{ item: MemoryEvent; score: number }> {
     const excludeDefault = [
       defaultEventId ? `AND e.id != ${defaultEventId}` : "",
@@ -224,26 +212,10 @@ function localRetrieve(userInput: string, allowedIds: Set<number>): LocalResult 
       .filter(Boolean)
       .join(" ");
     const eventColumns = EVENT_COLUMNS.split(", ").map((c) => `e.${c}`).join(", ");
-    // 标题通道每词 2 个参数（标题 + 别名）；片段通道只认标签，每词 1 个
-    const likeParams = kw.flatMap((k) => [`%${k}%`, `%${k}%`]);
     const fragParams = kw.map((k) => `%${k}%`);
-
-    const titleConditions = kw
-      .map(
-        () =>
-          "(e.event_text LIKE ? OR EXISTS(SELECT 1 FROM memory_event_aliases a WHERE a.event_id = e.id AND a.alias LIKE ?))"
-      )
-      .join(" OR ");
-    const titleRows = db.getAllSync<MemoryEvent>(
-      `SELECT ${eventColumns} FROM memory_events e
-       WHERE 1 = 1 ${excludeDefault} AND (${titleConditions})
-       ORDER BY e.last_accessed DESC
-       LIMIT 15`,
-      ...likeParams
-    );
-
     const fragConditions = kw.map(() => "f.keywords LIKE ?").join(" OR ");
-    const fragRows = db.getAllSync<MemoryEvent>(
+
+    const rows = db.getAllSync<MemoryEvent>(
       `SELECT DISTINCT ${eventColumns} FROM memory_events e
        INNER JOIN memory_fragments f ON e.id = f."index"
        WHERE 1 = 1 ${excludeDefault}
@@ -254,19 +226,11 @@ function localRetrieve(userInput: string, allowedIds: Set<number>): LocalResult 
       ...fragParams
     );
 
-    const byId = new Map<number, MemoryEvent>();
-    for (const row of [...titleRows, ...fragRows]) {
-      if (allowedIds.has(row.id)) byId.set(row.id, row);
-    }
-    const candidates = [...byId.values()];
-    const aliasText = getEventAliasText(candidates.map((e) => e.id));
+    const candidates = rows.filter((row) => allowedIds.has(row.id));
     const frags = getFragmentsByEventIds(candidates.map((e) => e.id));
     return rankByOverlap(
       candidates,
-      (e) =>
-        `${e.event_text} ${aliasText.get(e.id) ?? ""} ${(frags.get(e.id) ?? [])
-          .map((f) => f.keywords)
-          .join(" ")}`,
+      (e) => (frags.get(e.id) ?? []).map((f) => f.keywords).join(" "),
       kw,
       idfWeights(db, kw, defaultEventId)
     );
@@ -322,17 +286,6 @@ function localRetrieve(userInput: string, allowedIds: Set<number>): LocalResult 
   }
 
   const keywords = triggerKeywords;
-  const aliasText = getEventAliasText(hitEvents.map((e) => e.id));
-  if (hitEvents.length > 0) {
-    aliasOnlyHits = hitEvents.filter((e) => {
-      const alias = aliasText.get(e.id) ?? "";
-      return (
-        !!alias &&
-        scoreOverlap(alias, keywords) > 0 &&
-        scoreOverlap(e.event_text, keywords) === 0
-      );
-    }).length;
-  }
 
   // 仅达标命中才刷新权重（写库）+ 批量获取关联片段
   const hitFragments = new Map<number, MemoryFragment[]>();
@@ -357,7 +310,7 @@ function localRetrieve(userInput: string, allowedIds: Set<number>): LocalResult 
     }
   }
 
-  return { hitEvents, hitFragments, cuedFragmentIds, keywords, aliasText, usedWeak, aliasOnlyHits };
+  return { hitEvents, hitFragments, cuedFragmentIds, keywords, usedWeak };
 }
 
 // ============================================================
@@ -582,9 +535,7 @@ export async function retrieve(
   let hitFragments = new Map<number, MemoryFragment[]>();
   let cuedFragmentIds = new Set<number>();
   let topEvents: (MemoryEvent & { live_weight: number })[] = [];
-  let aliasText = new Map<number, string>();
   let usedWeak = false;
-  let aliasOnlyHits = 0;
   let hitLine = "";
 
   if (plan) {
@@ -605,14 +556,12 @@ export async function retrieve(
     hitEvents = local.hitEvents;
     hitFragments = local.hitFragments;
     cuedFragmentIds = local.cuedFragmentIds;
-    aliasText = local.aliasText;
     usedWeak = local.usedWeak;
-    aliasOnlyHits = local.aliasOnlyHits;
     if (local.keywords.length > 0) keywords = local.keywords;
     // localRetrieve 刚把命中事件刷成 100/now，但 hitEvents 是刷新前 SELECT 出的旧对象，
     // 继续用 e.last_accessed 会把「刚被想起」算成低权重：截断时命中记忆反而最先被丢
     topEvents = polishedTop(hitEvents, hitAt);
-    hitLine = describeHits(hitEvents, keywords, aliasText, hitFragments);
+    hitLine = describeHits(hitEvents, keywords, hitFragments);
   }
 
   // 灵光一闪：两条通道，只注入一条
@@ -689,11 +638,10 @@ export async function retrieve(
   const viaNote = usedWeak ? ` → 单字兜底: ${keywords.join(", ")}` : "";
   const detailLine = plan
     ? `选中: ${hitLine || "无"}`
-    : `命中: ${hitEvents.length} 条事件（别名独中 ${aliasOnlyHits} 条，${Array.from(
-        hitFragments.values()
-      ).reduce((s, f) => s + f.length, 0)} 片段，唤起 ${cuedFragmentIds.size} 条）\n触发:\n${
-        hitLine || "无"
-      }`;
+    : `命中: ${hitEvents.length} 条事件（${Array.from(hitFragments.values()).reduce(
+        (s, f) => s + f.length,
+        0
+      )} 片段，唤起 ${cuedFragmentIds.size} 条）\n触发:\n${hitLine || "无"}`;
   logDebug(
     "检索",
     `${judgeNote}\n关键词: ${keywords.join(", ") || "无"}${viaNote}\n${detailLine}\n${topLine}\n灵光一闪: ${epiphanyNote}`

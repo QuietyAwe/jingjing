@@ -1,7 +1,7 @@
-// 三个评估脚本共用的检索管线模拟：按标点拆段 → 两通道粗召回 → IDF 加权打分 → 相对截断 → 跨段合并。
+// 三个评估脚本共用的检索管线模拟：按标点拆段 → 片段检索词粗召回 → IDF 加权打分 → 相对截断 → 跨段合并。
 //
 // 对应 retrieval.ts 的真实流程：
-//   按标点拆段 → 每段分词 → 标题/别名 + 片段印象/标签粗召回 → IDF 加权 + 截断 → 跨段按得分合并
+//   按标点拆段 → 每段分词 → 只按片段检索词粗召回 → IDF 加权 + 截断 → 跨段按得分合并
 // SQL 那一步用等价的字符串包含模拟；拆段、门槛、IDF、截断、同分规则与产品逻辑一致。
 import { BLOCKED_NAMES, memoryText } from "../cases/memories.mjs";
 
@@ -75,8 +75,8 @@ export function createRetriever(core, pool, opts = {}) {
   const titleOf = (e) => `${e.event} ${e.alias}`;
   const has = (text, kw) => kw.some((k) => text.includes(k));
 
-  // IDF：df 用「标题 + 别名 + 打分字段」合并文本统计，模拟真实库的逐词 COUNT
-  const fullTextOf = (e) => `${e.event} ${e.alias} ${fields.map((f) => e[f] ?? "").join(" ")}`;
+  // IDF：df 只统计打分字段（标题/别名不进池），模拟真实库的逐词 COUNT
+  const fullTextOf = (e) => fields.map((f) => e[f] ?? "").join(" ");
   const dfCache = new Map();
   const idfOf = (kw) => {
     if (!dfCache.has(kw)) {
@@ -127,14 +127,9 @@ export function createRetriever(core, pool, opts = {}) {
     const kw = core.tokenize(stripStop(text), 16, (g) => core.isBlockedGram(g, BLOCKED_NAMES));
     if (kw.length === 0) return { kw, scored: [] };
     if (!staged) {
-      // 现流程：两条通道合并，按「标题 + 别名 + 片段印象/标签」统一排序
-      const candidates = new Map();
-      for (const e of pool) if (has(titleOf(e), kw)) candidates.set(e.id, e);
-      for (const e of pool) if (has(pick(e), kw)) candidates.set(e.id, e);
-      return {
-        kw,
-        scored: scoreCandidates([...candidates.values()], (e) => `${titleOf(e)} ${pick(e)}`, kw),
-      };
+      // 现流程：只认片段检索词，标题/别名不参与召回也不参与打分
+      const candidates = pool.filter((e) => has(pick(e), kw));
+      return { kw, scored: scoreCandidates(candidates, pick, kw) };
     }
     // 旧流程：标题全部没命中才查片段
     let scored = scoreCandidates(pool.filter((e) => has(titleOf(e), kw)), titleOf, kw).slice(0, topN);
@@ -217,8 +212,8 @@ export function createRetriever(core, pool, opts = {}) {
       // 单字只与「恰好是单字的标签」精确比对（标题/正文含「子」「它」不算）。
       const weak = core.singleCharKeywords(text);
       if (weak.length > 0) {
-        const weakCands = pool.filter((e) => has(titleOf(e), weak) || has(pick(e), weak));
-        const hits = scoreCandidates(weakCands, (e) => `${titleOf(e)} ${pick(e)}`, weak)
+        const weakCands = pool.filter((e) => has(pick(e), weak));
+        const hits = scoreCandidates(weakCands, pick, weak)
           .filter((x) =>
             (x.item.kw ?? "")
               .split(/[,，、\s]+/)

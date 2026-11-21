@@ -21,5 +21,9 @@ export function momentEventOf(author: "user" | "ai" | "friend"): string {
   return EVENT_USER_MOMENT;
 }
 
-/** 三个动态事件共用的口语别名（检索按「标题或别名」粗召回） */
+/**
+ * 三个动态事件共用的口语说法
+ *
+ * 写入动态记忆时进检索词（检索只认检索词），同时写进别名供「新事件挂靠旧事件」判定。
+ */
 export const MOMENT_EVENT_ALIASES = ["朋友圈", "动态", "帖子"];
