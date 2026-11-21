@@ -54,6 +54,11 @@ export interface RetrievalResult {
   fallback: boolean;
 }
 
+export interface RetrieveOptions {
+  /** 游戏回合 / 重新生成：本轮不掷灵光一闪 */
+  skipEpiphany?: boolean;
+}
+
 /**
  * 关键词的 IDF 权重：词在库里越常见越没区分度（「加班」撞三条记忆 ≈ 无效词，
  * 「团子」独一份 ≈ 强线索）。df 按「标题/别名/印象/标签」统计，与打分文本同源；
@@ -483,7 +488,10 @@ function polishedTop(
  * 闸门（无实词/纯寒暄）→ AI 判定 → 失败或不可用时本地兜底 → 擦亮 → 灵光一闪。
  * 异步：判定要走一次网络，调用方 await 后沿用手头的「正在输入中」。
  */
-export async function retrieve(userInput: string): Promise<RetrievalResult> {
+export async function retrieve(
+  userInput: string,
+  opts: RetrieveOptions = {}
+): Promise<RetrievalResult> {
   const withLiveWeight = calculateWeights(getAllActive());
   // 遗忘线：跌破它的事件不再进清单，兜底候选池同口径——否则一降级冷记忆全回来了
   const eligible = withLiveWeight.filter((e) => e.live_weight >= MEMORY_LIST_MIN_WEIGHT);
@@ -608,25 +616,30 @@ export async function retrieve(userInput: string): Promise<RetrievalResult> {
   }
 
   // 灵光一闪：两条通道，只注入一条
-  // ① 近期动态：概率由新近度权重累加得出（用户刚评论/自己刚发帖 ≈ 0.82）
+  // ① 近期动态：概率 = 基础概率 + 最高新近度倍数的折算（用户刚评论/自己刚发帖 ≈ 0.82）
   // ② 冷记忆：没有新鲜事时的偶然想起，概率 epiphany_trigger_probability
   const { epiphany_trigger_probability } = getWeightDecay();
   const { recent_moment_recall_weight } = getThresholds();
   const excludeIds = new Set(topEvents.map((e) => e.id));
   let epiphany: (MemoryEvent & { gist: string }) | null = null;
   let epiphanyNote = "未触发";
+  // 空输入（开场白、游戏提示）、游戏回合、重新生成都不掷：这些轮次本就不该突然想起往事
+  const skipEpiphany = opts.skipEpiphany || text === "";
 
-  const recent = recentMomentRecallCandidates(withLiveWeight, excludeIds);
+  const recent = skipEpiphany ? [] : recentMomentRecallCandidates(withLiveWeight, excludeIds);
+  // 取最高倍数而非累加：两条帖子同时新鲜时不该叠成「几乎每轮都提」
   const pRecent =
     recent.length > 0
       ? Math.min(
           RECALL_PROBABILITY_CAP,
           epiphany_trigger_probability +
-            recent.reduce((sum, c) => sum + c.boost * recent_moment_recall_weight, 0)
+            Math.max(...recent.map((c) => c.boost)) * recent_moment_recall_weight
         )
       : 0;
 
-  if (recent.length > 0 && Math.random() < pRecent) {
+  if (skipEpiphany) {
+    epiphanyNote = "跳过（空输入 / 游戏回合 / 重新生成）";
+  } else if (recent.length > 0 && Math.random() < pRecent) {
     const picked = pickWeighted(recent, recent.map((c) => c.boost));
     markMomentRecalled(picked.fragment.id);
     // 命中即擦亮：自然退出冷池几天，避免连抽同一条

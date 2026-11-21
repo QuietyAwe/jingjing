@@ -39,6 +39,11 @@ export interface ChatContext {
   memoryCount: number;
 }
 
+export interface ChatOptions {
+  /** 重新生成 / 编辑重发：本轮不掷灵光一闪 */
+  regenerate?: boolean;
+}
+
 /**
  * 构建聊天上下文 — 对齐 PRD 2.1 节完整流程
  *
@@ -49,6 +54,7 @@ export async function buildChatContext(
   userInput: string,
   chatHistory: ChatMessage[],
   game?: GameParts,
+  options?: ChatOptions,
 ): Promise<ChatContext> {
   // 1. 冷启动检测
   const userInfo = getUserInfo();
@@ -56,7 +62,7 @@ export async function buildChatContext(
 
   // 2. 检索（AI 判定，失败或不可用时本地兜底）
   const { topEvents, epiphany, keywords, hitFragments, cuedFragmentIds, plan } =
-    await retrieve(userInput);
+    await retrieve(userInput, { skipEpiphany: Boolean(game) || Boolean(options?.regenerate) });
   // 本轮已召回的片段：按名字命中那几条不必再重复给
   const recalledFragmentIds = new Set<number>();
   for (const list of hitFragments.values()) for (const frag of list) recalledFragmentIds.add(frag.id);

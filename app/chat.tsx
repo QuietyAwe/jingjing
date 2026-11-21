@@ -900,7 +900,9 @@ export default function ChatScreen() {
     try {
       const history = getHistory();
       const lastUserMsg = [...history].reverse().find((m) => m.role === "user" && !m.is_state_note);
-      const context = await buildChatContext(lastUserMsg?.content || "", history);
+      const context = await buildChatContext(lastUserMsg?.content || "", history, undefined, {
+        regenerate: true,
+      });
       setDebugInfo(context.systemPrompt, context.keywords, context.memoryCount);
 
       let fullResponse = "";
