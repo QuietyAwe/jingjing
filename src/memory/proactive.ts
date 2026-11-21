@@ -13,6 +13,7 @@ import { buildChatContext } from "@/memory/chatHandler";
 import { appendStateNote } from "@/memory/stateNote";
 import { streamChat } from "@/llm/foreground";
 import { logDebug, useChatStore } from "@/store/chatStore";
+import { formatNow } from "@/utils/holidays";
 import { genMsgId } from "@/utils/id";
 
 /** 最短静默时长；之后按时间逐步提高主动开口概率 */
@@ -35,11 +36,19 @@ export function getProactiveChance(hoursAway: number): number {
  *
  * 这条 system 消息是 buildChatContext 之后追加的，不经过 replacePlaceholders，
  * 所以昵称在这里直接填好；[user] 占位符只在经过拼装层的提示词里才会被替换。
+ *
+ * 必须写明此刻的时间：开场没有用户消息，历史里唯一带时间线索的是 [旁白]，
+ * 而旁白只说到「晚上」这种粗粒度，模型据此会写出半夜刚下班、清晨准备睡觉这类话。
+ * 间隔时长与时刻写在最后：每次都变，放末尾才能让这条指令的固定部分尽量长、前缀缓存多命中。
  */
-function buildOpeningInstruction(hoursAway: number): string {
+function buildOpeningInstruction(hoursAway: number, hasSceneNote: boolean, now: Dayjs = dayjs()): string {
   const nickname = getUserInfo()?.basic_identity?.nickname || "用户";
   const away = hoursAway >= 48 ? `${Math.round(hoursAway / 24)}天` : `${hoursAway}小时`;
-  return `${nickname}隔了${away}又打开应用。像平常突然想起对方一样自然地先开口：可以说说你此刻正在做的一件小事、刚看到的东西，或顺着上次的话题轻轻接一句。用一到两句短话，别只发空泛的问候，也不用每次都是两句。${nickname}没回消息只是各忙各的，别担心、别追问原因、别道歉，也别解释自己为什么现在开口。最多带一个轻松的问题，不要连着发问。`;
+  // 有旁白就顺着它开口，没有（作息表还没生成）就退回泛泛的「此刻在做的小事」
+  const opening = hasSceneNote
+    ? `历史里的[旁白]是系统给你的当下状态（你在哪、在做什么），不是${nickname}说的话：像平常突然想起对方一样自然地先开口，顺着旁白里你此刻正在做的事说件小事、刚看到的东西，或顺着上次的话题轻轻接一句。`
+    : `像平常突然想起对方一样自然地先开口：可以说说你此刻正在做的一件小事、刚看到的东西，或顺着上次的话题轻轻接一句。`;
+  return `${opening}用一到两句短话，别只发空泛的问候，也不用每次都是两句。${nickname}没回消息只是各忙各的，别担心、别追问原因、别道歉，也别解释自己为什么现在开口。最多带一个轻松的问题，不要连着发问。${nickname}隔了${away}又打开应用，现在是${formatNow(now)}。`;
 }
 
 export interface ProactiveRoll {
@@ -125,10 +134,13 @@ export async function runProactiveOpening(): Promise<void> {
     // 旁白先落库：既给开场提供当下情境，也让历史以 user 开头
     // （getHistory 会裁掉开头的 assistant 消息，AI 若是最先开口会被裁没）
     appendStateNote();
-    const context = await buildChatContext("", useChatStore.getState().getHistory());
+    const history = useChatStore.getState().getHistory();
+    const context = await buildChatContext("", history);
+    // 只有最新一条是旁白才说明「此刻」在上下文里；历史里更早的旁白讲的是过去
+    const hasSceneNote = Boolean(history[history.length - 1]?.is_state_note);
     context.messages.push({
       role: "system" as const,
-      content: buildOpeningInstruction(roll.hoursAway),
+      content: buildOpeningInstruction(roll.hoursAway, hasSceneNote),
     });
 
     let text = "";
