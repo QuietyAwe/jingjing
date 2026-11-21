@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Animated,
   View,
   FlatList,
   StyleSheet,
@@ -24,7 +25,7 @@ import ChatBubble, { StreamingBubble } from "@/components/ChatBubble";
 import { InputBar } from "@/components/InputBar";
 import { useChatStore, logDebug, formatUsage, type DebugLog } from "@/store/chatStore";
 import { genMsgId } from "@/utils/id";
-import { useAndroidKeyboardHeight } from "@/utils/keyboard";
+import { useAndroidKeyboard } from "@/utils/keyboard";
 import { revealTotalMsForText } from "@/utils/text";
 import { useMetaStore } from "@/store/metaStore";
 import { useSettingsStore } from "@/store/settingsStore";
@@ -236,7 +237,7 @@ export default function ChatScreen() {
 
   const colors = useTheme();
   const insets = useSafeAreaInsets();
-  const keyboardHeight = useAndroidKeyboardHeight();
+  const { height: keyboardHeight, pad: keyboardPad } = useAndroidKeyboard();
   // 弹窗是独立窗口，个别机型取不到 inset：兜一个常见状态栏高度，别把按钮顶进状态栏
   const topInset = Math.max(insets.top, 24);
   const router = useRouter();
@@ -2261,10 +2262,10 @@ export default function ChatScreen() {
   }
 
   return (
-    // Android 部分机型不会随键盘 resize，自行跟踪高度并显式归零；
+    // Android 部分机型不会随键盘 resize，由底栏里的缓动留白把输入框顶上去；
     // iOS 继续用 KeyboardAvoidingView，避免两套补偿叠加。
     <KeyboardAvoidingView
-      style={[styles.container, { backgroundColor: colors.bg, paddingBottom: keyboardHeight }]}
+      style={[styles.container, { backgroundColor: colors.bg }]}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
     >
@@ -2683,6 +2684,9 @@ export default function ChatScreen() {
           hidePlus={Boolean(gameSession && gameSession.status === "playing")}
           inputRef={chatInputRef}
         />
+        {/* 键盘留白：占住键盘那块高度，把输入框连同列表一起顶上去；
+            缓动逐帧改高度，底栏是滑上去的，不是瞬间错位 */}
+        <Animated.View style={{ height: keyboardPad }} />
 
       {/* 编辑题库弹窗（真心话大冒险） */}
       <Modal visible={showTdEdit} transparent animationType="fade" onRequestClose={() => setShowTdEdit(false)}>

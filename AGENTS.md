@@ -131,7 +131,7 @@ src/
     settingsStore.ts    # API Key / 开关 / 主题色
     metaStore.ts        # 系统元数据（轮次、锁等运行时状态）
   theme/                # 浅色/深色色板（colors.ts）+ useTheme.ts
-  utils/                # text.ts（splitForChat 气泡分段）、backup.ts（备份导出/导入）、holidays.ts（周几/法定节假日调休表）、motion.ts（统一入场参数与系统“减少动态效果”）、keyboard.ts（Android 键盘高度跟踪，收起显式归零）
+  utils/                # text.ts（splitForChat 气泡分段）、backup.ts（备份导出/导入）、holidays.ts（周几/法定节假日调休表）、motion.ts（统一入场参数与系统“减少动态效果”）、keyboard.ts（Android 键盘留白：底栏占一块缓动高度，键盘升起/收起都逐帧滑，不用 LayoutAnimation）
   types/schema.ts       # 全局类型定义
 docs/                   # 评估脚本生成的报告
 tests/                  # 离线评估：cases/（人工标注集，改用例只改这里）、lib/harness.mjs（从源码取真实实现）
@@ -482,7 +482,7 @@ system  : eventNudge     事件提醒（临近 / 过期关心）
 ### 模板变量
 
 - 通用：`[user]`（用户名）、`[ai]`（AI 的名字）、`[now]`（当前时间，如"2026年10月7日（周三）15:30"）、`[today]`（今天是：日期+周几+假期/调休语义，如"今天是2026年10月7日（周三），国庆节假期"；周末/假期/调休才带语义后缀，普通工作日省略）；系统人设 / 冷启动 / 状态区 / 记忆区 / 事件提醒都认这四种，且不区分大小写、全角【user】也按占位符处理
-- 记忆事件：`[time]`（相对时间，如"前两个月"）
+- 记忆事件：`[time]`（相对时间，如"两个月前"）
 - 状态区：`{{nickname}}`（未设昵称时为「用户」）/`{{occupation}}`/`{{location}}`/`{{social_graph}}`/`{{traits}}`/`{{conditions}}`/`{{events}}`（`{{traits}}` 来自画像属性桶、`{{conditions}}` 是仍在持续的处境（标签 + 「X天前开始的」）、`{{events}}` 来自 `memory_events` 的 upcoming/caring 带发生时刻），空字段整行自动隐藏（含空段落标题）。老覆盖模板里若还留着 `{{current_status}}`/`{{friends}}`，一律渲染成空行，**不要再使用**
 - 未来事件提醒（隐形）：`event_reminder_template`（临近）/`event_care_template`（过期关心），`{{event}}`/`{{due_time}}`（后者渲染发生时刻），拼在消息末尾
 - 记忆区：`{{event_list}}`、`{{epiphany}}`。日期锚点已前置为独立 system 消息（见上表），默认模板不再放 `[today]`；老覆盖模板里写了 `[today]` 仍会渲染，但会与前置那行重复，建议删掉

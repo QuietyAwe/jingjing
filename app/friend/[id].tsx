@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Animated,
   View,
   Text,
   FlatList,
@@ -30,7 +31,7 @@ import { buildFriendChatMessages, recordFriendChatTrace } from "@/friends/chat";
 import { streamChat } from "@/llm/foreground";
 import { hasApiKey } from "@/llm/client";
 import { genMsgId } from "@/utils/id";
-import { useAndroidKeyboardHeight } from "@/utils/keyboard";
+import { useAndroidKeyboard } from "@/utils/keyboard";
 import { markFriendSeen } from "@/memory/unread";
 import type { ChatMessage, FriendPersona } from "@/types/schema";
 
@@ -39,7 +40,7 @@ export default function FriendChatScreen() {
   const router = useRouter();
   const colors = useTheme();
   const insets = useSafeAreaInsets();
-  const keyboardHeight = useAndroidKeyboardHeight();
+  const { height: keyboardHeight, pad: keyboardPad } = useAndroidKeyboard();
 
   const friendId = Number(id);
   const [friend, setFriend] = useState<FriendPersona | null>(null);
@@ -173,7 +174,7 @@ export default function FriendChatScreen() {
 
   return (
     <KeyboardAvoidingView
-      style={[styles.container, { backgroundColor: colors.bg, paddingBottom: keyboardHeight }]}
+      style={[styles.container, { backgroundColor: colors.bg }]}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
       {/* 顶栏：返回 + 头像 + 名字/一句关系 */}
@@ -233,6 +234,8 @@ export default function FriendChatScreen() {
 
       <View style={{ paddingBottom: keyboardHeight > 0 ? 0 : insets.bottom }}>
         <InputBar onSend={handleSend} disabled={isLoading} hidePlus />
+        {/* 键盘留白：占住键盘那块高度把输入框顶上去，缓动逐帧改高度 */}
+        <Animated.View style={{ height: keyboardPad }} />
       </View>
     </KeyboardAvoidingView>
   );

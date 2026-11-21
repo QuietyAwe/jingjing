@@ -621,7 +621,7 @@ export function relativeDayLabel(timestamp: string | undefined, now: dayjs.Dayjs
   }
   if (diffDays < 365) {
     const months = Math.floor(diffDays / 30);
-    return months <= 1 ? "上个月" : `前${months}个月`;
+    return months <= 1 ? "上个月" : `${months}个月前`;
   }
   const years = Math.floor(diffDays / 365);
   return years <= 1 ? "去年" : `${years}年前`;
@@ -665,7 +665,7 @@ export function anchorLine(raw: string, timestamp: string, userInfo: UserInfo | 
  * 替换 [user]、[ai]、[time]、[now] 占位符（记忆区、状态区、游戏回顾共用）
  * [user] → 用户昵称
  * [ai] → AI 名称
- * [time] → 相对时间描述（如"前两个月"、"上周"）
+ * [time] → 相对时间描述（如"两个月前"、"上周"）
  * [now] → 当前时间（如"2026年7月17日（周五）15:30"）
  */
 export function replacePlaceholders(
